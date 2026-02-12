@@ -139,6 +139,25 @@ curl -X POST "https://api.telegram.org/bot<TELEGRAM_BOT_TOKEN>/setWebhook" \
   -d "secret_token=<TELEGRAM_WEBHOOK_SECRET_TOKEN>"
 ```
 
+Note:
+- `secret_token` must be the value of `TELEGRAM_WEBHOOK_SECRET_TOKEN` (random secret), not the bot token.
+- If the bot token was ever exposed publicly, rotate it in BotFather and update secrets.
+
+### Webhook + Commands Smoke Test
+
+1. Verify webhook registration:
+
+```bash
+curl "https://api.telegram.org/bot<TELEGRAM_BOT_TOKEN>/getWebhookInfo"
+```
+
+2. In Telegram chat with the bot, run:
+- `/id` (collect chat_id and ensure allowlist is correct)
+- `/status` (must enqueue a GitHub Action)
+- `/scan {"title":"Apple iPhone 14 Pro 128GB","price_eur":679,"category":"apple_phone"}`
+
+3. Confirm in GitHub Actions that the workflow `Tech Sniper IT Worker` starts from repository dispatch.
+
 ### `/scan` API payload example
 
 ```json
