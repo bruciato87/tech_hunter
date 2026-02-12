@@ -115,6 +115,27 @@ def _safe_error_details(exc: Exception, max_len: int = 220) -> str:
     return raw[: max_len - 3] + "..."
 
 
+def _safe_text(value: str | None, max_len: int = 220) -> str | None:
+    raw = " ".join((value or "").split())
+    if not raw:
+        return None
+    if len(raw) <= max_len:
+        return raw
+    return raw[: max_len - 3] + "..."
+
+
+def _offer_log_payload(offer) -> dict[str, Any]:  # noqa: ANN001
+    return {
+        "platform": offer.platform,
+        "offer_eur": offer.offer_eur,
+        "condition": offer.condition,
+        "currency": offer.currency,
+        "valid": offer.is_valid,
+        "error": _safe_text(offer.error),
+        "source_url": offer.source_url,
+    }
+
+
 def _parse_last_limit(payload: dict[str, Any]) -> int:
     raw = payload.get("limit", 5)
     try:
@@ -235,12 +256,14 @@ async def _run_scan_command(payload: dict[str, Any]) -> int:
                     "best_platform": decision.best_offer.platform if decision.best_offer else None,
                     "spread_eur": decision.spread_eur,
                     "should_notify": decision.should_notify,
+                    "offers": [_offer_log_payload(item) for item in decision.offers],
                 },
                 ensure_ascii=False,
             )
         )
 
-    if payload.get("source") == "telegram":
+    should_send_summary = bool(command_chat) or payload.get("source") in {"telegram", "vercel_scan_api", "manual_debug"}
+    if should_send_summary:
         summary = _format_scan_summary(decisions, manager.min_spread_eur)
         await _send_telegram_message(summary, command_chat)
     return 0

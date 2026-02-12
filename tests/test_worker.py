@@ -10,8 +10,10 @@ from tech_sniper_it.worker import (
     _chunk_telegram_text,
     _coerce_product,
     _format_scan_summary,
+    _offer_log_payload,
     _parse_last_limit,
     _resolve_command,
+    _run_scan_command,
     _run_status_command,
     _safe_error_details,
     _send_telegram_message,
@@ -57,6 +59,24 @@ def test_safe_error_details_truncates() -> None:
     details = _safe_error_details(err, max_len=80)
     assert len(details) == 80
     assert details.endswith("...")
+
+
+def test_offer_log_payload_truncates_error() -> None:
+    class DummyOffer:
+        platform = "rebuy"
+        offer_eur = 123.45
+        condition = "come_nuovo"
+        currency = "EUR"
+        error = "timeout " + ("x" * 400)
+        source_url = "https://rebuy.it/item"
+        is_valid = False
+
+    payload = _offer_log_payload(DummyOffer())
+    assert payload["platform"] == "rebuy"
+    assert payload["offer_eur"] == 123.45
+    assert payload["valid"] is False
+    assert payload["error"] is not None
+    assert len(payload["error"]) <= 220
 
 
 def test_load_products_from_env_json(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -187,3 +207,50 @@ async def test_run_status_command_includes_emojis(monkeypatch: pytest.MonkeyPatc
     assert "🗄️ supabase: on" in text
     assert "💬 telegram alerts default chat: on" in text
     assert "📌 last opportunity: none" in text
+
+
+@pytest.mark.asyncio
+async def test_run_scan_command_sends_summary_for_manual_debug(monkeypatch: pytest.MonkeyPatch) -> None:
+    sent_messages = []
+
+    class DummyDecision:
+        def __init__(self) -> None:
+            self.product = type(
+                "P",
+                (),
+                {
+                    "title": "iPhone",
+                    "price_eur": 679.0,
+                },
+            )()
+            self.normalized_name = "iPhone 14 Pro 128GB"
+            self.best_offer = type("B", (), {"offer_eur": 650.0, "platform": "rebuy"})()
+            self.spread_eur = -29.0
+            self.should_notify = False
+            self.offers = []
+
+    class DummyManager:
+        min_spread_eur = 40.0
+
+        async def evaluate_many(self, products, max_parallel_products=3):  # noqa: ANN001, ANN201
+            return [DummyDecision()]
+
+    async def fake_send(text: str, chat_id: str | None) -> None:
+        sent_messages.append((chat_id, text))
+
+    monkeypatch.setattr("tech_sniper_it.worker.build_default_manager", lambda: DummyManager())
+    monkeypatch.setattr("tech_sniper_it.worker._load_github_event_data", lambda: {})
+    monkeypatch.setattr(
+        "tech_sniper_it.worker.load_products",
+        lambda event_data=None: [
+            type("Product", (), {"title": "iPhone", "price_eur": 679.0, "category": ProductCategory.APPLE_PHONE})()
+        ],
+    )
+    monkeypatch.setattr("tech_sniper_it.worker._send_telegram_message", fake_send)
+
+    exit_code = await _run_scan_command({"source": "manual_debug"})
+
+    assert exit_code == 0
+    assert len(sent_messages) == 1
+    assert sent_messages[0][0] is None
+    assert "Scan completata." in sent_messages[0][1]
