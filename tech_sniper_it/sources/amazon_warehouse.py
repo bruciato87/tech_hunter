@@ -66,10 +66,11 @@ BARRIER_HINTS: dict[str, tuple[str, ...]] = {
         "identificati",
     ),
     "sorry-page": (
-        "<title>ci dispiace",
-        "<title>tut uns leid",
-        "<title>lo sentimos",
-        "<title>sorry",
+        "ci dispiace",
+        "tut uns leid",
+        "toutes nos excuses",
+        "lo sentimos",
+        "sorry",
     ),
 }
 

@@ -83,7 +83,7 @@ def test_detect_page_barriers_flags_captcha_and_consent() -> None:
       </body>
     </html>
     """
-    sorry_html = "<html><head><title>Ci dispiace</title></head><body></body></html>"
+    sorry_html = "<html><head><title>Toutes nos excuses</title></head><body></body></html>"
     captcha_barriers = _detect_page_barriers(captcha_html, "Robot Check")
     consent_barriers = _detect_page_barriers(consent_html, "Cookie settings")
     sorry_barriers = _detect_page_barriers(sorry_html)
