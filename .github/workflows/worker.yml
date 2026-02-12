@@ -36,6 +36,7 @@ jobs:
       MAX_PARALLEL_PRODUCTS: ${{ secrets.MAX_PARALLEL_PRODUCTS }}
       PLAYWRIGHT_NAV_TIMEOUT_MS: ${{ secrets.PLAYWRIGHT_NAV_TIMEOUT_MS }}
       HEADLESS: "true"
+      PYTHONUNBUFFERED: "1"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -63,4 +64,4 @@ jobs:
 
       - name: Run multi-site arbitrage worker
         run: |
-          python -m tech_sniper_it.worker
+          python -u -m tech_sniper_it.worker
