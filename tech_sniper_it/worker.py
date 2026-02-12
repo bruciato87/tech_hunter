@@ -179,6 +179,16 @@ def _format_offers_compact(decision) -> str:  # noqa: ANN001
     return " | ".join(items) if items else "n/d"
 
 
+def _spread_status_badge(spread_eur: float | None, threshold: float) -> tuple[str, str]:
+    if spread_eur is None:
+        return "⚪", "Valutazione incompleta"
+    if spread_eur >= threshold:
+        return "🟢", "OPPORTUNITA"
+    if spread_eur >= 0:
+        return "🟡", "Margine basso"
+    return "🔴", "Sotto costo"
+
+
 def _normalize_http_url(value: str | None) -> str | None:
     raw = (value or "").strip()
     if not raw:
@@ -288,37 +298,41 @@ def _format_scan_summary(decisions: list, threshold: float) -> str:
         "🚀 Tech_Sniper_IT | Scan Report",
         "━━━━━━━━━━━━━━━━━━━━",
         "🔎 Scan completata",
+        "💡 Formula spread: offerta reseller - prezzo Amazon",
         f"📦 Prodotti analizzati: {len(decisions)}",
         f"🎯 Soglia spread: {threshold:.2f} EUR",
         f"✅ Opportunita sopra soglia: {len(profitable)}",
         f"🏁 Miglior spread trovato: {_format_signed_eur(best_spread)}",
     ]
 
+    if not decisions:
+        lines.append("😴 Nessun prodotto analizzato in questa run.")
+        return "\n".join(lines)
+
     for index, decision in enumerate(decisions, start=1):
         best_offer = decision.best_offer
         spread = _format_signed_eur(decision.spread_eur)
-        if decision.spread_eur is None:
-            status_icon = "⚪"
-        elif decision.spread_eur >= threshold:
-            status_icon = "🟢"
-        elif decision.spread_eur >= 0:
-            status_icon = "🟡"
-        else:
-            status_icon = "🔴"
+        status_icon, status_text = _spread_status_badge(decision.spread_eur, threshold)
         product_url = _normalize_http_url(getattr(decision.product, "url", None))
         if not product_url:
             product_url = _amazon_search_url(decision.normalized_name or decision.product.title)
         best_offer_url = _normalize_http_url(getattr(best_offer, "source_url", None) if best_offer else None)
         platform_name = best_offer.platform if best_offer else "n/d"
         platform_icon = _platform_icon(platform_name)
+        decision_label = "🔥 SI" if decision.should_notify else "🫧 no"
+        display_name = decision.normalized_name or getattr(decision.product, "title", "n/d")
+        category = getattr(getattr(decision.product, "category", None), "value", None) or "n/d"
         lines.extend(
             [
                 "",
-                f"{status_icon} Prodotto {index}: {decision.normalized_name}",
+                f"{status_icon} Prodotto {index}: {display_name}",
+                f"🧾 Esito: {status_text}",
+                f"🏷️ Categoria: {category}",
                 f"💶 Amazon: {_format_eur(decision.product.price_eur)}",
                 f"🏆 Best offer: {_format_eur(best_offer.offer_eur if best_offer else None)} ({platform_name})",
                 f"{platform_icon} Reseller top: {platform_name}",
                 f"📈 Spread netto: {spread}",
+                f"🚨 Opportunita: {decision_label}",
                 f"📊 Offerte: {_format_offers_compact(decision)}",
                 f"🛒 Amazon link: {product_url}",
                 f"🔗 Link migliore offerta: {best_offer_url or 'n/d'}",

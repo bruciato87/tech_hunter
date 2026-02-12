@@ -15,14 +15,19 @@ class TelegramNotifier:
             return
         product = decision.product
         best = decision.best_offer
+        platform = best.platform or "n/d"
+        product_name = decision.normalized_name or product.title
         lines = [
-            "Tech_Sniper_IT ALERT",
-            f"Prodotto: {decision.normalized_name}",
-            f"Amazon Warehouse: {product.price_eur:.2f} EUR",
-            f"Miglior offerta: {best.offer_eur:.2f} EUR ({best.platform})",
-            f"Spread: {decision.spread_eur:.2f} EUR",
+            "🚨 Tech_Sniper_IT | Opportunita trovata",
+            "━━━━━━━━━━━━━━━━━━━━",
+            f"📦 Prodotto: {product_name}",
+            f"💶 Amazon Warehouse: {product.price_eur:.2f} EUR",
+            f"🏆 Miglior cash-out: {best.offer_eur:.2f} EUR ({platform})",
+            f"📈 Spread netto: +{decision.spread_eur:.2f} EUR",
+            "⚡ Azione consigliata: verifica disponibilita e prezzo in tempo reale.",
         ]
         if product.url:
-            lines.append(product.url)
+            lines.append(f"🛒 Amazon link: {product.url}")
+        if best.source_url:
+            lines.append(f"🔗 Link reseller: {best.source_url}")
         await self.bot.send_message(chat_id=self.chat_id, text="\n".join(lines))
-
