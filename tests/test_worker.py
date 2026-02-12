@@ -292,3 +292,64 @@ async def test_run_scan_command_sends_summary_for_manual_debug(monkeypatch: pyte
     assert sent_messages[0][0] is None
     assert "🔎 Scan completata" in sent_messages[0][1]
     assert "🏆 Best offer: 650.00 EUR (rebuy)" in sent_messages[0][1]
+
+
+@pytest.mark.asyncio
+async def test_run_scan_command_uses_warehouse_fallback_when_no_input(monkeypatch: pytest.MonkeyPatch) -> None:
+    sent_messages = []
+
+    class DummyDecision:
+        def __init__(self) -> None:
+            self.product = type(
+                "P",
+                (),
+                {
+                    "title": "Apple iPhone 14 Pro 128GB",
+                    "price_eur": 679.0,
+                    "url": "https://www.amazon.it/dp/B0TEST",
+                },
+            )()
+            self.normalized_name = "Apple iPhone 14 Pro 128GB"
+            self.best_offer = type(
+                "B",
+                (),
+                {
+                    "offer_eur": 700.0,
+                    "platform": "rebuy",
+                    "source_url": "https://www.rebuy.it/item/123",
+                },
+            )()
+            self.spread_eur = 21.0
+            self.should_notify = False
+            self.offers = [type("Offer", (), {"platform": "rebuy", "offer_eur": 700.0, "error": None})()]
+
+    class DummyManager:
+        min_spread_eur = 40.0
+
+        async def evaluate_many(self, products, max_parallel_products=3):  # noqa: ANN001, ANN201
+            return [DummyDecision()]
+
+    async def fake_send(text: str, chat_id: str | None) -> None:
+        sent_messages.append((chat_id, text))
+
+    async def fake_fetch_warehouse_products(*, headless: bool, nav_timeout_ms: int):  # noqa: ANN201
+        return [
+            {
+                "title": "Apple iPhone 14 Pro 128GB",
+                "price_eur": 679,
+                "category": "apple_phone",
+                "url": "https://www.amazon.it/dp/B0TEST",
+            }
+        ]
+
+    monkeypatch.setattr("tech_sniper_it.worker.build_default_manager", lambda: DummyManager())
+    monkeypatch.setattr("tech_sniper_it.worker._load_github_event_data", lambda: {})
+    monkeypatch.setattr("tech_sniper_it.worker.load_products", lambda event_data=None: [])
+    monkeypatch.setattr("tech_sniper_it.worker.fetch_amazon_warehouse_products", fake_fetch_warehouse_products)
+    monkeypatch.setattr("tech_sniper_it.worker._send_telegram_message", fake_send)
+
+    exit_code = await _run_scan_command({"source": "manual_debug"})
+
+    assert exit_code == 0
+    assert len(sent_messages) == 1
+    assert "Prodotti analizzati: 1" in sent_messages[0][1]

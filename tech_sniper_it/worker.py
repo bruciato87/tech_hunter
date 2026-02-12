@@ -12,6 +12,7 @@ from telegram import Bot
 
 from tech_sniper_it.manager import build_default_manager
 from tech_sniper_it.models import AmazonProduct, ProductCategory
+from tech_sniper_it.sources import fetch_amazon_warehouse_products
 
 
 MAX_LAST_LIMIT = 10
@@ -126,14 +127,20 @@ def _safe_text(value: str | None, max_len: int = 220) -> str | None:
 
 
 def _offer_log_payload(offer) -> dict[str, Any]:  # noqa: ANN001
+    valid_value = getattr(offer, "is_valid", None)
+    if callable(valid_value):
+        try:
+            valid_value = bool(valid_value())
+        except Exception:
+            valid_value = None
     return {
-        "platform": offer.platform,
-        "offer_eur": offer.offer_eur,
-        "condition": offer.condition,
-        "currency": offer.currency,
-        "valid": offer.is_valid,
-        "error": _safe_text(offer.error),
-        "source_url": offer.source_url,
+        "platform": getattr(offer, "platform", "unknown"),
+        "offer_eur": getattr(offer, "offer_eur", None),
+        "condition": getattr(offer, "condition", None),
+        "currency": getattr(offer, "currency", "EUR"),
+        "valid": valid_value,
+        "error": _safe_text(getattr(offer, "error", None)),
+        "source_url": getattr(offer, "source_url", None),
     }
 
 
@@ -295,14 +302,31 @@ async def _run_scan_command(payload: dict[str, Any]) -> int:
     products = load_products(_load_github_event_data())
     command_chat = _telegram_target_chat(payload)
     if not products:
-        message = (
-            "Nessun prodotto disponibile per lo scan (payload/file/env). "
-            "Puoi opzionalmente passare JSON a /scan, altrimenti configura la sorgente prodotti del worker."
-        )
-        print(message)
-        if payload.get("source") == "telegram":
-            await _send_telegram_message(message, command_chat)
-        return 0
+        print("[scan] No explicit products provided. Trying Amazon Warehouse automatic source (IT+EU).")
+        try:
+            warehouse_items = await fetch_amazon_warehouse_products(
+                headless=_env_or_default("HEADLESS", "true").lower() != "false",
+                nav_timeout_ms=int(_env_or_default("PLAYWRIGHT_NAV_TIMEOUT_MS", "45000")),
+            )
+        except Exception as exc:  # pragma: no cover - defensive fallback
+            warehouse_items = []
+            print(f"[scan] Amazon Warehouse source error: {_safe_error_details(exc)}")
+
+        for item in warehouse_items:
+            try:
+                products.append(_coerce_product(item))
+            except Exception as exc:
+                print(f"[scan] Skipping invalid warehouse product: {exc}")
+
+        if not products:
+            message = (
+                "Nessun prodotto disponibile per lo scan (payload/file/env + Amazon Warehouse IT/EU). "
+                "Puoi passare JSON a /scan o regolare la configurazione warehouse."
+            )
+            print(message)
+            if payload.get("source") == "telegram":
+                await _send_telegram_message(message, command_chat)
+            return 0
 
     max_parallel_products = int(_env_or_default("MAX_PARALLEL_PRODUCTS", "3"))
     print(f"[scan] Loaded products: {len(products)} | max_parallel_products={max_parallel_products}")

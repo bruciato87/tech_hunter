@@ -16,6 +16,14 @@ def _env_or_default(name: str, default: str) -> str:
     return default
 
 
+def _warehouse_enabled() -> bool:
+    return _env_or_default("AMAZON_WAREHOUSE_ENABLED", "true").lower() not in {"0", "false", "no", "off"}
+
+
+def _parse_marketplaces(value: str | None) -> list[str]:
+    return [item.strip().lower() for item in (value or "").split(",") if item.strip()]
+
+
 def main() -> int:
     load_dotenv()
     errors: list[str] = []
@@ -54,6 +62,28 @@ def main() -> int:
         int(_env_or_default("PLAYWRIGHT_NAV_TIMEOUT_MS", "45000"))
     except ValueError:
         errors.append("PLAYWRIGHT_NAV_TIMEOUT_MS must be integer.")
+
+    if _warehouse_enabled():
+        try:
+            int(_env_or_default("AMAZON_WAREHOUSE_MAX_PRODUCTS", "8"))
+        except ValueError:
+            errors.append("AMAZON_WAREHOUSE_MAX_PRODUCTS must be integer.")
+
+        max_price = (os.getenv("AMAZON_WAREHOUSE_MAX_PRICE_EUR") or "").strip()
+        if max_price:
+            try:
+                float(max_price)
+            except ValueError:
+                errors.append("AMAZON_WAREHOUSE_MAX_PRICE_EUR must be numeric when set.")
+
+        marketplaces = _parse_marketplaces(os.getenv("AMAZON_WAREHOUSE_MARKETPLACES")) or ["it", "de", "fr", "es"]
+        unsupported = [item for item in marketplaces if item not in {"it", "de", "fr", "es", "eu"}]
+        if unsupported:
+            warnings.append(
+                "AMAZON_WAREHOUSE_MARKETPLACES has unsupported codes: "
+                + ",".join(sorted(set(unsupported)))
+                + " (supported: it,de,fr,es,eu)."
+            )
 
     if errors:
         print("Environment validation failed:")

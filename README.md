@@ -57,6 +57,11 @@ python -m tech_sniper_it.worker
 - `HEADLESS` (default: `true`)
 - `AMAZON_PRODUCTS_JSON` (optional JSON array)
 - `AMAZON_PRODUCTS_FILE` (optional path to JSON file)
+- `AMAZON_WAREHOUSE_ENABLED` (default: `true`)
+- `AMAZON_WAREHOUSE_MARKETPLACES` (default: `it,eu`; `eu` expands to `de,fr,es`)
+- `AMAZON_WAREHOUSE_MAX_PRODUCTS` (default: `8`)
+- `AMAZON_WAREHOUSE_MAX_PRICE_EUR` (optional ceiling)
+- `AMAZON_WAREHOUSE_QUERIES` (optional comma-separated search seeds)
 
 ## Supabase Setup (RLS Enabled)
 
@@ -124,6 +129,7 @@ Heavy operations are delegated to GitHub Actions. Vercel only validates commands
 - `/id`
 - `/rules`
 - `/scan [json object or json array]` (delegated to GitHub Actions; payload optional)
+  Without payload, worker auto-loads products from Amazon Warehouse IT+EU sources.
 - `/status` (delegated to GitHub Actions)
 - `/last [n]` (delegated to GitHub Actions, max 10 rows)
 
