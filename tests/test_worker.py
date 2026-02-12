@@ -98,7 +98,19 @@ def test_format_scan_summary() -> None:
             self.normalized_name = name
             self.spread_eur = spread
             self.should_notify = should_notify
-            self.best_offer = type("Best", (), {"platform": platform})()
+            self.product = type("Product", (), {"price_eur": 500.0, "url": "https://amazon.it/item"})()
+            self.best_offer = type(
+                "Best",
+                (),
+                {
+                    "platform": platform,
+                    "offer_eur": 620.0,
+                    "source_url": "https://rebuy.it/item",
+                },
+            )()
+            self.offers = [
+                type("Offer", (), {"platform": platform, "offer_eur": 620.0, "error": None})(),
+            ]
 
     summary = _format_scan_summary(
         [
@@ -107,9 +119,10 @@ def test_format_scan_summary() -> None:
         ],
         threshold=80.0,
     )
-    assert "Prodotti analizzati: 2" in summary
-    assert "Opportunita > 80.00 EUR: 1" in summary
-    assert "Top: B" in summary
+    assert "📦 Prodotti analizzati: 2" in summary
+    assert "✅ Opportunita sopra soglia: 1" in summary
+    assert "🏆 Best offer: 620.00 EUR (trenddevice)" in summary
+    assert "🔗 Link migliore offerta: https://rebuy.it/item" in summary
 
 
 @pytest.mark.asyncio
@@ -253,4 +266,5 @@ async def test_run_scan_command_sends_summary_for_manual_debug(monkeypatch: pyte
     assert exit_code == 0
     assert len(sent_messages) == 1
     assert sent_messages[0][0] is None
-    assert "Scan completata." in sent_messages[0][1]
+    assert "🔎 Scan completata" in sent_messages[0][1]
+    assert "🏆 Best offer: 650.00 EUR (rebuy)" in sent_messages[0][1]

@@ -136,6 +136,24 @@ def _offer_log_payload(offer) -> dict[str, Any]:  # noqa: ANN001
     }
 
 
+def _format_eur(value: float | None) -> str:
+    if value is None:
+        return "n/d"
+    return f"{value:.2f} EUR"
+
+
+def _format_offers_compact(decision) -> str:  # noqa: ANN001
+    items: list[str] = []
+    for offer in decision.offers:
+        if offer.offer_eur is not None:
+            items.append(f"{offer.platform}: {_format_eur(offer.offer_eur)}")
+        else:
+            error = _safe_text(offer.error, max_len=60)
+            suffix = f" ({error})" if error else ""
+            items.append(f"{offer.platform}: n/d{suffix}")
+    return " | ".join(items) if items else "n/d"
+
+
 def _parse_last_limit(payload: dict[str, Any]) -> int:
     raw = payload.get("limit", 5)
     try:
@@ -217,30 +235,50 @@ def load_products(event_data: dict[str, Any] | None = None) -> list[AmazonProduc
 def _format_scan_summary(decisions: list, threshold: float) -> str:
     profitable = [item for item in decisions if item.should_notify and item.spread_eur is not None]
     lines = [
-        "Scan completata.",
-        f"Prodotti analizzati: {len(decisions)}",
-        f"Opportunita > {threshold:.2f} EUR: {len(profitable)}",
+        "🔎 Scan completata",
+        f"📦 Prodotti analizzati: {len(decisions)}",
+        f"🎯 Soglia spread: {threshold:.2f} EUR",
+        f"✅ Opportunita sopra soglia: {len(profitable)}",
     ]
-    if profitable:
-        best = max(profitable, key=lambda item: item.spread_eur or -10**9)
-        lines.append(
-            f"Top: {best.normalized_name} | spread {best.spread_eur:.2f} EUR | {best.best_offer.platform if best.best_offer else 'n/a'}"
+
+    for index, decision in enumerate(decisions, start=1):
+        best_offer = decision.best_offer
+        spread = _format_eur(decision.spread_eur)
+        status_icon = "🟢" if decision.should_notify else "⚪"
+        product_url = getattr(decision.product, "url", None) or "n/d"
+        best_offer_url = getattr(best_offer, "source_url", None) if best_offer else None
+        lines.extend(
+            [
+                "",
+                f"{status_icon} Prodotto {index}: {decision.normalized_name}",
+                f"💶 Amazon: {_format_eur(decision.product.price_eur)}",
+                f"🏆 Best offer: {_format_eur(best_offer.offer_eur if best_offer else None)} ({best_offer.platform if best_offer else 'n/d'})",
+                f"📈 Spread: {spread}",
+                f"📊 Offerte: {_format_offers_compact(decision)}",
+                f"🛒 Amazon link: {product_url}",
+                f"🔗 Link migliore offerta: {best_offer_url or 'n/d'}",
+            ]
         )
     return "\n".join(lines)
 
 
 async def _run_scan_command(payload: dict[str, Any]) -> int:
     manager = build_default_manager()
+    print("[scan] Starting worker scan command.")
     products = load_products(_load_github_event_data())
     command_chat = _telegram_target_chat(payload)
     if not products:
-        message = "Nessun prodotto valido nel payload. Usa /scan con JSON prodotto o array."
+        message = (
+            "Nessun prodotto disponibile per lo scan (payload/file/env). "
+            "Puoi opzionalmente passare JSON a /scan, altrimenti configura la sorgente prodotti del worker."
+        )
         print(message)
         if payload.get("source") == "telegram":
             await _send_telegram_message(message, command_chat)
         return 0
 
     max_parallel_products = int(_env_or_default("MAX_PARALLEL_PRODUCTS", "3"))
+    print(f"[scan] Loaded products: {len(products)} | max_parallel_products={max_parallel_products}")
     decisions = await manager.evaluate_many(products, max_parallel_products=max_parallel_products)
     profitable = [item for item in decisions if item.should_notify]
     print(f"Scanned: {len(decisions)} | Profitable: {len(profitable)}")

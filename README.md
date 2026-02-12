@@ -123,7 +123,7 @@ Heavy operations are delegated to GitHub Actions. Vercel only validates commands
 - `/help`
 - `/id`
 - `/rules`
-- `/scan <json object or json array>` (delegated to GitHub Actions)
+- `/scan [json object or json array]` (delegated to GitHub Actions; payload optional)
 - `/status` (delegated to GitHub Actions)
 - `/last [n]` (delegated to GitHub Actions, max 10 rows)
 

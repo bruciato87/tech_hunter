@@ -86,7 +86,7 @@ function commandHelpText() {
     "/help - Mostra questa guida",
     "/id - Mostra chat_id corrente",
     "/rules - Mostra regole arbitraggio",
-    "/scan <json_prodotto|json_array> - Avvia scan su GitHub Actions",
+    "/scan [json_prodotto|json_array] - Avvia scan su GitHub Actions",
     "/status - Stato runtime (via GitHub Actions)",
     "/last [n] - Ultime opportunita da Supabase (via GitHub Actions)",
   ].join("\n");
@@ -174,24 +174,18 @@ module.exports = async function handler(req, res) {
         );
         return res.status(200).json({ ok: true });
       }
-      if (!args) {
-        await sendTelegramMessage(
-          botToken,
-          chatId,
-          "Uso: /scan {\"title\":\"...\",\"price_eur\":123,\"category\":\"apple_phone\"}"
-        );
-        return res.status(200).json({ ok: true });
-      }
-      let products;
-      try {
-        products = parseProductsArg(args);
-      } catch {
-        await sendTelegramMessage(botToken, chatId, "JSON non valido. Invia un oggetto o array JSON.");
-        return res.status(200).json({ ok: true });
-      }
-      if (!products.length) {
-        await sendTelegramMessage(botToken, chatId, "Payload vuoto: nessun prodotto valido.");
-        return res.status(200).json({ ok: true });
+      let products = null;
+      if (args) {
+        try {
+          products = parseProductsArg(args);
+        } catch {
+          await sendTelegramMessage(botToken, chatId, "JSON non valido. Invia un oggetto o array JSON.");
+          return res.status(200).json({ ok: true });
+        }
+        if (!products.length) {
+          await sendTelegramMessage(botToken, chatId, "Payload vuoto: nessun prodotto valido.");
+          return res.status(200).json({ ok: true });
+        }
       }
       await dispatchToGitHub({
         githubToken,
@@ -203,10 +197,18 @@ module.exports = async function handler(req, res) {
           command: "scan",
           chat_id: String(chatId),
           user_id: String(userId || ""),
-          products,
+          ...(products ? { products } : {}),
         },
       });
-      await sendTelegramMessage(botToken, chatId, `Scan accodato su GitHub Actions (${products.length} prodotti).`);
+      if (products) {
+        await sendTelegramMessage(botToken, chatId, `Scan accodato su GitHub Actions (${products.length} prodotti).`);
+      } else {
+        await sendTelegramMessage(
+          botToken,
+          chatId,
+          "Scan accodato su GitHub Actions (modalita default: sorgenti prodotto configurate nel worker)."
+        );
+      }
       return res.status(200).json({ ok: true });
     }
 

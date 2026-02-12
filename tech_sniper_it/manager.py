@@ -37,8 +37,14 @@ class ArbitrageManager:
         self.nav_timeout_ms = nav_timeout_ms
 
     async def evaluate_product(self, product: AmazonProduct) -> ArbitrageDecision:
+        print(
+            f"[scan] Evaluating product | title='{product.title}' | category={product.category.value} | amazon_price={product.price_eur:.2f}"
+        )
         normalized_name = await self.ai_balancer.normalize_product_name(product.title)
+        print(f"[scan] Normalized product name -> '{normalized_name}'")
         valuators = self._build_valuators(product.category)
+        valuator_names = [getattr(valuator, "platform_name", valuator.__class__.__name__) for valuator in valuators]
+        print(f"[scan] Selected valuators -> {valuator_names}")
 
         tasks = [valuator.valuate(product, normalized_name) for valuator in valuators]
         raw_results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -46,6 +52,7 @@ class ArbitrageManager:
         offers: list[ValuationResult] = []
         for raw in raw_results:
             if isinstance(raw, Exception):
+                print(f"[scan] Valuator exception -> {type(raw).__name__}: {raw}")
                 offers.append(
                     ValuationResult(
                         platform="unknown",
@@ -56,11 +63,21 @@ class ArbitrageManager:
                 )
             else:
                 offers.append(raw)
+                print(
+                    "[scan] Offer result -> "
+                    f"platform={raw.platform} | offer={raw.offer_eur} | valid={raw.is_valid} | error={raw.error}"
+                )
 
         valid_offers = [item for item in offers if item.is_valid and item.offer_eur is not None]
         best_offer = max(valid_offers, key=lambda item: item.offer_eur) if valid_offers else None
         spread = round(best_offer.offer_eur - product.price_eur, 2) if best_offer and best_offer.offer_eur is not None else None
         should_notify = spread is not None and spread > self.min_spread_eur
+        print(
+            "[scan] Decision -> "
+            f"best_platform={best_offer.platform if best_offer else None} | "
+            f"best_offer={best_offer.offer_eur if best_offer else None} | "
+            f"spread={spread} | should_notify={should_notify}"
+        )
 
         decision = ArbitrageDecision(
             product=product,
@@ -77,13 +94,17 @@ class ArbitrageManager:
 
     async def evaluate_many(self, products: Iterable[AmazonProduct], max_parallel_products: int = 3) -> list[ArbitrageDecision]:
         semaphore = asyncio.Semaphore(max_parallel_products)
+        items = list(products)
+        print(f"[scan] Parallel evaluation start | products={len(items)} | max_parallel={max_parallel_products}")
 
         async def _run(item: AmazonProduct) -> ArbitrageDecision:
             async with semaphore:
                 return await self.evaluate_product(item)
 
-        tasks = [_run(product) for product in products]
-        return await asyncio.gather(*tasks)
+        tasks = [_run(product) for product in items]
+        decisions = await asyncio.gather(*tasks)
+        print("[scan] Parallel evaluation completed.")
+        return decisions
 
     def _build_valuators(self, category: ProductCategory) -> list:
         common = {"headless": self.headless, "nav_timeout_ms": self.nav_timeout_ms}

@@ -94,6 +94,42 @@ test("telegram webhook dispatches /scan to github actions", async () => {
   assert.equal(payload.client_payload.products.length, 1);
 });
 
+test("telegram webhook dispatches /scan without payload", async () => {
+  resetTelegramEnv();
+  const calls = [];
+  const previousFetch = global.fetch;
+  global.fetch = async (url, options) => {
+    calls.push({ url, options });
+    return {
+      ok: true,
+      text: async () => "",
+    };
+  };
+
+  const req = {
+    method: "POST",
+    headers: { "x-telegram-bot-api-secret-token": "webhook_secret" },
+    body: {
+      message: {
+        chat: { id: 123 },
+        from: { id: 999 },
+        text: "/scan",
+      },
+    },
+  };
+  const res = createRes();
+  await handler(req, res);
+  global.fetch = previousFetch;
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(calls.length, 2);
+  const dispatchCall = calls.find((item) => item.url.includes("/dispatches"));
+  assert.ok(dispatchCall);
+  const payload = JSON.parse(dispatchCall.options.body);
+  assert.equal(payload.client_payload.command, "scan");
+  assert.equal(payload.client_payload.products, undefined);
+});
+
 test("telegram webhook denies unauthorized chat when allowlist is set", async () => {
   resetTelegramEnv();
   process.env.TELEGRAM_ALLOWED_CHAT_IDS = "42";
