@@ -204,6 +204,28 @@ def main() -> int:
     except ValueError:
         errors.append("PLAYWRIGHT_NAV_TIMEOUT_MS must be integer.")
 
+    try:
+        mpb_attempts = int(_env_or_default("MPB_MAX_ATTEMPTS", "3"))
+        if mpb_attempts < 1:
+            errors.append("MPB_MAX_ATTEMPTS must be >= 1.")
+    except ValueError:
+        errors.append("MPB_MAX_ATTEMPTS must be integer.")
+    mpb_use_storage_state = _env_or_default("MPB_USE_STORAGE_STATE", "true").lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+    mpb_storage_state = (os.getenv("MPB_STORAGE_STATE_B64") or "").strip()
+    if mpb_use_storage_state and mpb_storage_state:
+        try:
+            decoded = base64.b64decode(mpb_storage_state).decode("utf-8")
+            parsed = json.loads(decoded)
+            if not isinstance(parsed, dict):
+                warnings.append("MPB_STORAGE_STATE_B64 must decode to a JSON object.")
+        except Exception:
+            warnings.append("MPB_STORAGE_STATE_B64 is not valid base64 JSON.")
+
     trenddevice_email = (os.getenv("TRENDDEVICE_LEAD_EMAIL") or "").strip()
     if trenddevice_email and "@" not in trenddevice_email:
         warnings.append("TRENDDEVICE_LEAD_EMAIL seems invalid (missing '@').")

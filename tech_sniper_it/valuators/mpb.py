@@ -6,6 +6,7 @@ import os
 import re
 import tempfile
 from typing import Any
+from urllib.parse import quote_plus
 
 from bs4 import BeautifulSoup
 from playwright.async_api import Error as PlaywrightError
@@ -43,6 +44,14 @@ SUGGESTION_SELECTORS: tuple[str, ...] = (
     "[data-testid*='result' i] a",
     "a[href*='/sell/']",
 )
+DIRECT_SELL_SELECTORS: tuple[str, ...] = (
+    "a[href*='/it-it/sell/']",
+    "a[href*='/sell/']",
+    "a:has-text('Vendi')",
+    "button:has-text('Vendi')",
+    "a:has-text('Sell')",
+    "button:has-text('Sell')",
+)
 CONDITION_SELECTORS: tuple[str, ...] = (
     "button:has-text('Ottimo')",
     "label:has-text('Ottimo')",
@@ -55,6 +64,9 @@ PRICE_HINTS: tuple[str, ...] = (
     "ricevi",
     "ti paghiamo",
     "stima",
+    "sell",
+    "trade-in",
+    "we pay",
 )
 BLOCKER_HINTS: tuple[str, ...] = (
     "ci siamo quasi",
@@ -62,6 +74,8 @@ BLOCKER_HINTS: tuple[str, ...] = (
     "cloudflare",
     "just a moment",
     "challenge-platform",
+    "enable javascript and cookies to continue",
+    "verify you are human",
 )
 
 
@@ -73,6 +87,14 @@ def _env_or_default(name: str, default: str) -> str:
 
 
 def _load_storage_state_b64() -> str | None:
+    use_storage_state = _env_or_default("MPB_USE_STORAGE_STATE", "true").lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+    if not use_storage_state:
+        return None
     raw = (os.getenv("MPB_STORAGE_STATE_B64") or "").strip()
     if not raw:
         return None
@@ -137,6 +159,13 @@ def _extract_contextual_price(text: str) -> tuple[float | None, str]:
     return value, snippet
 
 
+def _contains_price_hint(text: str) -> bool:
+    lowered = re.sub(r"\s+", " ", text).strip().lower()
+    if not lowered:
+        return False
+    return any(hint in lowered for hint in PRICE_HINTS)
+
+
 async def _apply_stealth_context(context) -> None:  # noqa: ANN001
     script = """
     Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
@@ -161,13 +190,14 @@ class MPBValuator(BaseValuator):
         normalized_name: str,
     ) -> tuple[float | None, str | None, dict[str, Any]]:
         max_attempts = max(1, int(_env_or_default("MPB_MAX_ATTEMPTS", "3")))
+        storage_state_path = _load_storage_state_b64()
         payload: dict[str, Any] = {
             "query": normalized_name,
             "condition_target": "Ottimo",
             "attempts": [],
             "adaptive_fallbacks": {},
+            "storage_state": bool(storage_state_path),
         }
-        storage_state_path = _load_storage_state_b64()
         blocker_hits: list[str] = []
         search_selectors = self._selector_candidates(
             site=self.platform_name,
@@ -179,6 +209,12 @@ class MPBValuator(BaseValuator):
             site=self.platform_name,
             slot="result_open",
             defaults=list(SUGGESTION_SELECTORS),
+            payload=payload,
+        )
+        direct_sell_selectors = self._selector_candidates(
+            site=self.platform_name,
+            slot="direct_sell_open",
+            defaults=list(DIRECT_SELL_SELECTORS),
             payload=payload,
         )
         condition_selectors = self._selector_candidates(
@@ -209,6 +245,30 @@ class MPBValuator(BaseValuator):
                     try:
                         await page.goto(self.base_url, wait_until="domcontentloaded")
                         await self._accept_cookie_if_present(page)
+                        blockers = await self._detect_page_blockers(page)
+                        if blockers:
+                            blocker_hits.extend(blockers)
+                            payload["attempts"].append(
+                                {
+                                    "attempt": attempt,
+                                    "stage": "base_load",
+                                    "status": "blocked",
+                                    "url": page.url,
+                                    "blockers": blockers,
+                                }
+                            )
+                            fallback = await self._direct_search_fallback(
+                                page=page,
+                                attempt=attempt,
+                                normalized_name=normalized_name,
+                                condition_selectors=condition_selectors,
+                                direct_sell_selectors=direct_sell_selectors,
+                                payload=payload,
+                            )
+                            if fallback["offer"] is not None:
+                                return fallback["offer"], fallback["url"], payload
+                            blocker_hits.extend(fallback["blockers"])
+                            continue
 
                         search_selector = await self._wait_for_search_input(page, selectors=search_selectors, timeout_ms=10000)
                         semantic_search = False
@@ -224,8 +284,6 @@ class MPBValuator(BaseValuator):
                             payload["adaptive_fallbacks"]["search_semantic"] = semantic_search
 
                         if not search_selector and not semantic_search:
-                            title = await page.title()
-                            html = await page.content()
                             probe = await self._attach_ui_probe(
                                 payload=payload,
                                 page=page,
@@ -233,18 +291,30 @@ class MPBValuator(BaseValuator):
                                 stage="search_input_missing",
                                 expected_keywords=["mpb", "sell", "search", "camera"],
                             )
-                            blockers = _detect_blockers(title, html, json.dumps(probe, ensure_ascii=False))
+                            blockers = await self._detect_page_blockers(page)
+                            blockers.extend(_detect_blockers(json.dumps(probe, ensure_ascii=False)))
                             blocker_hits.extend(blockers)
                             payload["attempts"].append(
                                 {
                                     "attempt": attempt,
                                     "stage": "search_input",
                                     "status": "missing",
-                                    "title": title,
+                                    "title": await page.title(),
                                     "blockers": blockers,
                                     "ui_drift": probe.get("drift_suspected"),
                                 }
                             )
+                            fallback = await self._direct_search_fallback(
+                                page=page,
+                                attempt=attempt,
+                                normalized_name=normalized_name,
+                                condition_selectors=condition_selectors,
+                                direct_sell_selectors=direct_sell_selectors,
+                                payload=payload,
+                            )
+                            if fallback["offer"] is not None:
+                                return fallback["offer"], fallback["url"], payload
+                            blocker_hits.extend(fallback["blockers"])
                             continue
 
                         await page.wait_for_timeout(1000)
@@ -297,6 +367,17 @@ class MPBValuator(BaseValuator):
                                 stage="price_missing",
                                 expected_keywords=["mpb", "offer", "estimate", "€"],
                             )
+                            fallback = await self._direct_search_fallback(
+                                page=page,
+                                attempt=attempt,
+                                normalized_name=normalized_name,
+                                condition_selectors=condition_selectors,
+                                direct_sell_selectors=direct_sell_selectors,
+                                payload=payload,
+                            )
+                            if fallback["offer"] is not None:
+                                return fallback["offer"], fallback["url"], payload
+                            blocker_hits.extend(fallback["blockers"])
                         payload["attempts"].append(
                             {
                                 "attempt": attempt,
@@ -313,6 +394,7 @@ class MPBValuator(BaseValuator):
                         if price is not None:
                             payload["price_text"] = price_text
                             payload["condition_selected"] = condition_selected
+                            payload["price_source"] = "sell_flow"
                             return price, page.url, payload
                     finally:
                         await context.close()
@@ -323,6 +405,101 @@ class MPBValuator(BaseValuator):
         if blocker_hits:
             raise RuntimeError("MPB blocked by anti-bot challenge (turnstile/cloudflare).")
         raise RuntimeError("MPB price not found after retries.")
+
+    async def _detect_page_blockers(self, page: Page) -> list[str]:
+        try:
+            title = await page.title()
+        except Exception:
+            title = ""
+        try:
+            html = await page.content()
+        except Exception:
+            html = ""
+        return _detect_blockers(title, html)
+
+    async def _direct_search_fallback(
+        self,
+        *,
+        page: Page,
+        attempt: int,
+        normalized_name: str,
+        condition_selectors: list[str],
+        direct_sell_selectors: list[str],
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        search_url = f"https://www.mpb.com/it-it/cerca?q={quote_plus(normalized_name)}"
+        payload["adaptive_fallbacks"]["direct_search"] = True
+        try:
+            await page.goto(search_url, wait_until="domcontentloaded")
+            await page.wait_for_timeout(900)
+            await self._accept_cookie_if_present(page)
+        except PlaywrightError:
+            return {"offer": None, "url": None, "blockers": []}
+
+        blockers = await self._detect_page_blockers(page)
+        if blockers:
+            payload["attempts"].append(
+                {
+                    "attempt": attempt,
+                    "stage": "direct_search",
+                    "status": "blocked",
+                    "url": page.url,
+                    "blockers": blockers,
+                }
+            )
+            return {"offer": None, "url": None, "blockers": blockers}
+
+        opened_sell = await self._click_first(page, direct_sell_selectors, timeout_ms=2500)
+        if not opened_sell:
+            name_tokens = [token for token in re.split(r"\W+", normalized_name) if len(token) >= 3][:4]
+            opened_sell = await self._click_first_semantic(
+                page,
+                keywords=[*name_tokens, "vendi", "sell", "trade"],
+                timeout_ms=2200,
+                selectors=["a", "button", "[role='link']", "[role='button']"],
+            )
+            payload["adaptive_fallbacks"]["direct_sell_semantic"] = opened_sell
+        else:
+            payload["adaptive_fallbacks"]["direct_sell_semantic"] = False
+
+        if opened_sell:
+            await page.wait_for_timeout(1600)
+            await page.wait_for_load_state("domcontentloaded")
+
+        condition_selected = await self._click_first(
+            page,
+            condition_selectors,
+            timeout_ms=3200,
+        )
+        if not condition_selected:
+            condition_selected = await self._click_first_semantic(
+                page,
+                keywords=["ottimo", "excellent", "grade a", "come nuovo"],
+                timeout_ms=1800,
+            )
+            payload["adaptive_fallbacks"]["condition_semantic_direct"] = condition_selected
+        else:
+            payload["adaptive_fallbacks"]["condition_semantic_direct"] = False
+
+        await page.wait_for_timeout(1100)
+        price, price_text = await self._extract_price(page, payload=payload)
+        payload["attempts"].append(
+            {
+                "attempt": attempt,
+                "stage": "direct_search",
+                "status": "ok" if price is not None else "price-missing",
+                "url": page.url,
+                "opened_sell": opened_sell,
+                "condition_selected": condition_selected,
+                "price_text": price_text,
+            }
+        )
+        if price is not None:
+            payload["price_text"] = price_text
+            payload["condition_selected"] = condition_selected
+            payload["price_source"] = "direct_search"
+            return {"offer": price, "url": page.url, "blockers": []}
+        return {"offer": None, "url": None, "blockers": []}
 
     async def _wait_for_search_input(self, page: Page, selectors: list[str], timeout_ms: int = 10000) -> str | None:
         elapsed = 0
@@ -342,6 +519,7 @@ class MPBValuator(BaseValuator):
         return None
 
     async def _extract_price(self, page: Page, *, payload: dict[str, Any] | None = None) -> tuple[float | None, str]:
+        allow_unscoped_selector_price = "/sell" in (page.url or "").lower()
         selector_candidates = self._selector_candidates(
             site=self.platform_name,
             slot="price",
@@ -365,7 +543,7 @@ class MPBValuator(BaseValuator):
                     if price is not None:
                         return price, snippet
                     value = parse_eur_price(text)
-                    if value is not None:
+                    if value is not None and (allow_unscoped_selector_price or _contains_price_hint(text)):
                         return value, text.strip()
             except PlaywrightError:
                 continue

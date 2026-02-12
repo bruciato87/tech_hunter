@@ -78,6 +78,8 @@ python -m tech_sniper_it.worker
 - `PLAYWRIGHT_NAV_TIMEOUT_MS` (default: `45000`)
 - `HEADLESS` (default: `true`)
 - `MPB_MAX_ATTEMPTS` (default: `3`)
+- `MPB_USE_STORAGE_STATE` (default: `true`)
+- `MPB_STORAGE_STATE_B64` (optional base64 Playwright storage state for MPB challenge bypass)
 - `TRENDDEVICE_LEAD_EMAIL` (optional lead email used by TrendDevice wizard when required)
 - `TRENDDEVICE_USE_STORAGE_STATE` (default: `true`)
 - `TRENDDEVICE_STORAGE_STATE_B64` (optional base64 Playwright storage state for logged-in TrendDevice session)
@@ -237,6 +239,26 @@ Keep enabled:
 - `TRENDDEVICE_USE_STORAGE_STATE=true`
 - `TRENDDEVICE_EMAIL_GATE_WAIT_MS=6500` (or slightly higher if your account flow is slow)
 
+### Free Bypass With MPB Session State
+
+MPB can return a Cloudflare/Turnstile page before the sell wizard is visible.
+To improve stability, capture a local Playwright session after challenge resolution and store it as secret.
+
+Generate storage state base64:
+
+```bash
+source .venv/bin/activate
+python scripts/capture_mpb_storage_state.py
+```
+
+Copy the printed base64 value to GitHub Secret:
+
+- `MPB_STORAGE_STATE_B64`
+
+Keep enabled:
+
+- `MPB_USE_STORAGE_STATE=true`
+
 ## Supabase Setup (RLS Enabled)
 
 Migration file is already prepared at:
@@ -277,6 +299,7 @@ Optional secrets:
 - `TELEGRAM_CHAT_ID` (can be moved to Variables)
 - `TRENDDEVICE_LEAD_EMAIL`
 - `TRENDDEVICE_STORAGE_STATE_B64` (recommended if TrendDevice email-gate blocks quote extraction)
+- `MPB_STORAGE_STATE_B64` (recommended if MPB Cloudflare challenge blocks the sell wizard)
 - `AMAZON_WAREHOUSE_STORAGE_STATE_B64` (global fallback)
 - `AMAZON_WAREHOUSE_STORAGE_STATE_B64_IT`
 - `AMAZON_WAREHOUSE_STORAGE_STATE_B64_DE`
@@ -293,6 +316,8 @@ Optional secrets:
 - `PLAYWRIGHT_NAV_TIMEOUT_MS`
 - `TRENDDEVICE_USE_STORAGE_STATE`
 - `TRENDDEVICE_EMAIL_GATE_WAIT_MS`
+- `MPB_MAX_ATTEMPTS`
+- `MPB_USE_STORAGE_STATE`
 - `GEMINI_MODEL`
 - `OPENROUTER_MODEL`
 - `OPENROUTER_BASE_URL`
