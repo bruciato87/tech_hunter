@@ -16,3 +16,9 @@
 
 - Gitleaks workflow runs on pushes and PRs: `.github/workflows/security.yml`.
 - Keep branch protections enabled before opening to collaborators.
+
+## Vercel Webhook Security
+
+- Protect Telegram webhook with `TELEGRAM_WEBHOOK_SECRET_TOKEN`.
+- Restrict command usage with `TELEGRAM_ALLOWED_CHAT_IDS`.
+- Protect `/scan` endpoint with `SCAN_SECRET` bearer token.

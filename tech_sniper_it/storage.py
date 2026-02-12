@@ -38,3 +38,19 @@ class SupabaseStorage:
             self.client.table(self.table).insert(payload).execute()
 
         await asyncio.to_thread(_insert)
+
+    async def get_recent_opportunities(self, limit: int = 5) -> list[dict[str, Any]]:
+        safe_limit = max(1, min(limit, 20))
+
+        def _select() -> list[dict[str, Any]]:
+            response = (
+                self.client.table(self.table)
+                .select("*")
+                .order("created_at", desc=True)
+                .limit(safe_limit)
+                .execute()
+            )
+            data = getattr(response, "data", None)
+            return data if isinstance(data, list) else []
+
+        return await asyncio.to_thread(_select)

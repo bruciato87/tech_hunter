@@ -73,3 +73,55 @@ It creates `public.arbitrage_opportunities`, enables + forces RLS, and adds poli
 - Secret leak scan: `.github/workflows/security.yml` (Gitleaks)
 
 Store all production keys only in GitHub Secrets, never in tracked files.
+
+## Telegram + Vercel Orchestrator
+
+Heavy operations are delegated to GitHub Actions. Vercel only validates commands and enqueues jobs.
+
+### Endpoints
+
+- `POST /telegram/webhook` -> Telegram commands router (rewritten to `api/telegram-webhook.js`)
+- `POST /scan` -> generic scan trigger API (rewritten to `api/scan.js`)
+
+### Telegram Commands
+
+- `/start`
+- `/help`
+- `/id`
+- `/rules`
+- `/scan <json object or json array>` (delegated to GitHub Actions)
+- `/status` (delegated to GitHub Actions)
+- `/last [n]` (delegated to GitHub Actions, max 10 rows)
+
+### Vercel Environment Variables
+
+- `TELEGRAM_BOT_TOKEN`
+- `TELEGRAM_WEBHOOK_SECRET_TOKEN` (recommended)
+- `TELEGRAM_ALLOWED_CHAT_IDS` (comma-separated allowlist, recommended)
+- `GITHUB_TOKEN` (PAT with `repo` + `workflow`)
+- `GITHUB_OWNER`
+- `GITHUB_REPO`
+- `GITHUB_EVENT_TYPE` (default: `scan`)
+- `SCAN_SECRET` (for `/scan` bearer auth)
+
+### Set Telegram Webhook
+
+```bash
+curl -X POST "https://api.telegram.org/bot<TELEGRAM_BOT_TOKEN>/setWebhook" \
+  -d "url=https://<YOUR_VERCEL_DOMAIN>/telegram/webhook" \
+  -d "secret_token=<TELEGRAM_WEBHOOK_SECRET_TOKEN>"
+```
+
+### `/scan` API payload example
+
+```json
+{
+  "products": [
+    {
+      "title": "Apple iPhone 14 Pro 128GB",
+      "price_eur": 679,
+      "category": "apple_phone"
+    }
+  ]
+}
+```

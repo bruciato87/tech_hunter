@@ -9,7 +9,7 @@ on:
         default: "[]"
         type: string
   repository_dispatch:
-    types: [scan]
+    types: [scan, telegram_command]
   schedule:
     - cron: "0 */6 * * *"
 
