@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import os
+import random
 import re
+import tempfile
 from typing import Any
 from urllib.parse import quote_plus, unquote, urljoin, urlparse
 
@@ -347,6 +350,79 @@ def _retry_delay_ms() -> int:
     return max(0, int(_env_or_default("AMAZON_WAREHOUSE_RETRY_DELAY_MS", "700")))
 
 
+def _fail_fast_on_sorry() -> bool:
+    return _is_truthy_env("AMAZON_WAREHOUSE_FAIL_FAST_ON_SORRY", "true")
+
+
+def _stealth_enabled() -> bool:
+    return _is_truthy_env("AMAZON_WAREHOUSE_STEALTH", "true")
+
+
+def _use_storage_state() -> bool:
+    return _is_truthy_env("AMAZON_WAREHOUSE_USE_STORAGE_STATE", "true")
+
+
+def _retry_delay_for_attempt(base_ms: int, attempt: int) -> int:
+    multiplier = max(1, 2 ** max(0, attempt - 1))
+    jitter = random.randint(0, 250)
+    return min(6000, base_ms * multiplier + jitter)
+
+
+def _decode_storage_state_b64() -> str | None:
+    raw = (os.getenv("AMAZON_WAREHOUSE_STORAGE_STATE_B64") or "").strip()
+    if not raw:
+        return None
+    try:
+        decoded = base64.b64decode(raw).decode("utf-8")
+        parsed = json.loads(decoded)
+    except Exception as exc:
+        print(f"[warehouse] Invalid AMAZON_WAREHOUSE_STORAGE_STATE_B64: {type(exc).__name__}: {exc}")
+        return None
+    if not isinstance(parsed, dict):
+        print("[warehouse] AMAZON_WAREHOUSE_STORAGE_STATE_B64 is not a JSON object.")
+        return None
+    handle = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8")
+    try:
+        json.dump(parsed, handle, ensure_ascii=False)
+        handle.flush()
+        return handle.name
+    finally:
+        handle.close()
+
+
+def _remove_file_if_exists(path: str | None) -> None:
+    if not path:
+        return
+    try:
+        os.remove(path)
+    except FileNotFoundError:
+        return
+    except Exception as exc:
+        print(f"[warehouse] Could not remove temp file '{path}': {type(exc).__name__}: {exc}")
+
+
+async def _apply_stealth_context(context, *, host: str) -> None:  # noqa: ANN001
+    if not _stealth_enabled():
+        return
+    languages_map: dict[str, list[str]] = {
+        "www.amazon.it": ["it-IT", "it", "en-US", "en"],
+        "www.amazon.de": ["de-DE", "de", "en-US", "en"],
+        "www.amazon.fr": ["fr-FR", "fr", "en-US", "en"],
+        "www.amazon.es": ["es-ES", "es", "en-US", "en"],
+    }
+    languages = languages_map.get(host, ["it-IT", "it", "en-US", "en"])
+    script = f"""
+    Object.defineProperty(navigator, 'webdriver', {{ get: () => undefined }});
+    Object.defineProperty(navigator, 'languages', {{ get: () => {json.dumps(languages)} }});
+    Object.defineProperty(navigator, 'plugins', {{ get: () => [1, 2, 3, 4, 5] }});
+    window.chrome = window.chrome || {{ runtime: {{}} }};
+    """
+    try:
+        await context.add_init_script(script)
+    except Exception as exc:
+        print(f"[warehouse] Stealth init script failed: {type(exc).__name__}: {exc}")
+
+
 def _choose_from_pool(pool: list[Any], index: int, rotate: bool) -> tuple[Any, int]:
     if not pool:
         return None, index
@@ -368,6 +444,15 @@ def _shorten(text: str | None, limit: int = 64) -> str:
     if len(value) <= limit:
         return value
     return f"{value[: limit - 3]}..."
+
+
+def _should_fail_fast(barriers: list[str], *, proxy_pool_size: int, fail_fast: bool) -> bool:
+    if not fail_fast:
+        return False
+    if proxy_pool_size > 0:
+        return False
+    blocker_barriers = {"sorry-page", "captcha", "robot-check"}
+    return any(barrier in blocker_barriers for barrier in barriers)
 
 
 def _slug(text: str) -> str:
@@ -495,6 +580,14 @@ async def fetch_amazon_warehouse_products(
     user_agents = _load_user_agents()
     max_attempts = _max_attempts_per_query()
     retry_delay_ms = _retry_delay_ms()
+    fail_fast_on_sorry = _fail_fast_on_sorry()
+    stealth = _stealth_enabled()
+    use_storage_state = _use_storage_state()
+    storage_state_path = _decode_storage_state_b64() if use_storage_state else None
+    if use_storage_state and not storage_state_path:
+        print("[warehouse] Storage state enabled but unavailable (missing/invalid). Proceeding without it.")
+    elif storage_state_path:
+        print("[warehouse] Storage state loaded for Amazon authenticated session.")
     rotate_proxy = _is_truthy_env("AMAZON_WAREHOUSE_ROTATE_PROXY", "true")
     rotate_user_agent = _is_truthy_env("AMAZON_WAREHOUSE_ROTATE_USER_AGENT", "true")
 
@@ -508,7 +601,8 @@ async def fetch_amazon_warehouse_products(
         "[warehouse] Rotation config: "
         f"proxy_pool={len(proxy_pool)} rotate_proxy={rotate_proxy} "
         f"user_agents={len(user_agents)} rotate_user_agent={rotate_user_agent} "
-        f"attempts_per_query={max_attempts}"
+        f"attempts_per_query={max_attempts} fail_fast_on_sorry={fail_fast_on_sorry} "
+        f"stealth={stealth} storage_state={'on' if storage_state_path else 'off'}"
     )
 
     async with async_playwright() as playwright:
@@ -552,10 +646,13 @@ async def fetch_amazon_warehouse_products(
                                 "Accept-Language": ACCEPT_LANGUAGE_BY_HOST.get(host, "it-IT,it;q=0.9,en;q=0.8")
                             },
                         }
+                        if storage_state_path:
+                            context_kwargs["storage_state"] = storage_state_path
                         if user_agent:
                             context_kwargs["user_agent"] = user_agent
 
                         context = await browser.new_context(**context_kwargs)
+                        await _apply_stealth_context(context, host=host)
                         page = await context.new_page()
                         page.set_default_timeout(nav_timeout_ms)
                         print(
@@ -598,14 +695,27 @@ async def fetch_amazon_warehouse_products(
                         if parsed:
                             break
 
+                        if _should_fail_fast(
+                            barriers,
+                            proxy_pool_size=len(proxy_pool),
+                            fail_fast=fail_fast_on_sorry,
+                        ):
+                            reason = ",".join(barriers) if barriers else "blocker"
+                            print(
+                                f"[warehouse] Fail-fast on {host} query='{query}' after {reason} "
+                                "because proxy_pool=0."
+                            )
+                            break
+
                         if attempt < max_attempts:
                             reason = ",".join(barriers) if barriers else "empty-parse"
+                            delay_ms = _retry_delay_for_attempt(retry_delay_ms, attempt)
                             print(
-                                f"[warehouse] Retrying {host} query='{query}' in {retry_delay_ms}ms "
+                                f"[warehouse] Retrying {host} query='{query}' in {delay_ms}ms "
                                 f"after {reason}."
                             )
-                            if retry_delay_ms:
-                                await asyncio.sleep(retry_delay_ms / 1000)
+                            if delay_ms:
+                                await asyncio.sleep(delay_ms / 1000)
 
                     for item in parsed:
                         item_url = str(item.get("url") or "")
@@ -626,6 +736,7 @@ async def fetch_amazon_warehouse_products(
                     await browser.close()
                 except Exception:
                     continue
+            _remove_file_if_exists(storage_state_path)
 
     print(f"[warehouse] Collected products: {len(results)}")
     return results

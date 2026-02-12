@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import json
 import os
 from urllib.parse import urlparse
 
@@ -127,6 +129,22 @@ def main() -> int:
                     + proxy
                     + f" ({reason})."
                 )
+
+        use_storage_state = _env_or_default("AMAZON_WAREHOUSE_USE_STORAGE_STATE", "true").lower() not in {
+            "0",
+            "false",
+            "no",
+            "off",
+        }
+        raw_storage_state = (os.getenv("AMAZON_WAREHOUSE_STORAGE_STATE_B64") or "").strip()
+        if use_storage_state and raw_storage_state:
+            try:
+                decoded = base64.b64decode(raw_storage_state).decode("utf-8")
+                parsed = json.loads(decoded)
+                if not isinstance(parsed, dict):
+                    warnings.append("AMAZON_WAREHOUSE_STORAGE_STATE_B64 must decode to a JSON object.")
+            except Exception:
+                warnings.append("AMAZON_WAREHOUSE_STORAGE_STATE_B64 is not valid base64 JSON.")
 
     if errors:
         print("Environment validation failed:")

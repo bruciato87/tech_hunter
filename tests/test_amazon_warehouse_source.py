@@ -1,12 +1,19 @@
 from __future__ import annotations
 
+import base64
+import json
+import os
+
 from tech_sniper_it.sources.amazon_warehouse import (
     _canonical_amazon_url,
+    _decode_storage_state_b64,
     _detect_page_barriers,
     _expand_marketplaces,
     _extract_products_from_html,
     _parse_proxy_entry,
     _parse_user_agent_list,
+    _remove_file_if_exists,
+    _should_fail_fast,
 )
 
 
@@ -114,3 +121,28 @@ def test_parse_user_agent_list_supports_json_and_separator() -> None:
     parsed_pipe = _parse_user_agent_list("UA-3||UA-4")
     assert parsed_json == ["UA-1", "UA-2"]
     assert parsed_pipe == ["UA-3", "UA-4"]
+
+
+def test_should_fail_fast_only_without_proxy_pool() -> None:
+    assert _should_fail_fast(["sorry-page"], proxy_pool_size=0, fail_fast=True) is True
+    assert _should_fail_fast(["captcha"], proxy_pool_size=0, fail_fast=True) is True
+    assert _should_fail_fast(["consent"], proxy_pool_size=0, fail_fast=True) is False
+    assert _should_fail_fast(["sorry-page"], proxy_pool_size=1, fail_fast=True) is False
+    assert _should_fail_fast(["sorry-page"], proxy_pool_size=0, fail_fast=False) is False
+
+
+def test_decode_storage_state_b64_valid(monkeypatch) -> None:  # noqa: ANN001
+    payload = {"cookies": [], "origins": []}
+    encoded = base64.b64encode(json.dumps(payload).encode("utf-8")).decode("ascii")
+    monkeypatch.setenv("AMAZON_WAREHOUSE_STORAGE_STATE_B64", encoded)
+    path = _decode_storage_state_b64()
+    try:
+        assert path is not None
+        assert os.path.exists(path)
+    finally:
+        _remove_file_if_exists(path)
+
+
+def test_decode_storage_state_b64_invalid(monkeypatch) -> None:  # noqa: ANN001
+    monkeypatch.setenv("AMAZON_WAREHOUSE_STORAGE_STATE_B64", "not-base64")
+    assert _decode_storage_state_b64() is None

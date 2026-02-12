@@ -68,6 +68,10 @@ python -m tech_sniper_it.worker
 - `AMAZON_WAREHOUSE_ROTATE_USER_AGENT` (default: `true`)
 - `AMAZON_WAREHOUSE_MAX_ATTEMPTS_PER_QUERY` (default: `3`)
 - `AMAZON_WAREHOUSE_RETRY_DELAY_MS` (default: `700`)
+- `AMAZON_WAREHOUSE_FAIL_FAST_ON_SORRY` (default: `true`, stops retries on hard block pages when no proxy pool is configured)
+- `AMAZON_WAREHOUSE_STEALTH` (default: `true`, enables basic anti-bot fingerprint hardening)
+- `AMAZON_WAREHOUSE_USE_STORAGE_STATE` (default: `true`)
+- `AMAZON_WAREHOUSE_STORAGE_STATE_B64` (optional base64 Playwright storage state for logged-in Amazon session)
 - `AMAZON_WAREHOUSE_DEBUG_ON_EMPTY` (default: `true`, saves diagnostic dump on zero parsed results)
 - `AMAZON_WAREHOUSE_DEBUG_DIR` (default: `/tmp/tech_sniper_it_debug`)
 
