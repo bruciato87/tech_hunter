@@ -614,6 +614,7 @@ async def fetch_amazon_warehouse_products(
     headless: bool = True,
     nav_timeout_ms: int = 45000,
     max_products: int | None = None,
+    search_queries: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     if not _is_enabled():
         return []
@@ -624,7 +625,11 @@ async def fetch_amazon_warehouse_products(
     if not supported_marketplaces:
         print("[warehouse] No supported marketplaces configured.")
         return []
-    queries = _split_csv(os.getenv("AMAZON_WAREHOUSE_QUERIES")) or list(DEFAULT_QUERIES)
+    configured_queries = search_queries or _split_csv(os.getenv("AMAZON_WAREHOUSE_QUERIES")) or list(DEFAULT_QUERIES)
+    queries = [query.strip() for query in configured_queries if query and query.strip()]
+    queries = _dedupe_keep_order(queries)
+    if not queries:
+        queries = list(DEFAULT_QUERIES)
     max_products = max(1, int(max_products or _env_or_default("AMAZON_WAREHOUSE_MAX_PRODUCTS", "8")))
     max_price = _max_price_eur()
     proxy_pool = _load_proxy_pool()

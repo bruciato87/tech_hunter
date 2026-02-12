@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
 import json
 import os
 from pathlib import Path
@@ -130,12 +131,84 @@ DEVICE_ANCHOR_PRICE_FLOOR: tuple[tuple[str, float], ...] = (
     ("xbox", 120.0),
 )
 
+WAREHOUSE_QUERY_FALLBACKS: tuple[str, ...] = (
+    "iphone 14 pro 128gb amazon warehouse",
+    "macbook air m1 amazon warehouse",
+    "sony alpha amazon warehouse",
+    "canon eos amazon warehouse",
+)
+
+DYNAMIC_QUERY_STOPWORDS: tuple[str, ...] = (
+    "amazon",
+    "warehouse",
+    "ricondizionato",
+    "ricondizionata",
+    "reacondicionado",
+    "renewed",
+    "usato",
+    "used",
+    "grade",
+    "ottime",
+    "condizioni",
+    "come",
+    "nuovo",
+)
+
+DYNAMIC_DISCOVERY_QUERY_CATALOG: dict[str, tuple[str, ...]] = {
+    ProductCategory.APPLE_PHONE.value: (
+        "iphone 16 pro 256gb amazon warehouse",
+        "iphone 16 pro max 256gb amazon warehouse",
+        "iphone 15 pro 256gb amazon warehouse",
+        "iphone 15 pro max 256gb amazon warehouse",
+        "iphone 15 128gb amazon warehouse",
+        "iphone 14 pro 256gb amazon warehouse",
+        "iphone 14 pro max 256gb amazon warehouse",
+        "iphone 14 128gb amazon warehouse",
+        "iphone 13 pro 256gb amazon warehouse",
+        "iphone 13 128gb amazon warehouse",
+        "iphone 12 pro 256gb amazon warehouse",
+        "iphone se 2022 128gb amazon warehouse",
+    ),
+    ProductCategory.PHOTOGRAPHY.value: (
+        "sony alpha a7 iii amazon warehouse",
+        "sony alpha a7 iv amazon warehouse",
+        "sony alpha a6400 amazon warehouse",
+        "canon eos r6 amazon warehouse",
+        "canon eos r7 amazon warehouse",
+        "canon eos r50 amazon warehouse",
+        "nikon z6 ii amazon warehouse",
+        "nikon z fc amazon warehouse",
+        "fujifilm x s20 amazon warehouse",
+        "fujifilm x t4 amazon warehouse",
+        "lumix s5 amazon warehouse",
+        "lumix g9 amazon warehouse",
+    ),
+    ProductCategory.GENERAL_TECH.value: (
+        "macbook air m1 256gb amazon warehouse",
+        "macbook air m2 256gb amazon warehouse",
+        "macbook air m3 256gb amazon warehouse",
+        "macbook pro m1 14 amazon warehouse",
+        "macbook pro m2 14 amazon warehouse",
+        "ipad air m1 256gb amazon warehouse",
+        "ipad pro 11 m2 256gb amazon warehouse",
+        "playstation 5 amazon warehouse",
+        "xbox series x amazon warehouse",
+        "nintendo switch oled amazon warehouse",
+        "steam deck 512gb amazon warehouse",
+        "dji mini 3 pro amazon warehouse",
+    ),
+}
+
 
 def _env_or_default(name: str, default: str) -> str:
     value = os.getenv(name)
     if value and value.strip():
         return value.strip()
     return default
+
+
+def _split_csv(value: str | None) -> list[str]:
+    return [item.strip() for item in (value or "").split(",") if item.strip()]
 
 
 def _is_truthy_env(name: str, default: str) -> bool:
@@ -262,6 +335,27 @@ def _median_or_none(values: list[float]) -> float | None:
     return float(median(values))
 
 
+def _parse_datetime_utc(value: Any) -> datetime | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    candidate = raw[:-1] + "+00:00" if raw.endswith("Z") else raw
+    try:
+        parsed = datetime.fromisoformat(candidate)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def _stable_hash(text: str) -> int:
+    total = 0
+    for index, char in enumerate(text):
+        total = (total + ((index + 1) * ord(char))) % 1_000_003
+    return total
+
+
 def _normalize_for_scoring(value: str) -> str:
     raw = (value or "").lower()
     raw = re.sub(r"\([^)]*\)", " ", raw)
@@ -321,6 +415,230 @@ def _liquidity_bonus(title: str) -> float:
         if re.search(pattern, lowered):
             score += bonus
     return score
+
+
+def _normalize_query_terms(value: str, max_tokens: int = 8) -> str | None:
+    raw = (value or "").lower()
+    raw = re.sub(r"[\(\)\[\]\{\}\|,;:'\"`]+", " ", raw)
+    raw = re.sub(r"\s+", " ", raw)
+    raw = re.sub(r"[^a-z0-9+\- ]+", " ", raw)
+    tokens = [item for item in raw.split() if item and item not in DYNAMIC_QUERY_STOPWORDS]
+    if not tokens:
+        return None
+    compact = " ".join(tokens[: max(1, max_tokens)]).strip()
+    return compact or None
+
+
+def _trend_query_from_model_name(model_name: str) -> str | None:
+    terms = _normalize_query_terms(model_name, max_tokens=8)
+    if not terms:
+        return None
+    return f"{terms} amazon warehouse"
+
+
+def _rotating_pick(values: list[str], count: int, *, salt: str) -> list[str]:
+    if count <= 0 or not values:
+        return []
+    unique: list[str] = []
+    for item in values:
+        cleaned = item.strip()
+        if not cleaned or cleaned in unique:
+            continue
+        unique.append(cleaned)
+    if not unique:
+        return []
+    offset = _stable_hash(salt) % len(unique)
+    picked: list[str] = []
+    for index in range(len(unique)):
+        candidate = unique[(offset + index) % len(unique)]
+        picked.append(candidate)
+        if len(picked) >= count:
+            break
+    return picked
+
+
+def _weighted_slot_allocation(weights: dict[str, float], total_slots: int) -> dict[str, int]:
+    if total_slots <= 0:
+        return {key: 0 for key in weights}
+    normalized = {key: max(0.05, float(value)) for key, value in weights.items()}
+    total_weight = sum(normalized.values())
+    if total_weight <= 0:
+        keys = list(normalized.keys())
+        if not keys:
+            return {}
+        base = total_slots // len(keys)
+        slots = {key: base for key in keys}
+        remainder = total_slots - sum(slots.values())
+        for key in keys[:remainder]:
+            slots[key] += 1
+        return slots
+
+    raw_slots: dict[str, float] = {
+        key: (value / total_weight) * float(total_slots)
+        for key, value in normalized.items()
+    }
+    allocated = {key: int(raw_value) for key, raw_value in raw_slots.items()}
+    remainder = total_slots - sum(allocated.values())
+    if remainder <= 0:
+        return allocated
+
+    fractional = sorted(
+        ((key, raw_slots[key] - float(allocated[key])) for key in raw_slots),
+        key=lambda row: row[1],
+        reverse=True,
+    )
+    for index in range(remainder):
+        key = fractional[index % len(fractional)][0]
+        allocated[key] += 1
+    return allocated
+
+
+def _category_trend_weights(scoring_context: dict[str, Any]) -> dict[str, float]:
+    weights: dict[str, float] = {
+        ProductCategory.APPLE_PHONE.value: 1.10,
+        ProductCategory.PHOTOGRAPHY.value: 0.95,
+        ProductCategory.GENERAL_TECH.value: 0.90,
+    }
+    category_spread = scoring_context.get("category_spread_median", {})
+    trend_models = scoring_context.get("trend_models", [])
+
+    for category_value in list(weights):
+        spread = _to_float(category_spread.get(category_value)) if isinstance(category_spread, dict) else None
+        if spread is not None:
+            weights[category_value] += max(-80.0, min(140.0, spread)) / 160.0
+
+        category = ProductCategory.from_raw(category_value)
+        _health_adjustment, health_rate = _valuator_health_adjustment(category, scoring_context)
+        weights[category_value] += max(0.0, health_rate - 0.35)
+
+        if isinstance(trend_models, list):
+            category_trends = [
+                _to_float(item.get("trend_score"))
+                for item in trend_models
+                if isinstance(item, dict) and str(item.get("category")) == category_value
+            ]
+            category_trends = [item for item in category_trends if item is not None]
+            if category_trends:
+                top_score = max(category_trends)
+                weights[category_value] += max(0.0, min(220.0, top_score)) / 260.0
+
+        weights[category_value] = max(0.10, round(weights[category_value], 3))
+
+    return weights
+
+
+def _build_dynamic_warehouse_queries(
+    *,
+    scoring_context: dict[str, Any],
+    target_count: int,
+) -> tuple[list[str], dict[str, Any]]:
+    fallback_queries = _split_csv(os.getenv("AMAZON_WAREHOUSE_QUERIES")) or list(WAREHOUSE_QUERY_FALLBACKS)
+    fallback_queries = [query.strip() for query in fallback_queries if query and query.strip()]
+    fallback_queries = list(dict.fromkeys(fallback_queries))
+
+    if not _is_truthy_env("SCAN_DYNAMIC_QUERIES_ENABLED", "true"):
+        selected = fallback_queries[: max(1, target_count)]
+        return selected, {
+            "mode": "disabled",
+            "target": target_count,
+            "selected": len(selected),
+            "trend_slots": 0,
+            "exploration_slots": len(selected),
+        }
+
+    query_cap = max(4, int(_env_or_default("SCAN_DYNAMIC_QUERY_LIMIT", str(max(8, target_count)))))
+    requested = max(4, min(target_count, query_cap))
+    exploration_ratio = _to_float(_env_or_default("SCAN_DYNAMIC_EXPLORATION_RATIO", "0.35")) or 0.35
+    exploration_ratio = min(0.75, max(0.15, exploration_ratio))
+    trend_min_score = _to_float(_env_or_default("SCAN_DYNAMIC_TREND_MIN_SCORE", "-35")) or -35.0
+    trend_slots = max(1, int(round(requested * (1.0 - exploration_ratio))))
+    exploration_slots = max(1, requested - trend_slots)
+
+    trend_models = scoring_context.get("trend_models", [])
+    trend_candidates: list[dict[str, Any]] = []
+    if isinstance(trend_models, list):
+        for row in trend_models:
+            if not isinstance(row, dict):
+                continue
+            score = _to_float(row.get("trend_score"))
+            model = str(row.get("model", "")).strip()
+            if not model:
+                continue
+            if score is None or score < trend_min_score:
+                continue
+            trend_candidates.append(row)
+
+    queries: list[str] = []
+    query_sources: dict[str, str] = {}
+
+    for row in trend_candidates:
+        if len(queries) >= trend_slots:
+            break
+        model_name = str(row.get("model", "")).strip()
+        query = _trend_query_from_model_name(model_name)
+        if not query or query in query_sources:
+            continue
+        queries.append(query)
+        query_sources[query] = "trend"
+
+    timestamp_bucket = datetime.now(UTC).strftime("%Y%m%d%H")
+    category_weights = _category_trend_weights(scoring_context)
+    exploration_allocation = _weighted_slot_allocation(category_weights, exploration_slots)
+    for category, slots in exploration_allocation.items():
+        if slots <= 0:
+            continue
+        catalog = list(DYNAMIC_DISCOVERY_QUERY_CATALOG.get(category, ()))
+        for query in _rotating_pick(catalog, slots, salt=f"{timestamp_bucket}:{category}"):
+            if query in query_sources:
+                continue
+            queries.append(query)
+            query_sources[query] = f"catalog:{category}"
+            if len(queries) >= requested:
+                break
+        if len(queries) >= requested:
+            break
+
+    if len(queries) < requested:
+        combined_catalog: list[str] = []
+        for items in DYNAMIC_DISCOVERY_QUERY_CATALOG.values():
+            combined_catalog.extend(items)
+        needed = requested - len(queries)
+        for query in _rotating_pick(combined_catalog, needed, salt=f"{timestamp_bucket}:all"):
+            if query in query_sources:
+                continue
+            queries.append(query)
+            query_sources[query] = "catalog:all"
+            if len(queries) >= requested:
+                break
+
+    if len(queries) < requested:
+        for query in fallback_queries:
+            if query in query_sources:
+                continue
+            queries.append(query)
+            query_sources[query] = "fallback"
+            if len(queries) >= requested:
+                break
+
+    if not queries:
+        queries = fallback_queries[: max(1, target_count)]
+        query_sources = {query: "fallback" for query in queries}
+
+    meta = {
+        "mode": "dynamic",
+        "target": requested,
+        "selected": len(queries),
+        "trend_slots": trend_slots,
+        "exploration_slots": exploration_slots,
+        "trend_candidates": len(trend_candidates),
+        "category_weights": category_weights,
+        "source_breakdown": {
+            "trend": sum(1 for source in query_sources.values() if source == "trend"),
+            "catalog": sum(1 for source in query_sources.values() if source.startswith("catalog:")),
+            "fallback": sum(1 for source in query_sources.values() if source == "fallback"),
+        },
+    }
+    return queries, meta
 
 
 def _has_storage_token(text: str) -> bool:
@@ -691,11 +1009,13 @@ async def _build_prioritization_context(manager) -> dict[str, Any]:  # noqa: ANN
     context: dict[str, Any] = {
         "enabled": _is_truthy_env("SCORING_ENABLE", "true"),
         "rows_count": 0,
+        "lookback_days": 0,
         "exact_offer_median": {},
         "exact_confidence": {},
         "category_offer_median": {},
         "category_spread_median": {},
         "platform_health": {},
+        "trend_models": [],
     }
     if not context["enabled"]:
         return context
@@ -721,16 +1041,21 @@ async def _build_prioritization_context(manager) -> dict[str, Any]:  # noqa: ANN
     if not rows:
         return context
 
+    context["lookback_days"] = lookback_days
     exact_offer_samples: dict[str, list[float]] = {}
     category_offer_samples: dict[str, list[float]] = {}
     category_spread_samples: dict[str, list[float]] = {}
     platform_totals: dict[str, int] = {}
     platform_successes: dict[str, int] = {}
+    trend_samples: dict[str, dict[str, Any]] = {}
+    now = datetime.now(UTC)
+    threshold = _to_float(_env_or_default("MIN_SPREAD_EUR", "40")) or 40.0
 
     for row in rows:
         if not isinstance(row, dict):
             continue
-        normalized_name = _normalize_for_scoring(str(row.get("normalized_name", "")))
+        normalized_raw = str(row.get("normalized_name", "")).strip()
+        normalized_name = _normalize_for_scoring(normalized_raw)
         category = ProductCategory.from_raw(str(row.get("category", ""))).value
         best_offer = _to_float(row.get("best_offer_eur"))
         spread = _to_float(row.get("spread_eur"))
@@ -742,9 +1067,10 @@ async def _build_prioritization_context(manager) -> dict[str, Any]:  # noqa: ANN
         if spread is not None:
             category_spread_samples.setdefault(category, []).append(spread)
 
+        valid_platforms: set[str] = set()
         offers_payload = row.get("offers_payload")
         if not isinstance(offers_payload, list):
-            continue
+            offers_payload = []
         for offer_item in offers_payload:
             if not isinstance(offer_item, dict):
                 continue
@@ -755,6 +1081,50 @@ async def _build_prioritization_context(manager) -> dict[str, Any]:  # noqa: ANN
             error = offer_item.get("error")
             if error in (None, ""):
                 platform_successes[platform] = platform_successes.get(platform, 0) + 1
+                if _to_float(offer_item.get("offer_eur")) is not None:
+                    valid_platforms.add(platform)
+
+        if normalized_name:
+            created_at = _parse_datetime_utc(row.get("created_at"))
+            age_days = float(max(0.0, (now - created_at).total_seconds() / 86_400.0)) if created_at else float(lookback_days)
+            recency = max(0.15, min(1.0, 1.0 - (age_days / (lookback_days * 1.35))))
+            liquidity = min(100.0, _liquidity_bonus(normalized_raw or normalized_name))
+            spread_component = max(-180.0, min(220.0, spread if spread is not None else -35.0))
+            platform_bonus = float(min(3, len(valid_platforms)) * 16.0)
+            row_score = ((spread_component * 0.72) + platform_bonus + (liquidity * 0.34)) * recency
+            if spread is not None and spread >= 0:
+                row_score += 10.0 * recency
+            if spread is not None and spread >= threshold:
+                row_score += 18.0 * recency
+            if spread is not None and spread <= -120.0:
+                row_score -= 12.0 * recency
+
+            bucket = trend_samples.setdefault(
+                normalized_name,
+                {
+                    "model": normalized_raw or normalized_name,
+                    "category": category,
+                    "score_sum": 0.0,
+                    "samples": 0,
+                    "positive_hits": 0,
+                    "threshold_hits": 0,
+                    "max_spread": None,
+                    "platforms": set(),
+                    "recency_max": 0.0,
+                },
+            )
+            bucket["score_sum"] += row_score
+            bucket["samples"] += 1
+            bucket["recency_max"] = max(float(bucket["recency_max"]), recency)
+            if spread is not None and spread >= 0:
+                bucket["positive_hits"] += 1
+            if spread is not None and spread > threshold:
+                bucket["threshold_hits"] += 1
+            if spread is not None:
+                current_max_spread = _to_float(bucket.get("max_spread"))
+                bucket["max_spread"] = spread if current_max_spread is None else max(current_max_spread, spread)
+            if valid_platforms:
+                bucket["platforms"].update(valid_platforms)
 
     exact_offer_median: dict[str, float] = {}
     exact_confidence: dict[str, float] = {}
@@ -783,14 +1153,52 @@ async def _build_prioritization_context(manager) -> dict[str, Any]:  # noqa: ANN
         rate = successes / total if total > 0 else 0.0
         platform_health[platform] = {"rate": round(rate, 3), "samples": total}
 
+    trend_models: list[dict[str, Any]] = []
+    for bucket in trend_samples.values():
+        samples = int(bucket.get("samples") or 0)
+        if samples <= 0:
+            continue
+        avg_score = float(bucket.get("score_sum") or 0.0) / float(samples)
+        positive_rate = float(bucket.get("positive_hits") or 0) / float(samples)
+        threshold_rate = float(bucket.get("threshold_hits") or 0) / float(samples)
+        max_spread = _to_float(bucket.get("max_spread"))
+        recency_max = float(bucket.get("recency_max") or 0.0)
+        platform_count = len(bucket.get("platforms", set()))
+        trend_score = avg_score + (positive_rate * 34.0) + (threshold_rate * 52.0) + (min(samples, 8) * 2.8)
+        trend_score += recency_max * 8.0 + (platform_count * 3.0)
+        if max_spread is not None:
+            trend_score += max(0.0, min(180.0, max_spread)) * 0.16
+        trend_models.append(
+            {
+                "model": str(bucket.get("model") or ""),
+                "category": str(bucket.get("category") or ProductCategory.GENERAL_TECH.value),
+                "trend_score": round(trend_score, 2),
+                "samples": samples,
+                "positive_rate": round(positive_rate, 3),
+                "threshold_rate": round(threshold_rate, 3),
+                "max_spread": round(max_spread, 2) if max_spread is not None else None,
+                "platform_count": platform_count,
+            }
+        )
+    trend_models.sort(
+        key=lambda row: (
+            _to_float(row.get("trend_score")) or -9999.0,
+            _to_float(row.get("threshold_rate")) or 0.0,
+            int(row.get("samples") or 0),
+        ),
+        reverse=True,
+    )
+
     context.update(
         {
             "rows_count": len(rows),
+            "lookback_days": lookback_days,
             "exact_offer_median": exact_offer_median,
             "exact_confidence": exact_confidence,
             "category_offer_median": category_offer_median,
             "category_spread_median": category_spread_median,
             "platform_health": platform_health,
+            "trend_models": trend_models[:120],
         }
     )
     return context
@@ -1113,6 +1521,7 @@ async def _run_scan_command(payload: dict[str, Any]) -> int:
             print(f"[scan] AI strategy -> {json.dumps(snapshot, ensure_ascii=False)}")
         except Exception as exc:
             print(f"[scan] AI strategy unavailable: {_safe_error_details(exc)}")
+    scoring_context = await _build_prioritization_context(manager)
     products = load_products(_load_github_event_data())
     command_chat = _telegram_target_chat(payload)
     scan_target_products = max(1, int(_env_or_default("SCAN_TARGET_PRODUCTS", _env_or_default("AMAZON_WAREHOUSE_MAX_PRODUCTS", "12"))))
@@ -1121,16 +1530,52 @@ async def _run_scan_command(payload: dict[str, Any]) -> int:
     if not products:
         print("[scan] No explicit products provided. Trying Amazon Warehouse automatic source (IT+EU).")
         try:
+            query_target = max(4, int(_env_or_default("SCAN_DYNAMIC_QUERY_LIMIT", "12")))
+            dynamic_queries, query_meta = _build_dynamic_warehouse_queries(
+                scoring_context=scoring_context,
+                target_count=min(query_target, candidate_budget),
+            )
+            print(
+                "[scan] Dynamic query planner | "
+                f"mode={query_meta.get('mode')} selected={query_meta.get('selected')}/{query_meta.get('target')} "
+                f"trend_slots={query_meta.get('trend_slots')} exploration_slots={query_meta.get('exploration_slots')} "
+                f"trend_candidates={query_meta.get('trend_candidates', 0)} "
+                f"source_breakdown={json.dumps(query_meta.get('source_breakdown', {}), ensure_ascii=False)}"
+            )
+            query_preview = dynamic_queries[: min(len(dynamic_queries), 12)]
+            if query_preview:
+                print("[scan] Warehouse query preview:")
+                for index, query in enumerate(query_preview, start=1):
+                    print(f"[scan]   q{index}: {query}")
             fetch_kwargs = {
                 "headless": _env_or_default("HEADLESS", "true").lower() != "false",
                 "nav_timeout_ms": int(_env_or_default("PLAYWRIGHT_NAV_TIMEOUT_MS", "45000")),
                 "max_products": candidate_budget,
+                "search_queries": dynamic_queries,
             }
-            try:
-                warehouse_items = await fetch_amazon_warehouse_products(**fetch_kwargs)
-            except TypeError:
-                fetch_kwargs.pop("max_products", None)
-                warehouse_items = await fetch_amazon_warehouse_products(**fetch_kwargs)
+            fetch_attempts = [
+                dict(fetch_kwargs),
+                {key: value for key, value in fetch_kwargs.items() if key != "search_queries"},
+                {key: value for key, value in fetch_kwargs.items() if key != "max_products"},
+                {
+                    key: value
+                    for key, value in fetch_kwargs.items()
+                    if key not in {"search_queries", "max_products"}
+                },
+            ]
+            warehouse_items: list[dict[str, Any]] | None = None
+            type_error: TypeError | None = None
+            for kwargs in fetch_attempts:
+                try:
+                    warehouse_items = await fetch_amazon_warehouse_products(**kwargs)
+                    break
+                except TypeError as exc:
+                    type_error = exc
+                    continue
+            if warehouse_items is None:
+                if type_error is not None:
+                    raise type_error
+                warehouse_items = []
         except Exception as exc:  # pragma: no cover - defensive fallback
             warehouse_items = []
             print(f"[scan] Amazon Warehouse source error: {_safe_error_details(exc)}")
@@ -1167,7 +1612,6 @@ async def _run_scan_command(payload: dict[str, Any]) -> int:
         if len(accessory_drops) > len(preview):
             print(f"[scan] Accessory drop -> ... and {len(accessory_drops) - len(preview)} more.")
     products = await _exclude_non_profitable_candidates(manager, products)
-    scoring_context = await _build_prioritization_context(manager)
     if scoring_context.get("enabled"):
         health_snapshot = scoring_context.get("platform_health", {})
         print(
@@ -1175,6 +1619,7 @@ async def _run_scan_command(payload: dict[str, Any]) -> int:
             f"rows={scoring_context.get('rows_count', 0)} "
             f"exact_models={len(scoring_context.get('exact_offer_median', {}))} "
             f"category_models={len(scoring_context.get('category_offer_median', {}))} "
+            f"trend_models={len(scoring_context.get('trend_models', []))} "
             f"platform_health={json.dumps(health_snapshot, ensure_ascii=False)}"
         )
     else:

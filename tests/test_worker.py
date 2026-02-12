@@ -10,6 +10,8 @@ from tech_sniper_it.worker import (
     _ai_usage_label,
     _ai_usage_stats,
     _amazon_search_url,
+    _build_dynamic_warehouse_queries,
+    _build_prioritization_context,
     _chunk_telegram_text,
     _coerce_product,
     _dedupe_products,
@@ -287,6 +289,90 @@ def test_prioritize_products_prefers_expected_spread_with_scoring_context() -> N
     }
     ordered = _prioritize_products([camera, iphone], scoring_context=context)
     assert ordered[0].title == "Apple iPhone 15 Pro 128GB"
+
+
+def test_build_dynamic_warehouse_queries_prefers_trend_models(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SCAN_DYNAMIC_QUERIES_ENABLED", "true")
+    monkeypatch.setenv("SCAN_DYNAMIC_QUERY_LIMIT", "8")
+    monkeypatch.setenv("SCAN_DYNAMIC_EXPLORATION_RATIO", "0.25")
+    monkeypatch.setenv("SCAN_DYNAMIC_TREND_MIN_SCORE", "0")
+    monkeypatch.delenv("AMAZON_WAREHOUSE_QUERIES", raising=False)
+    context = {
+        "category_spread_median": {
+            ProductCategory.APPLE_PHONE.value: 65.0,
+            ProductCategory.PHOTOGRAPHY.value: 25.0,
+            ProductCategory.GENERAL_TECH.value: -10.0,
+        },
+        "platform_health": {
+            "trenddevice": {"rate": 0.8, "samples": 20},
+            "rebuy": {"rate": 1.0, "samples": 20},
+            "mpb": {"rate": 0.75, "samples": 20},
+        },
+        "trend_models": [
+            {"model": "Apple iPhone 15 Pro 256GB", "category": "apple_phone", "trend_score": 120.0},
+            {"model": "Apple iPhone 14 Pro 128GB", "category": "apple_phone", "trend_score": 95.0},
+            {"model": "Canon EOS R6", "category": "photography", "trend_score": 70.0},
+        ],
+    }
+    queries, meta = _build_dynamic_warehouse_queries(scoring_context=context, target_count=6)
+    assert meta["mode"] == "dynamic"
+    assert len(queries) == 6
+    assert any("iphone 15 pro 256gb amazon warehouse" in item for item in queries)
+    assert any("canon eos r6 amazon warehouse" in item for item in queries)
+    assert meta["source_breakdown"]["trend"] >= 2
+
+
+def test_build_dynamic_warehouse_queries_disabled_uses_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SCAN_DYNAMIC_QUERIES_ENABLED", "false")
+    monkeypatch.setenv(
+        "AMAZON_WAREHOUSE_QUERIES",
+        "iphone 13 128gb amazon warehouse,sony alpha amazon warehouse",
+    )
+    queries, meta = _build_dynamic_warehouse_queries(scoring_context={}, target_count=4)
+    assert meta["mode"] == "disabled"
+    assert queries == [
+        "iphone 13 128gb amazon warehouse",
+        "sony alpha amazon warehouse",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_build_prioritization_context_generates_trend_models(monkeypatch: pytest.MonkeyPatch) -> None:
+    class DummyStorage:
+        async def get_recent_scoring_rows(self, *, lookback_days: int, limit: int):  # noqa: ANN201
+            return [
+                {
+                    "normalized_name": "Apple iPhone 15 Pro 256GB",
+                    "category": "apple_phone",
+                    "best_offer_eur": 780.0,
+                    "spread_eur": 105.0,
+                    "offers_payload": [
+                        {"platform": "trenddevice", "offer_eur": 760.0, "error": None},
+                        {"platform": "rebuy", "offer_eur": 740.0, "error": None},
+                    ],
+                    "created_at": "2026-02-11T10:00:00Z",
+                },
+                {
+                    "normalized_name": "Canon EOS R6",
+                    "category": "photography",
+                    "best_offer_eur": 650.0,
+                    "spread_eur": 48.0,
+                    "offers_payload": [
+                        {"platform": "mpb", "offer_eur": 650.0, "error": None},
+                        {"platform": "rebuy", "offer_eur": 520.0, "error": None},
+                    ],
+                    "created_at": "2026-02-10T10:00:00Z",
+                },
+            ]
+
+    manager = type("M", (), {"storage": DummyStorage()})()
+    monkeypatch.setenv("SCORING_ENABLE", "true")
+    monkeypatch.setenv("SCORING_LOOKBACK_DAYS", "30")
+    context = await _build_prioritization_context(manager)
+    assert context["rows_count"] == 2
+    assert len(context["trend_models"]) >= 2
+    assert context["trend_models"][0]["model"]
+    assert context["trend_models"][0]["trend_score"] >= context["trend_models"][1]["trend_score"]
 
 
 def test_select_balanced_candidates_respects_it_eu_quota(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -649,6 +735,65 @@ async def test_run_scan_command_uses_warehouse_fallback_when_no_input(monkeypatc
     assert len(sent_messages) == 1
     assert "Prodotti analizzati: 1" in sent_messages[0][1]
     assert "✅ Opportunita sopra soglia: 0" in sent_messages[0][1]
+
+
+@pytest.mark.asyncio
+async def test_run_scan_command_passes_dynamic_queries_to_warehouse_fetch(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    class DummyDecision:
+        def __init__(self) -> None:
+            self.product = type("P", (), {"title": "iPhone", "price_eur": 500.0, "url": None})()
+            self.normalized_name = "iPhone 15 Pro 256GB"
+            self.best_offer = type("B", (), {"offer_eur": 520.0, "platform": "rebuy", "source_url": None})()
+            self.spread_eur = 20.0
+            self.should_notify = False
+            self.ai_provider = "openrouter"
+            self.ai_model = "perplexity/sonar"
+            self.ai_mode = "live"
+            self.offers = []
+
+    class DummyManager:
+        min_spread_eur = 40.0
+        storage = None
+
+        async def evaluate_many(self, products, max_parallel_products=3):  # noqa: ANN001, ANN201
+            return [DummyDecision()]
+
+    async def fake_fetch_warehouse_products(**kwargs):  # noqa: ANN201
+        captured.update(kwargs)
+        return [
+            {
+                "title": "Apple iPhone 15 Pro 256GB",
+                "price_eur": 500.0,
+                "category": "apple_phone",
+                "url": "https://www.amazon.it/dp/B0TEST",
+            }
+        ]
+
+    async def fake_send(_text: str, _chat_id: str | None) -> None:
+        return None
+
+    async def fake_scoring_context(_manager):  # noqa: ANN001, ANN201
+        return {"enabled": False, "trend_models": []}
+
+    monkeypatch.setattr("tech_sniper_it.worker.build_default_manager", lambda: DummyManager())
+    monkeypatch.setattr("tech_sniper_it.worker._load_github_event_data", lambda: {})
+    monkeypatch.setattr("tech_sniper_it.worker.load_products", lambda event_data=None: [])
+    monkeypatch.setattr("tech_sniper_it.worker._build_prioritization_context", fake_scoring_context)
+    monkeypatch.setattr(
+        "tech_sniper_it.worker._build_dynamic_warehouse_queries",
+        lambda **kwargs: (["iphone 15 pro 256gb amazon warehouse"], {"mode": "dynamic", "selected": 1, "target": 1}),
+    )
+    monkeypatch.setattr("tech_sniper_it.worker.fetch_amazon_warehouse_products", fake_fetch_warehouse_products)
+    monkeypatch.setattr("tech_sniper_it.worker._send_telegram_message", fake_send)
+
+    exit_code = await _run_scan_command({"source": "manual_debug"})
+
+    assert exit_code == 0
+    assert captured["search_queries"] == ["iphone 15 pro 256gb amazon warehouse"]
+    assert isinstance(captured["max_products"], int)
+    assert captured["max_products"] > 0
 
 
 @pytest.mark.asyncio

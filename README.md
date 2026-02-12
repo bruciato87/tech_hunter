@@ -61,6 +61,10 @@ python -m tech_sniper_it.worker
 - `MAX_PARALLEL_PRODUCTS` (default: `3`)
 - `SCAN_TARGET_PRODUCTS` (default: `12`)
 - `SCAN_CANDIDATE_MULTIPLIER` (default: `4`)
+- `SCAN_DYNAMIC_QUERIES_ENABLED` (default: `true`, enables trend-driven query planning at scan start)
+- `SCAN_DYNAMIC_QUERY_LIMIT` (default: `12`, max auto-generated Amazon Warehouse queries per scan)
+- `SCAN_DYNAMIC_EXPLORATION_RATIO` (default: `0.35`, share of rotating exploration queries vs historical trend queries)
+- `SCAN_DYNAMIC_TREND_MIN_SCORE` (default: `-35`, minimum trend score required for history-driven query inclusion)
 - `EXCLUDE_MIN_KEEP` (default: `4`, re-includes a small slice of excluded URLs to avoid 0/1-product scans)
 - `SCAN_IT_QUOTA` (default: `6`, preferred IT candidates in final selection)
 - `SCAN_EU_QUOTA` (default: `6`, preferred EU candidates in final selection)
@@ -137,6 +141,12 @@ Candidate ordering now also prioritizes likely profitable items first using:
 - market liquidity signals (model families with faster resale)
 - valuator health weighting (penalize categories whose required platforms are currently failing)
 - IT/EU balanced final pick (`SCAN_IT_QUOTA` / `SCAN_EU_QUOTA`)
+
+At scan start, when no explicit payload products are provided, the worker now builds dynamic Amazon Warehouse queries from:
+
+- recent Supabase trend models (spread + recency + reseller coverage),
+- category-level momentum and valuator health,
+- rotating exploration catalog (hourly rotation) to avoid repeatedly scanning the same few objects.
 
 Additionally, accessory guardrails drop non-core device listings (e.g., covers/cases with compatibility text) before valuation to avoid false-positive opportunities.
 
@@ -271,6 +281,10 @@ Optional secrets:
 - `OPENROUTER_MODEL_TRANSIENT_COOLDOWN_SECONDS`
 - `SCAN_TARGET_PRODUCTS`
 - `SCAN_CANDIDATE_MULTIPLIER`
+- `SCAN_DYNAMIC_QUERIES_ENABLED`
+- `SCAN_DYNAMIC_QUERY_LIMIT`
+- `SCAN_DYNAMIC_EXPLORATION_RATIO`
+- `SCAN_DYNAMIC_TREND_MIN_SCORE`
 - `EXCLUDE_MIN_KEEP`
 - `SCAN_IT_QUOTA`
 - `SCAN_EU_QUOTA`

@@ -116,3 +116,33 @@ def test_validate_env_fails_on_invalid_region_quotas(tmp_path: Path) -> None:
     )
     assert result.returncode == 1
     assert "SCAN_IT_QUOTA must be >= 0." in result.stdout
+
+
+def test_validate_env_fails_on_invalid_dynamic_query_limit(tmp_path: Path) -> None:
+    result = _run_validate_env(
+        tmp_path,
+        {
+            "OPENROUTER_API_KEYS": "k1",
+            "MIN_SPREAD_EUR": "40",
+            "MAX_PARALLEL_PRODUCTS": "2",
+            "PLAYWRIGHT_NAV_TIMEOUT_MS": "45000",
+            "SCAN_DYNAMIC_QUERY_LIMIT": "0",
+        },
+    )
+    assert result.returncode == 1
+    assert "SCAN_DYNAMIC_QUERY_LIMIT must be >= 1." in result.stdout
+
+
+def test_validate_env_fails_on_invalid_dynamic_exploration_ratio(tmp_path: Path) -> None:
+    result = _run_validate_env(
+        tmp_path,
+        {
+            "OPENROUTER_API_KEYS": "k1",
+            "MIN_SPREAD_EUR": "40",
+            "MAX_PARALLEL_PRODUCTS": "2",
+            "PLAYWRIGHT_NAV_TIMEOUT_MS": "45000",
+            "SCAN_DYNAMIC_EXPLORATION_RATIO": "1.3",
+        },
+    )
+    assert result.returncode == 1
+    assert "SCAN_DYNAMIC_EXPLORATION_RATIO must be between 0 and 1." in result.stdout

@@ -128,6 +128,25 @@ def main() -> int:
         errors.append("SCAN_CANDIDATE_MULTIPLIER must be integer.")
 
     try:
+        dynamic_query_limit = int(_env_or_default("SCAN_DYNAMIC_QUERY_LIMIT", "12"))
+        if dynamic_query_limit < 1:
+            errors.append("SCAN_DYNAMIC_QUERY_LIMIT must be >= 1.")
+    except ValueError:
+        errors.append("SCAN_DYNAMIC_QUERY_LIMIT must be integer.")
+
+    try:
+        dynamic_exploration_ratio = float(_env_or_default("SCAN_DYNAMIC_EXPLORATION_RATIO", "0.35"))
+        if dynamic_exploration_ratio <= 0 or dynamic_exploration_ratio >= 1:
+            errors.append("SCAN_DYNAMIC_EXPLORATION_RATIO must be between 0 and 1.")
+    except ValueError:
+        errors.append("SCAN_DYNAMIC_EXPLORATION_RATIO must be numeric.")
+
+    try:
+        float(_env_or_default("SCAN_DYNAMIC_TREND_MIN_SCORE", "-35"))
+    except ValueError:
+        errors.append("SCAN_DYNAMIC_TREND_MIN_SCORE must be numeric.")
+
+    try:
         exclude_min_keep = int(_env_or_default("EXCLUDE_MIN_KEEP", "4"))
         if exclude_min_keep < 0:
             errors.append("EXCLUDE_MIN_KEEP must be >= 0.")
