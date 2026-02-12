@@ -90,6 +90,35 @@ COMPATIBILITY_MARKERS: tuple[str, ...] = (
     "für ",
 )
 
+CORE_DEVICE_MARKERS: tuple[str, ...] = (
+    "smartphone",
+    "telefono",
+    "cellulare",
+    "notebook",
+    "laptop",
+    "fotocamera",
+    "mirrorless",
+    "dslr",
+    "console",
+    "ricondizionato",
+    "refurbished",
+    "renewed",
+    "usato",
+)
+
+BUNDLE_INCLUDED_MARKERS: tuple[str, ...] = (
+    "con cover",
+    "cover inclusa",
+    "cover incluso",
+    "custodia inclusa",
+    "custodia incluso",
+    "with case",
+    "case included",
+    "avec coque",
+    "coque incluse",
+    "inklusive hülle",
+)
+
 DEVICE_ANCHOR_PRICE_FLOOR: tuple[tuple[str, float], ...] = (
     ("iphone", 120.0),
     ("macbook", 180.0),
@@ -312,19 +341,54 @@ def _contains_token(text: str, token: str) -> bool:
     return normalized_token in lowered
 
 
+def _device_anchor_floor(title: str) -> float | None:
+    floor: float | None = None
+    for anchor, threshold in DEVICE_ANCHOR_PRICE_FLOOR:
+        if anchor in title:
+            floor = max(floor or 0.0, float(threshold))
+    return floor
+
+
+def _is_core_device_sale_context(
+    title: str,
+    *,
+    price_eur: float,
+    storage_hit: bool,
+    anchor_floor: float | None,
+) -> bool:
+    has_anchor = anchor_floor is not None
+    has_device_marker = any(_contains_token(title, token) for token in CORE_DEVICE_MARKERS)
+    bundle_included = any(_contains_token(title, token) for token in BUNDLE_INCLUDED_MARKERS)
+    if not has_anchor:
+        return False
+    floor = float(anchor_floor or 0.0)
+    if price_eur < floor:
+        return False
+    if storage_hit or has_device_marker:
+        return True
+    if bundle_included and price_eur >= max(120.0, floor):
+        return True
+    return False
+
+
 def _accessory_guardrail_reasons(product: AmazonProduct) -> list[str]:
     title = (product.title or "").lower()
     reasons: list[str] = []
     accessory_hit = any(_contains_token(title, token) for token in ACCESSORY_KEYWORDS)
     compatibility_hit = any(_contains_token(title, token) for token in COMPATIBILITY_MARKERS)
     storage_hit = _has_storage_token(title)
+    anchor_floor = _device_anchor_floor(title)
+    low_price_anchor = bool(anchor_floor is not None and float(product.price_eur) < float(anchor_floor))
+    if low_price_anchor:
+        reasons.append(f"low-price-anchor<{float(anchor_floor):.0f}")
 
-    low_price_anchor = False
-    for anchor, floor in DEVICE_ANCHOR_PRICE_FLOOR:
-        if anchor in title and float(product.price_eur) < floor:
-            low_price_anchor = True
-            reasons.append(f"low-price-anchor:{anchor}<{floor:.0f}")
-            break
+    if accessory_hit and _is_core_device_sale_context(
+        title,
+        price_eur=float(product.price_eur),
+        storage_hit=storage_hit,
+        anchor_floor=anchor_floor,
+    ):
+        return []
 
     if accessory_hit and compatibility_hit:
         reasons.append("accessory+compatibility")

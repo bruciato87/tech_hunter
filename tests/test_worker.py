@@ -83,6 +83,18 @@ def test_filter_non_core_device_candidates_keeps_device_with_cover_included() ->
     assert len(dropped) == 0
 
 
+def test_filter_non_core_device_candidates_keeps_high_price_compatible_bundle() -> None:
+    product = AmazonProduct(
+        title='Apple iPhone 14 Pro 256GB compatible with MagSafe, case included',
+        price_eur=799.0,
+        category=ProductCategory.APPLE_PHONE,
+        source_marketplace="fr",
+    )
+    kept, dropped = _filter_non_core_device_candidates([product])
+    assert len(kept) == 1
+    assert len(dropped) == 0
+
+
 def test_coerce_product_invalid_missing_title() -> None:
     with pytest.raises(ValueError):
         _coerce_product({"price_eur": 100})
