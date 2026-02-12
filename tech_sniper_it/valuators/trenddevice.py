@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import os
 import re
+import tempfile
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 from typing import Any
@@ -111,6 +113,51 @@ NETWORK_PROMO_BLOCKERS: tuple[str, ...] = (
     "reso gratis",
     "rate",
 )
+
+
+def _env_or_default(name: str, default: str) -> str:
+    value = os.getenv(name)
+    if value and value.strip():
+        return value.strip()
+    return default
+
+
+def _use_storage_state() -> bool:
+    value = _env_or_default("TRENDDEVICE_USE_STORAGE_STATE", "true").lower()
+    return value not in {"0", "false", "no", "off"}
+
+
+def _load_storage_state_b64() -> str | None:
+    if not _use_storage_state():
+        return None
+    raw = (os.getenv("TRENDDEVICE_STORAGE_STATE_B64") or "").strip()
+    if not raw:
+        return None
+    try:
+        decoded = base64.b64decode(raw).decode("utf-8")
+        parsed = json.loads(decoded)
+    except Exception:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    handle = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8")
+    try:
+        json.dump(parsed, handle, ensure_ascii=False)
+        handle.flush()
+        return handle.name
+    finally:
+        handle.close()
+
+
+def _remove_file_if_exists(path: str | None) -> None:
+    if not path:
+        return
+    try:
+        os.remove(path)
+    except FileNotFoundError:
+        return
+    except Exception:
+        return
 
 
 @dataclass(slots=True)
@@ -777,10 +824,16 @@ class TrendDeviceValuator(BaseValuator):
             "adaptive_fallbacks": {},
             "network_price_candidates": [],
         }
+        storage_state_path = _load_storage_state_b64()
+        payload["storage_state"] = bool(storage_state_path)
+        email_gate_wait_ms = max(1500, int(_env_or_default("TRENDDEVICE_EMAIL_GATE_WAIT_MS", "6500")))
 
         async with async_playwright() as playwright:
             browser = await playwright.chromium.launch(headless=self.headless)
-            context = await browser.new_context(locale="it-IT")
+            context_kwargs: dict[str, Any] = {"locale": "it-IT"}
+            if storage_state_path:
+                context_kwargs["storage_state"] = storage_state_path
+            context = await browser.new_context(**context_kwargs)
             page = await context.new_page()
             page.set_default_timeout(self.nav_timeout_ms)
             network_price_candidates: list[dict[str, Any]] = []
@@ -788,12 +841,19 @@ class TrendDeviceValuator(BaseValuator):
 
             async def _capture_response_body(response) -> None:  # noqa: ANN001
                 url = str(getattr(response, "url", "") or "")
-                if "trendevice.com" not in url.lower():
-                    return
+                url_lower = url.lower()
                 headers = getattr(response, "headers", {}) or {}
                 content_type = str(headers.get("content-type", "")).lower()
+                request = getattr(response, "request", None)
+                resource_type = str(getattr(request, "resource_type", "")).lower()
+                if "trendevice.com" not in url_lower:
+                    is_api_like = resource_type in {"xhr", "fetch"} or any(
+                        token in content_type for token in ("json", "text", "javascript")
+                    )
+                    if not is_api_like:
+                        return
                 interesting_url = any(
-                    token in url.lower()
+                    token in url_lower
                     for token in ("valut", "offer", "offert", "quote", "quotazione", "/api/", "graphql", "vendi")
                 )
                 if not interesting_url and not any(token in content_type for token in ("json", "text", "javascript")):
@@ -874,6 +934,11 @@ class TrendDeviceValuator(BaseValuator):
                 response_tasks.add(task)
                 task.add_done_callback(lambda done: response_tasks.discard(done))
 
+            async def _drain_response_tasks() -> None:
+                if not response_tasks:
+                    return
+                await asyncio.gather(*tuple(response_tasks), return_exceptions=True)
+
             page.on("response", _on_response)
             try:
                 await page.goto(self.base_url, wait_until="domcontentloaded")
@@ -914,7 +979,20 @@ class TrendDeviceValuator(BaseValuator):
                             submitted_email = await self._submit_email_gate(page, payload)
                             if submitted_email:
                                 payload["wizard_end_reason"] = "email-gate-submitted"
-                                options = await self._wait_for_wizard_options(page, timeout_ms=2800)
+                                await page.wait_for_timeout(email_gate_wait_ms)
+                                options = await self._wait_for_wizard_options(page, timeout_ms=max(2200, email_gate_wait_ms // 2))
+                                if not options:
+                                    await _drain_response_tasks()
+                                    price, price_text = await self._extract_price(page, payload=payload)
+                                    if price is not None:
+                                        payload["price_source"] = "dom-post-email"
+                                        payload["price_text"] = price_text
+                                        return price, page.url, payload
+                                    network_price, network_snippet = _pick_best_network_candidate(network_price_candidates)
+                                    if network_price is not None:
+                                        payload["price_source"] = "network-post-email"
+                                        payload["price_text"] = network_snippet
+                                        return network_price, page.url, payload
                                 if not options:
                                     await self._attach_ui_probe(
                                         payload=payload,
@@ -960,6 +1038,18 @@ class TrendDeviceValuator(BaseValuator):
                         submitted_email = await self._submit_email_gate(page, payload)
                         if submitted_email:
                             payload["wizard_end_reason"] = "email-gate-submitted-stagnant"
+                            await page.wait_for_timeout(email_gate_wait_ms)
+                            await _drain_response_tasks()
+                            price, price_text = await self._extract_price(page, payload=payload)
+                            if price is not None:
+                                payload["price_source"] = "dom-post-email-stagnant"
+                                payload["price_text"] = price_text
+                                return price, page.url, payload
+                            network_price, network_snippet = _pick_best_network_candidate(network_price_candidates)
+                            if network_price is not None:
+                                payload["price_source"] = "network-post-email-stagnant"
+                                payload["price_text"] = network_snippet
+                                return network_price, page.url, payload
                             await self._attach_ui_probe(
                                 payload=payload,
                                 page=page,
@@ -1012,13 +1102,14 @@ class TrendDeviceValuator(BaseValuator):
                     await page.wait_for_timeout(1100)
 
                 if response_tasks:
-                    await asyncio.gather(*tuple(response_tasks), return_exceptions=True)
+                    await _drain_response_tasks()
 
                 if network_price_candidates:
                     payload["network_price_candidates"] = network_price_candidates[-12:]
 
                 price, price_text = await self._extract_price(page, payload=payload)
                 if price is None:
+                    await _drain_response_tasks()
                     network_price, network_snippet = _pick_best_network_candidate(network_price_candidates)
                     if network_price is not None:
                         payload["price_source"] = "network"
@@ -1038,9 +1129,10 @@ class TrendDeviceValuator(BaseValuator):
                 return price, page.url, payload
             finally:
                 if response_tasks:
-                    await asyncio.gather(*tuple(response_tasks), return_exceptions=True)
+                    await _drain_response_tasks()
                 await context.close()
                 await browser.close()
+                _remove_file_if_exists(storage_state_path)
 
 
 __all__ = [

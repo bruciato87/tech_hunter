@@ -72,6 +72,22 @@ def test_validate_env_warns_on_invalid_openrouter_power_json(tmp_path: Path) -> 
     assert "OPENROUTER_MODEL_POWER_JSON is set but invalid" in result.stdout
 
 
+def test_validate_env_warns_on_invalid_trenddevice_storage_state(tmp_path: Path) -> None:
+    result = _run_validate_env(
+        tmp_path,
+        {
+            "GEMINI_API_KEYS": "k1",
+            "MIN_SPREAD_EUR": "40",
+            "MAX_PARALLEL_PRODUCTS": "2",
+            "PLAYWRIGHT_NAV_TIMEOUT_MS": "45000",
+            "TRENDDEVICE_USE_STORAGE_STATE": "true",
+            "TRENDDEVICE_STORAGE_STATE_B64": "invalid-base64",
+        },
+    )
+    assert result.returncode == 0
+    assert "TRENDDEVICE_STORAGE_STATE_B64 is not valid base64 JSON." in result.stdout
+
+
 def test_validate_env_fails_on_invalid_openrouter_max_models(tmp_path: Path) -> None:
     result = _run_validate_env(
         tmp_path,

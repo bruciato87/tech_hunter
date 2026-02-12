@@ -72,6 +72,9 @@ python -m tech_sniper_it.worker
 - `HEADLESS` (default: `true`)
 - `MPB_MAX_ATTEMPTS` (default: `3`)
 - `TRENDDEVICE_LEAD_EMAIL` (optional lead email used by TrendDevice wizard when required)
+- `TRENDDEVICE_USE_STORAGE_STATE` (default: `true`)
+- `TRENDDEVICE_STORAGE_STATE_B64` (optional base64 Playwright storage state for logged-in TrendDevice session)
+- `TRENDDEVICE_EMAIL_GATE_WAIT_MS` (default: `6500`, wait after lead form submit before fallback extraction)
 - `VALUATOR_SELECTOR_OVERRIDES_JSON` (optional JSON selector overrides for automatic UI drift adaptation)
 - `AMAZON_PRODUCTS_JSON` (optional JSON array)
 - `AMAZON_PRODUCTS_FILE` (optional path to JSON file)
@@ -185,6 +188,27 @@ Keep enabled:
 - `AMAZON_WAREHOUSE_STEALTH=true`
 - `AMAZON_WAREHOUSE_FAIL_FAST_ON_SORRY=true`
 
+### Free Bypass With Your TrendDevice Account Session
+
+TrendDevice can stop on the email lead-gate without returning a valuation in the DOM.
+To improve quote extraction reliability, capture a logged-in TrendDevice Playwright session and store it as secret.
+
+Generate storage state base64:
+
+```bash
+source .venv/bin/activate
+python scripts/capture_trenddevice_storage_state.py
+```
+
+Copy the printed base64 value to GitHub Secret:
+
+- `TRENDDEVICE_STORAGE_STATE_B64`
+
+Keep enabled:
+
+- `TRENDDEVICE_USE_STORAGE_STATE=true`
+- `TRENDDEVICE_EMAIL_GATE_WAIT_MS=6500` (or slightly higher if your account flow is slow)
+
 ## Supabase Setup (RLS Enabled)
 
 Migration file is already prepared at:
@@ -223,6 +247,8 @@ Optional secrets:
 
 - `SUPABASE_URL` (can be moved to Variables)
 - `TELEGRAM_CHAT_ID` (can be moved to Variables)
+- `TRENDDEVICE_LEAD_EMAIL`
+- `TRENDDEVICE_STORAGE_STATE_B64` (recommended if TrendDevice email-gate blocks quote extraction)
 
 #### Recommended GitHub Variables (Worker, non-sensitive)
 
@@ -232,6 +258,8 @@ Optional secrets:
 - `MIN_SPREAD_EUR`
 - `MAX_PARALLEL_PRODUCTS`
 - `PLAYWRIGHT_NAV_TIMEOUT_MS`
+- `TRENDDEVICE_USE_STORAGE_STATE`
+- `TRENDDEVICE_EMAIL_GATE_WAIT_MS`
 - `GEMINI_MODEL`
 - `OPENROUTER_MODEL`
 - `OPENROUTER_BASE_URL`

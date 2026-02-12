@@ -170,6 +170,27 @@ def main() -> int:
     trenddevice_email = (os.getenv("TRENDDEVICE_LEAD_EMAIL") or "").strip()
     if trenddevice_email and "@" not in trenddevice_email:
         warnings.append("TRENDDEVICE_LEAD_EMAIL seems invalid (missing '@').")
+    try:
+        trend_wait_ms = int(_env_or_default("TRENDDEVICE_EMAIL_GATE_WAIT_MS", "6500"))
+        if trend_wait_ms < 1000:
+            errors.append("TRENDDEVICE_EMAIL_GATE_WAIT_MS must be >= 1000.")
+    except ValueError:
+        errors.append("TRENDDEVICE_EMAIL_GATE_WAIT_MS must be integer.")
+    trenddevice_use_storage_state = _env_or_default("TRENDDEVICE_USE_STORAGE_STATE", "true").lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+    trenddevice_storage_state = (os.getenv("TRENDDEVICE_STORAGE_STATE_B64") or "").strip()
+    if trenddevice_use_storage_state and trenddevice_storage_state:
+        try:
+            decoded = base64.b64decode(trenddevice_storage_state).decode("utf-8")
+            parsed = json.loads(decoded)
+            if not isinstance(parsed, dict):
+                warnings.append("TRENDDEVICE_STORAGE_STATE_B64 must decode to a JSON object.")
+        except Exception:
+            warnings.append("TRENDDEVICE_STORAGE_STATE_B64 is not valid base64 JSON.")
 
     raw_selector_overrides = (os.getenv("VALUATOR_SELECTOR_OVERRIDES_JSON") or "").strip()
     if raw_selector_overrides and not _parse_selector_overrides(raw_selector_overrides):

@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+import base64
+import json
+
+import pytest
+
 from tech_sniper_it.models import AmazonProduct, ProductCategory
 from tech_sniper_it.valuators.trenddevice import (
     STEP_BATTERY,
@@ -19,10 +24,12 @@ from tech_sniper_it.valuators.trenddevice import (
     _extract_prices_from_json_blob,
     _is_credible_network_candidate,
     _is_email_gate_text,
+    _load_storage_state_b64,
     _normalize_wizard_text,
     _parse_plain_price,
     _pick_best_network_candidate,
     _pick_wizard_option,
+    _remove_file_if_exists,
 )
 
 
@@ -283,3 +290,25 @@ def test_is_credible_network_candidate_rejects_static_promotional_chunk() -> Non
         "source": "context",
     }
     assert _is_credible_network_candidate(candidate) is False
+
+
+def test_load_storage_state_b64_decodes_valid_json(monkeypatch: pytest.MonkeyPatch) -> None:
+    raw = json.dumps({"cookies": [], "origins": []}, ensure_ascii=False).encode("utf-8")
+    encoded = base64.b64encode(raw).decode("ascii")
+    monkeypatch.setenv("TRENDDEVICE_USE_STORAGE_STATE", "true")
+    monkeypatch.setenv("TRENDDEVICE_STORAGE_STATE_B64", encoded)
+    path = _load_storage_state_b64()
+    assert path is not None
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            loaded = json.load(handle)
+        assert isinstance(loaded, dict)
+        assert loaded.get("cookies") == []
+    finally:
+        _remove_file_if_exists(path)
+
+
+def test_load_storage_state_b64_returns_none_on_invalid_payload(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TRENDDEVICE_USE_STORAGE_STATE", "true")
+    monkeypatch.setenv("TRENDDEVICE_STORAGE_STATE_B64", "not-base64")
+    assert _load_storage_state_b64() is None

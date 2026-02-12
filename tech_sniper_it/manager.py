@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from collections import defaultdict
 from collections.abc import Iterable
 from copy import deepcopy
 from typing import Any
@@ -18,6 +19,48 @@ def _env_or_default(name: str, default: str) -> str:
     if value and value.strip():
         return value.strip()
     return default
+
+
+def _valuator_platform_name(valuator: Any) -> str:
+    value = getattr(valuator, "platform_name", None) or getattr(valuator, "platform", None)
+    if isinstance(value, str) and value.strip():
+        return value.strip().lower()
+    return valuator.__class__.__name__.strip().lower()
+
+
+def _valuator_backoff_threshold(platform: str) -> int:
+    default_threshold = max(1, int(_env_or_default("VALUATOR_BACKOFF_DEFAULT_ERRORS", "2")))
+    defaults = {
+        "mpb": 1,
+        "trenddevice": 2,
+    }
+    platform_name = platform.strip().lower()
+    platform_default = defaults.get(platform_name, default_threshold)
+    env_name = f"VALUATOR_BACKOFF_{platform_name.upper()}_ERRORS"
+    return max(1, int(_env_or_default(env_name, str(platform_default))))
+
+
+def _should_backoff_result(result: ValuationResult) -> bool:
+    platform = (result.platform or "").strip().lower()
+    if not platform:
+        return False
+    error_text = (result.error or "").lower()
+    if not error_text:
+        return False
+    if platform == "mpb":
+        return any(
+            marker in error_text
+            for marker in (
+                "anti-bot challenge",
+                "turnstile",
+                "cloudflare",
+                "search input not found",
+                "price not found after retries",
+            )
+        )
+    if platform == "trenddevice":
+        return "email-gate" in error_text
+    return False
 
 
 class ArbitrageManager:
@@ -58,6 +101,10 @@ class ArbitrageManager:
             return []
 
         semaphore = asyncio.Semaphore(max_parallel_products)
+        backoff_enabled = _env_or_default("VALUATOR_CIRCUIT_BREAKER_ENABLED", "true").lower() != "false"
+        disabled_platforms: set[str] = set()
+        platform_failures: dict[str, int] = defaultdict(int)
+        backoff_lock = asyncio.Lock()
 
         async def _normalize_title(title: str) -> tuple[str, str, dict[str, Any]]:
             async with semaphore:
@@ -87,8 +134,39 @@ class ArbitrageManager:
             category_value, normalized_name = key
             category = ProductCategory(category_value)
             sample = group_items[0]
+            all_valuators = self._build_valuators(category)
+            if backoff_enabled:
+                async with backoff_lock:
+                    blocked = set(disabled_platforms)
+                allowed_valuators = [item for item in all_valuators if _valuator_platform_name(item) not in blocked]
+                skipped = [item for item in all_valuators if _valuator_platform_name(item) in blocked]
+                if skipped:
+                    skipped_names = [_valuator_platform_name(item) for item in skipped]
+                    print(
+                        "[scan] Valuator skipped by circuit breaker | "
+                        f"platforms={skipped_names} | category={category.value}"
+                    )
+            else:
+                allowed_valuators = all_valuators
+
             async with semaphore:
-                offers = await self._evaluate_offers(category, sample, normalized_name)
+                offers = await self._evaluate_with_valuators(allowed_valuators, sample, normalized_name)
+
+            if backoff_enabled:
+                async with backoff_lock:
+                    for offer in offers:
+                        if not _should_backoff_result(offer):
+                            continue
+                        platform = (offer.platform or "").strip().lower()
+                        platform_failures[platform] += 1
+                        threshold = _valuator_backoff_threshold(platform)
+                        if platform_failures[platform] >= threshold and platform not in disabled_platforms:
+                            disabled_platforms.add(platform)
+                            print(
+                                "[scan] Valuator circuit breaker triggered | "
+                                f"platform={platform} hits={platform_failures[platform]} threshold={threshold} "
+                                f"last_error={offer.error}"
+                            )
             return key, offers
 
         grouped_rows = await asyncio.gather(*(_valuate_group(key, values) for key, values in grouped.items()))
@@ -104,6 +182,11 @@ class ArbitrageManager:
         notify_tasks = [self._persist_and_notify(item) for item in decisions if item.should_notify]
         if notify_tasks:
             await asyncio.gather(*notify_tasks)
+        if backoff_enabled and disabled_platforms:
+            print(
+                "[scan] Valuator circuit breaker summary | "
+                f"disabled={sorted(disabled_platforms)} failures={dict(platform_failures)}"
+            )
         print("[scan] Parallel evaluation completed.")
         return decisions
 
@@ -163,6 +246,17 @@ class ArbitrageManager:
         normalized_name: str,
     ) -> list[ValuationResult]:
         valuators = self._build_valuators(category)
+        return await self._evaluate_with_valuators(valuators, product, normalized_name)
+
+    async def _evaluate_with_valuators(
+        self,
+        valuators: list[Any],
+        product: AmazonProduct,
+        normalized_name: str,
+    ) -> list[ValuationResult]:
+        if not valuators:
+            print("[scan] No valuators available for this product after runtime filters.")
+            return []
         valuator_names = [getattr(valuator, "platform_name", valuator.__class__.__name__) for valuator in valuators]
         print(f"[scan] Selected valuators -> {valuator_names}")
 
