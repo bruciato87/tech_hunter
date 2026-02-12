@@ -85,6 +85,13 @@ Run the complete suite locally:
 ./scripts/run_tests.sh
 ```
 
+Coverage gate for Python tests is enabled (`pytest-cov`) with baseline `55%` by default.
+Override for stricter checks when needed:
+
+```bash
+PY_COVERAGE_FAIL_UNDER=65 ./scripts/run_tests.sh
+```
+
 Install/update git hooks manually:
 
 ```bash

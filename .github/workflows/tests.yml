@@ -33,6 +33,8 @@ jobs:
           pip install -r requirements-dev.txt
 
       - name: Run full test suite
+        env:
+          PY_COVERAGE_FAIL_UNDER: "55"
         run: |
           ./scripts/run_tests.sh
 

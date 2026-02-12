@@ -9,3 +9,6 @@ __pycache__/
 .vercel/
 .vercel
 .env*.local
+.coverage
+htmlcov/
+coverage.xml
