@@ -7,9 +7,11 @@ import pytest
 
 from tech_sniper_it.models import ProductCategory
 from tech_sniper_it.worker import (
+    _amazon_search_url,
     _chunk_telegram_text,
     _coerce_product,
     _format_scan_summary,
+    _normalize_http_url,
     _offer_log_payload,
     _parse_last_limit,
     _resolve_command,
@@ -79,6 +81,14 @@ def test_offer_log_payload_truncates_error() -> None:
     assert len(payload["error"]) <= 220
 
 
+def test_normalize_http_url_adds_scheme() -> None:
+    assert _normalize_http_url("amazon.it/dp/B0ABC123") == "https://amazon.it/dp/B0ABC123"
+
+
+def test_amazon_search_url_builder() -> None:
+    assert _amazon_search_url("iPhone 14 Pro 128GB") == "https://www.amazon.it/s?k=iPhone+14+Pro+128GB"
+
+
 def test_load_products_from_env_json(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv(
         "AMAZON_PRODUCTS_JSON",
@@ -123,6 +133,20 @@ def test_format_scan_summary() -> None:
     assert "✅ Opportunita sopra soglia: 1" in summary
     assert "🏆 Best offer: 620.00 EUR (trenddevice)" in summary
     assert "🔗 Link migliore offerta: https://rebuy.it/item" in summary
+
+
+def test_format_scan_summary_falls_back_to_amazon_search_link() -> None:
+    class DummyDecision:
+        def __init__(self) -> None:
+            self.normalized_name = "Apple iPhone 14 Pro 128GB"
+            self.spread_eur = 10.0
+            self.should_notify = False
+            self.product = type("Product", (), {"price_eur": 500.0, "url": None, "title": "Apple iPhone 14 Pro 128GB"})()
+            self.best_offer = type("Best", (), {"platform": "rebuy", "offer_eur": 510.0, "source_url": None})()
+            self.offers = [type("Offer", (), {"platform": "rebuy", "offer_eur": 510.0, "error": None})()]
+
+    summary = _format_scan_summary([DummyDecision()], threshold=40.0)
+    assert "🛒 Amazon link: https://www.amazon.it/s?k=Apple+iPhone+14+Pro+128GB" in summary
 
 
 @pytest.mark.asyncio

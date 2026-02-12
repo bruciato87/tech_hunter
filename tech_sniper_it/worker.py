@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote_plus, urlparse
 
 from dotenv import load_dotenv
 from telegram import Bot
@@ -154,6 +155,30 @@ def _format_offers_compact(decision) -> str:  # noqa: ANN001
     return " | ".join(items) if items else "n/d"
 
 
+def _normalize_http_url(value: str | None) -> str | None:
+    raw = (value or "").strip()
+    if not raw:
+        return None
+
+    candidate = raw
+    if raw.startswith("//"):
+        candidate = f"https:{raw}"
+    elif not raw.startswith(("http://", "https://")):
+        if "." in raw and " " not in raw:
+            candidate = f"https://{raw}"
+        else:
+            return None
+
+    parsed = urlparse(candidate)
+    if parsed.scheme in {"http", "https"} and parsed.netloc:
+        return candidate
+    return None
+
+
+def _amazon_search_url(query: str) -> str:
+    return f"https://www.amazon.it/s?k={quote_plus(query)}"
+
+
 def _parse_last_limit(payload: dict[str, Any]) -> int:
     raw = payload.get("limit", 5)
     try:
@@ -245,8 +270,10 @@ def _format_scan_summary(decisions: list, threshold: float) -> str:
         best_offer = decision.best_offer
         spread = _format_eur(decision.spread_eur)
         status_icon = "🟢" if decision.should_notify else "⚪"
-        product_url = getattr(decision.product, "url", None) or "n/d"
-        best_offer_url = getattr(best_offer, "source_url", None) if best_offer else None
+        product_url = _normalize_http_url(getattr(decision.product, "url", None))
+        if not product_url:
+            product_url = _amazon_search_url(decision.normalized_name or decision.product.title)
+        best_offer_url = _normalize_http_url(getattr(best_offer, "source_url", None) if best_offer else None)
         lines.extend(
             [
                 "",
