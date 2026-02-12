@@ -67,6 +67,7 @@ python -m tech_sniper_it.worker
 - `SCORING_ENABLE` (default: `true`, enables historical expected-spread ranking)
 - `SCORING_LOOKBACK_DAYS` (default: `30`)
 - `SCORING_HISTORY_LIMIT` (default: `2000`)
+- `SCAN_FILTER_ACCESSORIES` (default: `true`, blocks covers/cases/accessories from deal evaluation)
 - `PLAYWRIGHT_NAV_TIMEOUT_MS` (default: `45000`)
 - `HEADLESS` (default: `true`)
 - `MPB_MAX_ATTEMPTS` (default: `3`)
@@ -133,6 +134,8 @@ Candidate ordering now also prioritizes likely profitable items first using:
 - market liquidity signals (model families with faster resale)
 - valuator health weighting (penalize categories whose required platforms are currently failing)
 - IT/EU balanced final pick (`SCAN_IT_QUOTA` / `SCAN_EU_QUOTA`)
+
+Additionally, accessory guardrails drop non-core device listings (e.g., covers/cases with compatibility text) before valuation to avoid false-positive opportunities.
 
 ### UI Drift Auto-Adaptation
 
@@ -246,6 +249,7 @@ Optional secrets:
 - `SCORING_ENABLE`
 - `SCORING_LOOKBACK_DAYS`
 - `SCORING_HISTORY_LIMIT`
+- `SCAN_FILTER_ACCESSORIES`
 - `AMAZON_WAREHOUSE_ENABLED`
 - `AMAZON_WAREHOUSE_MARKETPLACES`
 - `AMAZON_WAREHOUSE_MAX_PRODUCTS`

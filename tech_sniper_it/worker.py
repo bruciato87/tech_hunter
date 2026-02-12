@@ -45,6 +45,62 @@ LIQUIDITY_PATTERNS: tuple[tuple[str, float], ...] = (
     (r"\bxbox\s*series\s*x\b", 35.0),
 )
 
+ACCESSORY_KEYWORDS: tuple[str, ...] = (
+    "custodia",
+    "coque",
+    "hulle",
+    "hülle",
+    "funda",
+    "cover",
+    "case",
+    "bumper",
+    "sleeve",
+    "shell",
+    "pellicola",
+    "screen protector",
+    "vetro temperato",
+    "protezione schermo",
+    "caricatore",
+    "charger",
+    "cavo",
+    "cable",
+    "adattatore",
+    "adapter",
+    "alimentatore",
+    "mouse",
+    "tastiera",
+    "keyboard",
+    "supporto",
+    "stand",
+    "dock",
+    "hub usb",
+    "borsa",
+    "bag",
+    "zaino",
+)
+
+COMPATIBILITY_MARKERS: tuple[str, ...] = (
+    "compatibile con",
+    "compatible with",
+    "compatible avec",
+    "compatible",
+    "pour ",
+    "for ",
+    "per ",
+    "für ",
+)
+
+DEVICE_ANCHOR_PRICE_FLOOR: tuple[tuple[str, float], ...] = (
+    ("iphone", 120.0),
+    ("macbook", 180.0),
+    ("ipad", 100.0),
+    ("canon eos", 180.0),
+    ("sony alpha", 180.0),
+    ("mirrorless", 180.0),
+    ("playstation", 120.0),
+    ("xbox", 120.0),
+)
+
 
 def _env_or_default(name: str, default: str) -> str:
     value = os.getenv(name)
@@ -236,6 +292,63 @@ def _liquidity_bonus(title: str) -> float:
         if re.search(pattern, lowered):
             score += bonus
     return score
+
+
+def _has_storage_token(text: str) -> bool:
+    return bool(re.search(r"\b\d{2,4}\s?(gb|tb)\b", text.lower()))
+
+
+def _contains_token(text: str, token: str) -> bool:
+    lowered = text.lower()
+    normalized_token = token.lower()
+    if normalized_token.strip() == "for":
+        return bool(re.search(r"\bfor\b", lowered))
+    if normalized_token.strip() == "per":
+        return bool(re.search(r"\bper\b", lowered))
+    if normalized_token.strip() == "pour":
+        return bool(re.search(r"\bpour\b", lowered))
+    if normalized_token.strip() == "für":
+        return "für" in lowered or "fur " in lowered
+    return normalized_token in lowered
+
+
+def _accessory_guardrail_reasons(product: AmazonProduct) -> list[str]:
+    title = (product.title or "").lower()
+    reasons: list[str] = []
+    accessory_hit = any(_contains_token(title, token) for token in ACCESSORY_KEYWORDS)
+    compatibility_hit = any(_contains_token(title, token) for token in COMPATIBILITY_MARKERS)
+    storage_hit = _has_storage_token(title)
+
+    low_price_anchor = False
+    for anchor, floor in DEVICE_ANCHOR_PRICE_FLOOR:
+        if anchor in title and float(product.price_eur) < floor:
+            low_price_anchor = True
+            reasons.append(f"low-price-anchor:{anchor}<{floor:.0f}")
+            break
+
+    if accessory_hit and compatibility_hit:
+        reasons.append("accessory+compatibility")
+    if accessory_hit and low_price_anchor:
+        reasons.append("accessory+low-price")
+    if accessory_hit and (not storage_hit) and float(product.price_eur) < 80.0:
+        reasons.append("accessory-no-storage-low-price")
+    return reasons
+
+
+def _filter_non_core_device_candidates(products: list[AmazonProduct]) -> tuple[list[AmazonProduct], list[str]]:
+    if not _is_truthy_env("SCAN_FILTER_ACCESSORIES", "true"):
+        return products, []
+    kept: list[AmazonProduct] = []
+    dropped_logs: list[str] = []
+    for item in products:
+        reasons = _accessory_guardrail_reasons(item)
+        if reasons:
+            dropped_logs.append(
+                f"title='{_safe_text(item.title, max_len=90)}' price={item.price_eur:.2f} reasons={','.join(reasons)}"
+            )
+            continue
+        kept.append(item)
+    return kept, dropped_logs
 
 
 def _offer_log_payload(offer) -> dict[str, Any]:  # noqa: ANN001
@@ -974,6 +1087,17 @@ async def _run_scan_command(payload: dict[str, Any]) -> int:
     if len(deduped) != len(products):
         print(f"[scan] Deduplicated products: {len(products)} -> {len(deduped)}")
     products = deduped
+    products, accessory_drops = _filter_non_core_device_candidates(products)
+    if accessory_drops:
+        print(
+            "[scan] Accessory guardrail applied | "
+            f"dropped={len(accessory_drops)} kept={len(products)}"
+        )
+        preview = accessory_drops[:5]
+        for row in preview:
+            print(f"[scan] Accessory drop -> {row}")
+        if len(accessory_drops) > len(preview):
+            print(f"[scan] Accessory drop -> ... and {len(accessory_drops) - len(preview)} more.")
     products = await _exclude_non_profitable_candidates(manager, products)
     scoring_context = await _build_prioritization_context(manager)
     if scoring_context.get("enabled"):

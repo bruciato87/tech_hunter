@@ -14,6 +14,7 @@ from tech_sniper_it.worker import (
     _coerce_product,
     _dedupe_products,
     _exclude_non_profitable_candidates,
+    _filter_non_core_device_candidates,
     _format_scan_summary,
     _is_truthy_env,
     _normalize_http_url,
@@ -48,6 +49,38 @@ def test_coerce_product_keeps_source_marketplace() -> None:
         }
     )
     assert product.source_marketplace == "de"
+
+
+def test_filter_non_core_device_candidates_drops_macbook_cover() -> None:
+    cover = AmazonProduct(
+        title='Soonjet compatible avec MacBook Air 13" A2337 A2179 A1932 coque',
+        price_eur=24.99,
+        category=ProductCategory.GENERAL_TECH,
+        source_marketplace="fr",
+    )
+    device = AmazonProduct(
+        title="Apple MacBook Air 13 M1 8GB 256GB",
+        price_eur=699.0,
+        category=ProductCategory.GENERAL_TECH,
+        source_marketplace="it",
+    )
+    kept, dropped = _filter_non_core_device_candidates([cover, device])
+    assert len(kept) == 1
+    assert kept[0].title == "Apple MacBook Air 13 M1 8GB 256GB"
+    assert len(dropped) == 1
+    assert "accessory" in dropped[0]
+
+
+def test_filter_non_core_device_candidates_keeps_device_with_cover_included() -> None:
+    product = AmazonProduct(
+        title="Apple iPhone 14 Pro 128GB con cover inclusa",
+        price_eur=699.0,
+        category=ProductCategory.APPLE_PHONE,
+        source_marketplace="it",
+    )
+    kept, dropped = _filter_non_core_device_candidates([product])
+    assert len(kept) == 1
+    assert len(dropped) == 0
 
 
 def test_coerce_product_invalid_missing_title() -> None:
