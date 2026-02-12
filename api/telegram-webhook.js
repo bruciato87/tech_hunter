@@ -274,6 +274,7 @@ module.exports = async function handler(req, res) {
     } catch {
       // If Telegram send fails too, still return API error.
     }
-    return res.status(500).json({ ok: false, error: details });
+    // Always acknowledge Telegram updates to prevent endless retries.
+    return res.status(200).json({ ok: false, error: details });
   }
 }
