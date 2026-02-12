@@ -101,6 +101,10 @@ python -m tech_sniper_it.worker
 - `AMAZON_WAREHOUSE_STEALTH` (default: `true`, enables basic anti-bot fingerprint hardening)
 - `AMAZON_WAREHOUSE_USE_STORAGE_STATE` (default: `true`)
 - `AMAZON_WAREHOUSE_STORAGE_STATE_B64` (optional base64 Playwright storage state for logged-in Amazon session)
+- `AMAZON_WAREHOUSE_STORAGE_STATE_B64_IT` (optional domain-specific session for `amazon.it`)
+- `AMAZON_WAREHOUSE_STORAGE_STATE_B64_DE` (optional domain-specific session for `amazon.de`)
+- `AMAZON_WAREHOUSE_STORAGE_STATE_B64_FR` (optional domain-specific session for `amazon.fr`)
+- `AMAZON_WAREHOUSE_STORAGE_STATE_B64_ES` (optional domain-specific session for `amazon.es`)
 - `AMAZON_WAREHOUSE_DEBUG_ON_EMPTY` (default: `true`, saves diagnostic dump on zero parsed results)
 - `AMAZON_WAREHOUSE_DEBUG_DIR` (default: `/tmp/tech_sniper_it_debug`)
 
@@ -181,18 +185,28 @@ Override selectors without deploy via env:
 }
 ```
 
-### Free Bypass With Your Amazon Account Session
+### Free Bypass With Your Amazon Account Session (IT + EU)
 
 To reduce `sorry-page` blocks without paid proxies, capture a logged-in Amazon Playwright session locally and store it as secret.
 
-Generate storage state base64:
+Generate storage state base64 for each marketplace:
 
 ```bash
 source .venv/bin/activate
 python scripts/capture_amazon_storage_state.py --domain www.amazon.it
+python scripts/capture_amazon_storage_state.py --domain www.amazon.de
+python scripts/capture_amazon_storage_state.py --domain www.amazon.fr
+python scripts/capture_amazon_storage_state.py --domain www.amazon.es
 ```
 
 Copy the printed base64 value to GitHub Secret:
+
+- `AMAZON_WAREHOUSE_STORAGE_STATE_B64_IT`
+- `AMAZON_WAREHOUSE_STORAGE_STATE_B64_DE`
+- `AMAZON_WAREHOUSE_STORAGE_STATE_B64_FR`
+- `AMAZON_WAREHOUSE_STORAGE_STATE_B64_ES`
+
+Optional fallback secret (used when domain-specific one is missing):
 
 - `AMAZON_WAREHOUSE_STORAGE_STATE_B64`
 
@@ -263,6 +277,11 @@ Optional secrets:
 - `TELEGRAM_CHAT_ID` (can be moved to Variables)
 - `TRENDDEVICE_LEAD_EMAIL`
 - `TRENDDEVICE_STORAGE_STATE_B64` (recommended if TrendDevice email-gate blocks quote extraction)
+- `AMAZON_WAREHOUSE_STORAGE_STATE_B64` (global fallback)
+- `AMAZON_WAREHOUSE_STORAGE_STATE_B64_IT`
+- `AMAZON_WAREHOUSE_STORAGE_STATE_B64_DE`
+- `AMAZON_WAREHOUSE_STORAGE_STATE_B64_FR`
+- `AMAZON_WAREHOUSE_STORAGE_STATE_B64_ES`
 
 #### Recommended GitHub Variables (Worker, non-sensitive)
 

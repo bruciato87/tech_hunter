@@ -330,15 +330,24 @@ def main() -> int:
             "no",
             "off",
         }
-        raw_storage_state = (os.getenv("AMAZON_WAREHOUSE_STORAGE_STATE_B64") or "").strip()
-        if use_storage_state and raw_storage_state:
+        storage_state_envs = [
+            "AMAZON_WAREHOUSE_STORAGE_STATE_B64",
+            "AMAZON_WAREHOUSE_STORAGE_STATE_B64_IT",
+            "AMAZON_WAREHOUSE_STORAGE_STATE_B64_DE",
+            "AMAZON_WAREHOUSE_STORAGE_STATE_B64_FR",
+            "AMAZON_WAREHOUSE_STORAGE_STATE_B64_ES",
+        ]
+        for env_name in storage_state_envs:
+            raw_storage_state = (os.getenv(env_name) or "").strip()
+            if not use_storage_state or not raw_storage_state:
+                continue
             try:
                 decoded = base64.b64decode(raw_storage_state).decode("utf-8")
                 parsed = json.loads(decoded)
                 if not isinstance(parsed, dict):
-                    warnings.append("AMAZON_WAREHOUSE_STORAGE_STATE_B64 must decode to a JSON object.")
+                    warnings.append(f"{env_name} must decode to a JSON object.")
             except Exception:
-                warnings.append("AMAZON_WAREHOUSE_STORAGE_STATE_B64 is not valid base64 JSON.")
+                warnings.append(f"{env_name} is not valid base64 JSON.")
 
     if errors:
         print("Environment validation failed:")

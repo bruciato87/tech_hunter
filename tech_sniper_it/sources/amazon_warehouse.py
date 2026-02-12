@@ -24,6 +24,7 @@ MARKETPLACE_HOSTS: dict[str, str] = {
     "fr": "www.amazon.fr",
     "es": "www.amazon.es",
 }
+MARKETPLACE_FROM_HOST: dict[str, str] = {host: marketplace for marketplace, host in MARKETPLACE_HOSTS.items()}
 MARKETPLACE_GROUPS: dict[str, tuple[str, ...]] = {
     "eu": ("de", "fr", "es"),
 }
@@ -68,6 +69,13 @@ ACCEPT_LANGUAGE_BY_HOST: dict[str, str] = {
     "www.amazon.es": "es-ES,es;q=0.9,en;q=0.8",
 }
 SUPPORTED_PROXY_SCHEMES: set[str] = {"http", "https", "socks5", "socks5h"}
+STORAGE_STATE_ENV_DEFAULT = "AMAZON_WAREHOUSE_STORAGE_STATE_B64"
+STORAGE_STATE_ENV_BY_MARKETPLACE: dict[str, str] = {
+    "it": "AMAZON_WAREHOUSE_STORAGE_STATE_B64_IT",
+    "de": "AMAZON_WAREHOUSE_STORAGE_STATE_B64_DE",
+    "fr": "AMAZON_WAREHOUSE_STORAGE_STATE_B64_FR",
+    "es": "AMAZON_WAREHOUSE_STORAGE_STATE_B64_ES",
+}
 SEARCH_ROW_SELECTORS: tuple[str, ...] = (
     "div[data-component-type='s-search-result']",
     "div.s-result-item[data-asin]",
@@ -415,17 +423,21 @@ def _retry_delay_for_attempt(base_ms: int, attempt: int) -> int:
 
 
 def _decode_storage_state_b64() -> str | None:
-    raw = (os.getenv("AMAZON_WAREHOUSE_STORAGE_STATE_B64") or "").strip()
+    return _decode_storage_state_env(STORAGE_STATE_ENV_DEFAULT)
+
+
+def _decode_storage_state_env(env_name: str) -> str | None:
+    raw = (os.getenv(env_name) or "").strip()
     if not raw:
         return None
     try:
         decoded = base64.b64decode(raw).decode("utf-8")
         parsed = json.loads(decoded)
     except Exception as exc:
-        print(f"[warehouse] Invalid AMAZON_WAREHOUSE_STORAGE_STATE_B64: {type(exc).__name__}: {exc}")
+        print(f"[warehouse] Invalid {env_name}: {type(exc).__name__}: {exc}")
         return None
     if not isinstance(parsed, dict):
-        print("[warehouse] AMAZON_WAREHOUSE_STORAGE_STATE_B64 is not a JSON object.")
+        print(f"[warehouse] {env_name} is not a JSON object.")
         return None
     handle = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8")
     try:
@@ -434,6 +446,25 @@ def _decode_storage_state_b64() -> str | None:
         return handle.name
     finally:
         handle.close()
+
+
+def _load_storage_state_paths() -> dict[str, str]:
+    paths: dict[str, str] = {}
+    global_path = _decode_storage_state_env(STORAGE_STATE_ENV_DEFAULT)
+    if global_path:
+        paths["default"] = global_path
+    for marketplace, env_name in STORAGE_STATE_ENV_BY_MARKETPLACE.items():
+        path = _decode_storage_state_env(env_name)
+        if path:
+            paths[marketplace] = path
+    return paths
+
+
+def _storage_state_for_host(storage_state_paths: dict[str, str], host: str) -> str | None:
+    marketplace = MARKETPLACE_FROM_HOST.get(host.lower())
+    if marketplace and marketplace in storage_state_paths:
+        return storage_state_paths[marketplace]
+    return storage_state_paths.get("default")
 
 
 def _remove_file_if_exists(path: str | None) -> None:
@@ -639,11 +670,15 @@ async def fetch_amazon_warehouse_products(
     fail_fast_on_sorry = _fail_fast_on_sorry()
     stealth = _stealth_enabled()
     use_storage_state = _use_storage_state()
-    storage_state_path = _decode_storage_state_b64() if use_storage_state else None
-    if use_storage_state and not storage_state_path:
+    storage_state_paths = _load_storage_state_paths() if use_storage_state else {}
+    if use_storage_state and not storage_state_paths:
         print("[warehouse] Storage state enabled but unavailable (missing/invalid). Proceeding without it.")
-    elif storage_state_path:
-        print("[warehouse] Storage state loaded for Amazon authenticated session.")
+    elif storage_state_paths:
+        active_slots = sorted(storage_state_paths.keys())
+        print(
+            "[warehouse] Storage state loaded for Amazon authenticated session. "
+            f"slots={','.join(active_slots)}"
+        )
     rotate_proxy = _is_truthy_env("AMAZON_WAREHOUSE_ROTATE_PROXY", "true")
     rotate_user_agent = _is_truthy_env("AMAZON_WAREHOUSE_ROTATE_USER_AGENT", "true")
     per_query_limit = _per_query_limit(max_products, len(queries))
@@ -662,7 +697,7 @@ async def fetch_amazon_warehouse_products(
         f"proxy_pool={len(proxy_pool)} rotate_proxy={rotate_proxy} "
         f"user_agents={len(user_agents)} rotate_user_agent={rotate_user_agent} "
         f"attempts_per_query={max_attempts} fail_fast_on_sorry={fail_fast_on_sorry} "
-        f"stealth={stealth} storage_state={'on' if storage_state_path else 'off'} "
+        f"stealth={stealth} storage_state={'on' if storage_state_paths else 'off'} "
         f"max_products={max_products} per_query_limit={per_query_limit} "
         f"marketplace_limit={per_marketplace_limit} marketplaces={','.join(supported_marketplaces)}"
     )
@@ -720,8 +755,9 @@ async def fetch_amazon_warehouse_products(
                                     "Accept-Language": ACCEPT_LANGUAGE_BY_HOST.get(host, "it-IT,it;q=0.9,en;q=0.8")
                                 },
                             }
-                            if storage_state_path:
-                                context_kwargs["storage_state"] = storage_state_path
+                            host_storage_state_path = _storage_state_for_host(storage_state_paths, host)
+                            if host_storage_state_path:
+                                context_kwargs["storage_state"] = host_storage_state_path
                             if user_agent:
                                 context_kwargs["user_agent"] = user_agent
 
@@ -729,9 +765,17 @@ async def fetch_amazon_warehouse_products(
                             await _apply_stealth_context(context, host=host)
                             page = await context.new_page()
                             page.set_default_timeout(nav_timeout_ms)
+                            storage_state_mode = "none"
+                            if host_storage_state_path:
+                                marketplace_for_host = MARKETPLACE_FROM_HOST.get(host.lower())
+                                if marketplace_for_host and marketplace_for_host in storage_state_paths:
+                                    storage_state_mode = marketplace_for_host
+                                else:
+                                    storage_state_mode = "default"
                             print(
                                 f"[warehouse] Loading {search_url} | attempt={attempt}/{max_attempts} "
-                                f"| session={session_id} | ua='{_shorten(user_agent)}' | proxy={proxy_label}"
+                                f"| session={session_id} | ua='{_shorten(user_agent)}' | proxy={proxy_label} "
+                                f"| storage={storage_state_mode}"
                             )
                             barriers: list[str] = []
                             try:
@@ -816,7 +860,8 @@ async def fetch_amazon_warehouse_products(
                     await browser.close()
                 except Exception:
                     continue
-            _remove_file_if_exists(storage_state_path)
+            for path in set(storage_state_paths.values()):
+                _remove_file_if_exists(path)
 
     query_stats = ", ".join(f"'{query}':{query_totals.get(query, 0)}" for query in queries)
     marketplace_stats = ", ".join(

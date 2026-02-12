@@ -7,13 +7,16 @@ import os
 from tech_sniper_it.sources.amazon_warehouse import (
     _canonical_amazon_url,
     _decode_storage_state_b64,
+    _decode_storage_state_env,
     _detect_page_barriers,
     _expand_marketplaces,
     _extract_products_from_html,
+    _load_storage_state_paths,
     _parse_proxy_entry,
     _parse_user_agent_list,
     _per_marketplace_limit,
     _remove_file_if_exists,
+    _storage_state_for_host,
     _should_fail_fast,
 )
 
@@ -197,3 +200,31 @@ def test_decode_storage_state_b64_valid(monkeypatch) -> None:  # noqa: ANN001
 def test_decode_storage_state_b64_invalid(monkeypatch) -> None:  # noqa: ANN001
     monkeypatch.setenv("AMAZON_WAREHOUSE_STORAGE_STATE_B64", "not-base64")
     assert _decode_storage_state_b64() is None
+
+
+def test_decode_storage_state_env_valid_for_marketplace_specific_secret(monkeypatch) -> None:  # noqa: ANN001
+    payload = {"cookies": [], "origins": []}
+    encoded = base64.b64encode(json.dumps(payload).encode("utf-8")).decode("ascii")
+    monkeypatch.setenv("AMAZON_WAREHOUSE_STORAGE_STATE_B64_DE", encoded)
+    path = _decode_storage_state_env("AMAZON_WAREHOUSE_STORAGE_STATE_B64_DE")
+    try:
+        assert path is not None
+        assert os.path.exists(path)
+    finally:
+        _remove_file_if_exists(path)
+
+
+def test_load_storage_state_paths_prefers_marketplace_specific_and_fallback(monkeypatch) -> None:  # noqa: ANN001
+    payload = {"cookies": [], "origins": []}
+    encoded = base64.b64encode(json.dumps(payload).encode("utf-8")).decode("ascii")
+    monkeypatch.setenv("AMAZON_WAREHOUSE_STORAGE_STATE_B64", encoded)
+    monkeypatch.setenv("AMAZON_WAREHOUSE_STORAGE_STATE_B64_FR", encoded)
+    paths = _load_storage_state_paths()
+    try:
+        assert "default" in paths
+        assert "fr" in paths
+        assert _storage_state_for_host(paths, "www.amazon.fr") == paths["fr"]
+        assert _storage_state_for_host(paths, "www.amazon.it") == paths["default"]
+    finally:
+        for path in set(paths.values()):
+            _remove_file_if_exists(path)

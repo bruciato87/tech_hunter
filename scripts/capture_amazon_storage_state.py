@@ -8,6 +8,14 @@ from pathlib import Path
 from playwright.async_api import async_playwright
 
 
+DOMAIN_SECRET_MAP: dict[str, str] = {
+    "www.amazon.it": "AMAZON_WAREHOUSE_STORAGE_STATE_B64_IT",
+    "www.amazon.de": "AMAZON_WAREHOUSE_STORAGE_STATE_B64_DE",
+    "www.amazon.fr": "AMAZON_WAREHOUSE_STORAGE_STATE_B64_FR",
+    "www.amazon.es": "AMAZON_WAREHOUSE_STORAGE_STATE_B64_ES",
+}
+
+
 async def _capture_state(domain: str, output: Path) -> str:
     output.parent.mkdir(parents=True, exist_ok=True)
     async with async_playwright() as playwright:
@@ -48,10 +56,12 @@ def _parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = _parse_args()
+    domain = str(args.domain).strip().lower() or "www.amazon.it"
     output = Path(args.output).expanduser().resolve()
-    encoded = asyncio.run(_capture_state(args.domain, output))
+    encoded = asyncio.run(_capture_state(domain, output))
+    secret_name = DOMAIN_SECRET_MAP.get(domain, "AMAZON_WAREHOUSE_STORAGE_STATE_B64")
     print("\nStorage state saved to:", output)
-    print("\nSet this as GitHub Secret AMAZON_WAREHOUSE_STORAGE_STATE_B64:\n")
+    print(f"\nSet this as GitHub Secret {secret_name}:\n")
     print(encoded)
     return 0
 
