@@ -62,6 +62,11 @@ python -m tech_sniper_it.worker
 - `SCAN_TARGET_PRODUCTS` (default: `12`)
 - `SCAN_CANDIDATE_MULTIPLIER` (default: `4`)
 - `EXCLUDE_MIN_KEEP` (default: `4`, re-includes a small slice of excluded URLs to avoid 0/1-product scans)
+- `SCAN_IT_QUOTA` (default: `6`, preferred IT candidates in final selection)
+- `SCAN_EU_QUOTA` (default: `6`, preferred EU candidates in final selection)
+- `SCORING_ENABLE` (default: `true`, enables historical expected-spread ranking)
+- `SCORING_LOOKBACK_DAYS` (default: `30`)
+- `SCORING_HISTORY_LIMIT` (default: `2000`)
 - `PLAYWRIGHT_NAV_TIMEOUT_MS` (default: `45000`)
 - `HEADLESS` (default: `true`)
 - `MPB_MAX_ATTEMPTS` (default: `3`)
@@ -121,6 +126,13 @@ Current defaults now mitigate this by:
 - raising target and candidate budgets
 - balancing per-marketplace collection (`AMAZON_WAREHOUSE_PER_MARKETPLACE_LIMIT`)
 - allowing controlled exclusion relaxation (`EXCLUDE_MIN_KEEP`)
+
+Candidate ordering now also prioritizes likely profitable items first using:
+
+- historical expected offer/spread from Supabase
+- market liquidity signals (model families with faster resale)
+- valuator health weighting (penalize categories whose required platforms are currently failing)
+- IT/EU balanced final pick (`SCAN_IT_QUOTA` / `SCAN_EU_QUOTA`)
 
 ### UI Drift Auto-Adaptation
 
@@ -229,6 +241,11 @@ Optional secrets:
 - `SCAN_TARGET_PRODUCTS`
 - `SCAN_CANDIDATE_MULTIPLIER`
 - `EXCLUDE_MIN_KEEP`
+- `SCAN_IT_QUOTA`
+- `SCAN_EU_QUOTA`
+- `SCORING_ENABLE`
+- `SCORING_LOOKBACK_DAYS`
+- `SCORING_HISTORY_LIMIT`
 - `AMAZON_WAREHOUSE_ENABLED`
 - `AMAZON_WAREHOUSE_MARKETPLACES`
 - `AMAZON_WAREHOUSE_MAX_PRODUCTS`

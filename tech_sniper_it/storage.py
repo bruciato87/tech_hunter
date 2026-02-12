@@ -91,3 +91,27 @@ class SupabaseStorage:
             return urls
 
         return await asyncio.to_thread(_select)
+
+    async def get_recent_scoring_rows(
+        self,
+        *,
+        lookback_days: int = 30,
+        limit: int = 2000,
+    ) -> list[dict[str, Any]]:
+        safe_limit = max(100, min(limit, 5000))
+        cutoff_iso: str | None = None
+        if lookback_days > 0:
+            cutoff = datetime.now(UTC) - timedelta(days=lookback_days)
+            cutoff_iso = cutoff.isoformat()
+
+        def _select() -> list[dict[str, Any]]:
+            query = self.client.table(self.table).select(
+                "normalized_name,category,best_offer_eur,spread_eur,offers_payload,source_url,created_at"
+            )
+            if cutoff_iso:
+                query = query.gte("created_at", cutoff_iso)
+            response = query.order("created_at", desc=True).limit(safe_limit).execute()
+            data = getattr(response, "data", None)
+            return data if isinstance(data, list) else []
+
+        return await asyncio.to_thread(_select)

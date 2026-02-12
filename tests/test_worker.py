@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from tech_sniper_it.models import ProductCategory
+from tech_sniper_it.models import AmazonProduct, ProductCategory
 from tech_sniper_it.worker import (
     _ai_usage_label,
     _ai_usage_stats,
@@ -23,6 +23,7 @@ from tech_sniper_it.worker import (
     _resolve_command,
     _run_scan_command,
     _run_status_command,
+    _select_balanced_candidates,
     _save_non_profitable_decisions,
     _safe_error_details,
     _send_telegram_message,
@@ -32,9 +33,21 @@ from tech_sniper_it.worker import (
 
 
 def test_coerce_product_valid() -> None:
-    product = _coerce_product({"title": "iPhone", "price_eur": 100, "category": "apple"})
+    product = _coerce_product({"title": "iPhone", "price_eur": 100, "category": "apple iphone"})
     assert product.title == "iPhone"
     assert product.category == ProductCategory.APPLE_PHONE
+
+
+def test_coerce_product_keeps_source_marketplace() -> None:
+    product = _coerce_product(
+        {
+            "title": "Canon EOS R50",
+            "price_eur": 700,
+            "category": "photography",
+            "source_marketplace": "DE",
+        }
+    )
+    assert product.source_marketplace == "de"
 
 
 def test_coerce_product_invalid_missing_title() -> None:
@@ -197,6 +210,68 @@ def test_prioritize_products_orders_by_price_then_category() -> None:
     assert ordered[0].title == "iPhone"
     assert ordered[1].title == "Camera"
     assert ordered[2].title == "Laptop"
+
+
+def test_prioritize_products_prefers_expected_spread_with_scoring_context() -> None:
+    iphone = AmazonProduct(
+        title="Apple iPhone 15 Pro 128GB",
+        price_eur=700.0,
+        category=ProductCategory.APPLE_PHONE,
+        source_marketplace="it",
+    )
+    camera = AmazonProduct(
+        title="Canon EOS 2000D",
+        price_eur=450.0,
+        category=ProductCategory.PHOTOGRAPHY,
+        source_marketplace="de",
+    )
+    context = {
+        "enabled": True,
+        "exact_offer_median": {},
+        "exact_confidence": {},
+        "category_offer_median": {
+            ProductCategory.APPLE_PHONE.value: 920.0,
+            ProductCategory.PHOTOGRAPHY.value: 280.0,
+        },
+        "category_spread_median": {},
+        "platform_health": {
+            "rebuy": {"rate": 1.0, "samples": 12},
+            "trenddevice": {"rate": 0.9, "samples": 12},
+            "mpb": {"rate": 0.9, "samples": 12},
+        },
+    }
+    ordered = _prioritize_products([camera, iphone], scoring_context=context)
+    assert ordered[0].title == "Apple iPhone 15 Pro 128GB"
+
+
+def test_select_balanced_candidates_respects_it_eu_quota(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SCAN_IT_QUOTA", "3")
+    monkeypatch.setenv("SCAN_EU_QUOTA", "3")
+    products: list[AmazonProduct] = []
+    for idx in range(6):
+        products.append(
+            AmazonProduct(
+                title=f"IT-{idx}",
+                price_eur=100.0 + idx,
+                category=ProductCategory.GENERAL_TECH,
+                source_marketplace="it",
+            )
+        )
+    for idx in range(4):
+        products.append(
+            AmazonProduct(
+                title=f"EU-{idx}",
+                price_eur=200.0 + idx,
+                category=ProductCategory.GENERAL_TECH,
+                source_marketplace="de",
+            )
+        )
+    selected = _select_balanced_candidates(products, target=6)
+    it_count = sum(1 for item in selected if item.source_marketplace == "it")
+    eu_count = sum(1 for item in selected if item.source_marketplace == "de")
+    assert len(selected) == 6
+    assert it_count == 3
+    assert eu_count == 3
 
 
 def test_ai_usage_helpers() -> None:

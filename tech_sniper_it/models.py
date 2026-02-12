@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
+import re
 from typing import Any
 
 
@@ -13,11 +14,50 @@ class ProductCategory(str, Enum):
     @classmethod
     def from_raw(cls, raw: str) -> "ProductCategory":
         value = (raw or "").strip().lower()
-        if any(token in value for token in ("foto", "camera", "photography", "fotografia")):
+        if cls._is_photography(value):
             return cls.PHOTOGRAPHY
-        if any(token in value for token in ("apple", "iphone", "phone", "telefono", "smartphone")):
+        if cls._is_apple_phone(value):
             return cls.APPLE_PHONE
         return cls.GENERAL_TECH
+
+    @staticmethod
+    def _is_photography(value: str) -> bool:
+        tokens = (
+            "fotografia",
+            "photography",
+            "fotocamera",
+            "camera",
+            "mirrorless",
+            "dslr",
+            "obiettivo",
+            "lens",
+            "canon eos",
+            "sony alpha",
+            "nikon z",
+            "fujifilm x",
+            "lumix",
+        )
+        return any(token in value for token in tokens)
+
+    @staticmethod
+    def _is_apple_phone(value: str) -> bool:
+        # iPhone-focused category: avoid routing generic Apple laptops/tablets to phone-only valuators.
+        if "iphone" in value:
+            return True
+        apple_token = "apple" in value
+        phone_tokens = (
+            "phone",
+            "telefono",
+            "smartphone",
+            "cellulare",
+            "ios",
+            "sim",
+        )
+        if apple_token and any(token in value for token in phone_tokens):
+            return True
+        if re.search(r"\biphone\s*\d+\b", value):
+            return True
+        return False
 
 
 @dataclass(slots=True)
@@ -27,6 +67,7 @@ class AmazonProduct:
     category: ProductCategory
     ean: str | None = None
     url: str | None = None
+    source_marketplace: str | None = None
 
 
 @dataclass(slots=True)

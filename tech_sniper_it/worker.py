@@ -4,6 +4,8 @@ import asyncio
 import json
 import os
 from pathlib import Path
+import re
+from statistics import median
 from typing import Any
 from urllib.parse import quote_plus, urlparse
 
@@ -17,6 +19,31 @@ from tech_sniper_it.sources import fetch_amazon_warehouse_products
 
 MAX_LAST_LIMIT = 10
 TELEGRAM_TEXT_LIMIT = 4000
+SCORING_DEFAULT_LOOKBACK_DAYS = 30
+SCORING_DEFAULT_HISTORY_LIMIT = 2000
+
+CATEGORY_REQUIRED_PLATFORMS: dict[ProductCategory, tuple[str, ...]] = {
+    ProductCategory.APPLE_PHONE: ("trenddevice", "rebuy"),
+    ProductCategory.PHOTOGRAPHY: ("mpb", "rebuy"),
+    ProductCategory.GENERAL_TECH: ("rebuy",),
+}
+
+CATEGORY_FALLBACK_OFFER_RATIO: dict[ProductCategory, float] = {
+    ProductCategory.APPLE_PHONE: 0.38,
+    ProductCategory.PHOTOGRAPHY: 0.30,
+    ProductCategory.GENERAL_TECH: 0.22,
+}
+
+LIQUIDITY_PATTERNS: tuple[tuple[str, float], ...] = (
+    (r"\biphone\b", 65.0),
+    (r"\biphone\s*(14|15|16)\b", 35.0),
+    (r"\bpro\s*max\b", 25.0),
+    (r"\bmacbook\s*(air|pro)\b", 48.0),
+    (r"\bcanon\s*eos\b", 40.0),
+    (r"\bsony\s*alpha\b", 40.0),
+    (r"\bplaystation\s*5\b|\bps5\b", 42.0),
+    (r"\bxbox\s*series\s*x\b", 35.0),
+)
 
 
 def _env_or_default(name: str, default: str) -> str:
@@ -128,6 +155,87 @@ def _safe_text(value: str | None, max_len: int = 220) -> str | None:
     if len(raw) <= max_len:
         return raw
     return raw[: max_len - 3] + "..."
+
+
+def _to_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    raw = str(value).strip()
+    if not raw:
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        return None
+
+
+def _median_or_none(values: list[float]) -> float | None:
+    if not values:
+        return None
+    return float(median(values))
+
+
+def _normalize_for_scoring(value: str) -> str:
+    raw = (value or "").lower()
+    raw = re.sub(r"\([^)]*\)", " ", raw)
+    raw = re.sub(
+        r"\b(warehouse|ricondizionato|ottime condizioni|come nuovo|grado a|usato|amazon|qwerty|italiano)\b",
+        " ",
+        raw,
+    )
+    raw = re.sub(r"[^a-z0-9]+", " ", raw)
+    raw = re.sub(r"\s+", " ", raw).strip()
+    return raw[:120]
+
+
+def _marketplace_from_url(url: str | None) -> str | None:
+    normalized = _normalize_http_url(url)
+    if not normalized:
+        return None
+    host = (urlparse(normalized).hostname or "").lower()
+    if host.endswith(".it"):
+        return "it"
+    if host.endswith(".de"):
+        return "de"
+    if host.endswith(".fr"):
+        return "fr"
+    if host.endswith(".es"):
+        return "es"
+    return None
+
+
+def _candidate_marketplace(product: AmazonProduct) -> str:
+    explicit = (getattr(product, "source_marketplace", None) or "").strip().lower()
+    if explicit in {"it", "de", "fr", "es"}:
+        return explicit
+    from_url = _marketplace_from_url(getattr(product, "url", None))
+    if from_url:
+        return from_url
+    return "unknown"
+
+
+def _candidate_region(product: AmazonProduct) -> str:
+    marketplace = _candidate_marketplace(product)
+    if marketplace == "it":
+        return "it"
+    if marketplace in {"de", "fr", "es"}:
+        return "eu"
+    return "other"
+
+
+def _required_platforms_for_category(category: ProductCategory) -> tuple[str, ...]:
+    return CATEGORY_REQUIRED_PLATFORMS.get(category, ("rebuy",))
+
+
+def _liquidity_bonus(title: str) -> float:
+    lowered = (title or "").lower()
+    score = 0.0
+    for pattern, bonus in LIQUIDITY_PATTERNS:
+        if re.search(pattern, lowered):
+            score += bonus
+    return score
 
 
 def _offer_log_payload(offer) -> dict[str, Any]:  # noqa: ANN001
@@ -299,12 +407,15 @@ def _coerce_product(raw: dict[str, Any]) -> AmazonProduct:
         raise ValueError(f"Product '{title}' missing price")
     price = float(price_raw)
     category = ProductCategory.from_raw(str(raw.get("category", "")))
+    source_marketplace_raw = raw.get("source_marketplace")
+    source_marketplace = str(source_marketplace_raw).strip().lower() if source_marketplace_raw is not None else ""
     return AmazonProduct(
         title=title,
         price_eur=price,
         category=category,
         ean=raw.get("ean"),
         url=raw.get("url"),
+        source_marketplace=source_marketplace or None,
     )
 
 
@@ -382,20 +493,319 @@ def _dedupe_products(products: list[AmazonProduct]) -> list[AmazonProduct]:
     return deduped
 
 
-def _prioritize_products(products: list[AmazonProduct]) -> list[AmazonProduct]:
+def _legacy_priority_key(product: AmazonProduct) -> tuple[float, int, int]:
     category_weight = {
         ProductCategory.APPLE_PHONE: 0,
         ProductCategory.PHOTOGRAPHY: 1,
         ProductCategory.GENERAL_TECH: 2,
     }
-    return sorted(
-        products,
-        key=lambda item: (
-            float(item.price_eur),
-            category_weight.get(item.category, 9),
-            len(item.title),
-        ),
+    return (
+        float(product.price_eur),
+        category_weight.get(product.category, 9),
+        len(product.title),
     )
+
+
+async def _build_prioritization_context(manager) -> dict[str, Any]:  # noqa: ANN001
+    context: dict[str, Any] = {
+        "enabled": _is_truthy_env("SCORING_ENABLE", "true"),
+        "rows_count": 0,
+        "exact_offer_median": {},
+        "exact_confidence": {},
+        "category_offer_median": {},
+        "category_spread_median": {},
+        "platform_health": {},
+    }
+    if not context["enabled"]:
+        return context
+
+    storage = getattr(manager, "storage", None)
+    get_rows = getattr(storage, "get_recent_scoring_rows", None)
+    if storage is None or not callable(get_rows):
+        return context
+
+    try:
+        lookback_days = max(1, int(_env_or_default("SCORING_LOOKBACK_DAYS", str(SCORING_DEFAULT_LOOKBACK_DAYS))))
+    except ValueError:
+        lookback_days = SCORING_DEFAULT_LOOKBACK_DAYS
+    try:
+        limit = max(100, int(_env_or_default("SCORING_HISTORY_LIMIT", str(SCORING_DEFAULT_HISTORY_LIMIT))))
+    except ValueError:
+        limit = SCORING_DEFAULT_HISTORY_LIMIT
+    try:
+        rows = await get_rows(lookback_days=lookback_days, limit=limit)
+    except Exception as exc:
+        print(f"[scan] Scoring context unavailable: {_safe_error_details(exc)}")
+        return context
+    if not rows:
+        return context
+
+    exact_offer_samples: dict[str, list[float]] = {}
+    category_offer_samples: dict[str, list[float]] = {}
+    category_spread_samples: dict[str, list[float]] = {}
+    platform_totals: dict[str, int] = {}
+    platform_successes: dict[str, int] = {}
+
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        normalized_name = _normalize_for_scoring(str(row.get("normalized_name", "")))
+        category = ProductCategory.from_raw(str(row.get("category", ""))).value
+        best_offer = _to_float(row.get("best_offer_eur"))
+        spread = _to_float(row.get("spread_eur"))
+
+        if normalized_name and best_offer is not None:
+            exact_offer_samples.setdefault(normalized_name, []).append(best_offer)
+        if best_offer is not None:
+            category_offer_samples.setdefault(category, []).append(best_offer)
+        if spread is not None:
+            category_spread_samples.setdefault(category, []).append(spread)
+
+        offers_payload = row.get("offers_payload")
+        if not isinstance(offers_payload, list):
+            continue
+        for offer_item in offers_payload:
+            if not isinstance(offer_item, dict):
+                continue
+            platform = str(offer_item.get("platform", "")).strip().lower()
+            if not platform:
+                continue
+            platform_totals[platform] = platform_totals.get(platform, 0) + 1
+            error = offer_item.get("error")
+            if error in (None, ""):
+                platform_successes[platform] = platform_successes.get(platform, 0) + 1
+
+    exact_offer_median: dict[str, float] = {}
+    exact_confidence: dict[str, float] = {}
+    for key, sample in exact_offer_samples.items():
+        score = _median_or_none(sample)
+        if score is None:
+            continue
+        exact_offer_median[key] = score
+        exact_confidence[key] = min(1.0, len(sample) / 6.0)
+
+    category_offer_median: dict[str, float] = {}
+    for key, sample in category_offer_samples.items():
+        score = _median_or_none(sample)
+        if score is not None:
+            category_offer_median[key] = score
+
+    category_spread_median: dict[str, float] = {}
+    for key, sample in category_spread_samples.items():
+        score = _median_or_none(sample)
+        if score is not None:
+            category_spread_median[key] = score
+
+    platform_health: dict[str, dict[str, float | int]] = {}
+    for platform, total in platform_totals.items():
+        successes = platform_successes.get(platform, 0)
+        rate = successes / total if total > 0 else 0.0
+        platform_health[platform] = {"rate": round(rate, 3), "samples": total}
+
+    context.update(
+        {
+            "rows_count": len(rows),
+            "exact_offer_median": exact_offer_median,
+            "exact_confidence": exact_confidence,
+            "category_offer_median": category_offer_median,
+            "category_spread_median": category_spread_median,
+            "platform_health": platform_health,
+        }
+    )
+    return context
+
+
+def _valuator_health_adjustment(category: ProductCategory, scoring_context: dict[str, Any]) -> tuple[float, float]:
+    platform_health = scoring_context.get("platform_health", {})
+    if not isinstance(platform_health, dict):
+        return 0.0, 0.6
+    required = _required_platforms_for_category(category)
+    if not required:
+        return 0.0, 0.6
+
+    rates: list[float] = []
+    samples = 0
+    for platform in required:
+        state = platform_health.get(platform, {})
+        if not isinstance(state, dict):
+            rates.append(0.6)
+            continue
+        rate = _to_float(state.get("rate"))
+        sample_count = int(_to_float(state.get("samples")) or 0)
+        samples += sample_count
+        rates.append(rate if rate is not None else 0.6)
+    avg_rate = sum(rates) / len(rates)
+    if samples < 6:
+        return 0.0, avg_rate
+    if avg_rate < 0.20:
+        return -180.0, avg_rate
+    if avg_rate < 0.35:
+        return -120.0, avg_rate
+    if avg_rate < 0.50:
+        return -70.0, avg_rate
+    if avg_rate > 0.85:
+        return 20.0, avg_rate
+    return 0.0, avg_rate
+
+
+def _estimate_offer_and_spread(product: AmazonProduct, scoring_context: dict[str, Any]) -> tuple[float, float, str, float]:
+    exact_offer_median = scoring_context.get("exact_offer_median", {})
+    exact_confidence = scoring_context.get("exact_confidence", {})
+    category_offer_median = scoring_context.get("category_offer_median", {})
+    category_spread_median = scoring_context.get("category_spread_median", {})
+
+    normalized_title = _normalize_for_scoring(product.title)
+    source = "fallback_ratio"
+    confidence = 0.25
+
+    exact_offer = _to_float(exact_offer_median.get(normalized_title)) if isinstance(exact_offer_median, dict) else None
+    if exact_offer is not None:
+        source = "exact_model_history"
+        confidence = _to_float(exact_confidence.get(normalized_title)) if isinstance(exact_confidence, dict) else None
+        confidence = confidence if confidence is not None else 0.8
+        expected_offer = exact_offer
+    else:
+        category_key = product.category.value
+        category_offer = _to_float(category_offer_median.get(category_key)) if isinstance(category_offer_median, dict) else None
+        if category_offer is not None:
+            source = "category_history"
+            confidence = 0.55
+            expected_offer = category_offer
+        else:
+            ratio = CATEGORY_FALLBACK_OFFER_RATIO.get(product.category, 0.20)
+            expected_offer = round(float(product.price_eur) * ratio, 2)
+
+    expected_spread = round(expected_offer - float(product.price_eur), 2)
+    category_spread = (
+        _to_float(category_spread_median.get(product.category.value))
+        if isinstance(category_spread_median, dict)
+        else None
+    )
+    if category_spread is not None:
+        expected_spread = round((expected_spread * 0.75) + (category_spread * 0.25), 2)
+    return expected_offer, expected_spread, source, confidence
+
+
+def _score_product_candidate(product: AmazonProduct, scoring_context: dict[str, Any]) -> dict[str, Any]:
+    if not scoring_context.get("enabled"):
+        return {
+            "score": 0.0,
+            "expected_offer": None,
+            "expected_spread": None,
+            "liquidity_bonus": 0.0,
+            "valuator_health_adjustment": 0.0,
+            "valuator_health_rate": 0.6,
+            "source": "disabled",
+            "confidence": 0.0,
+            "region": _candidate_region(product),
+        }
+
+    expected_offer, expected_spread, source, confidence = _estimate_offer_and_spread(product, scoring_context)
+    liquidity = _liquidity_bonus(product.title)
+    health_adjustment, health_rate = _valuator_health_adjustment(product.category, scoring_context)
+    score = expected_spread + liquidity + health_adjustment + (confidence * 20.0)
+    return {
+        "score": round(score, 2),
+        "expected_offer": expected_offer,
+        "expected_spread": expected_spread,
+        "liquidity_bonus": round(liquidity, 2),
+        "valuator_health_adjustment": round(health_adjustment, 2),
+        "valuator_health_rate": round(health_rate, 3),
+        "source": source,
+        "confidence": round(confidence, 3),
+        "region": _candidate_region(product),
+    }
+
+
+def _prioritize_products(
+    products: list[AmazonProduct],
+    *,
+    scoring_context: dict[str, Any] | None = None,
+) -> list[AmazonProduct]:
+    context = scoring_context or {}
+    if not context.get("enabled"):
+        return sorted(products, key=_legacy_priority_key)
+
+    rows: list[tuple[AmazonProduct, dict[str, Any]]] = []
+    for item in products:
+        score_row = _score_product_candidate(item, context)
+        rows.append((item, score_row))
+
+    rows.sort(
+        key=lambda pair: (
+            float(pair[1].get("score", 0.0)),
+            float(pair[1].get("expected_spread") or -10_000.0),
+            -float(pair[0].price_eur),
+        ),
+        reverse=True,
+    )
+    return [item for item, _score in rows]
+
+
+def _priority_preview(products: list[AmazonProduct], scoring_context: dict[str, Any], limit: int = 8) -> list[str]:
+    preview: list[str] = []
+    top = products[: max(0, limit)]
+    for index, item in enumerate(top, start=1):
+        row = _score_product_candidate(item, scoring_context)
+        preview.append(
+            f"#{index} score={row['score']:.2f} spread_est={row['expected_spread']} "
+            f"region={row['region']} source={row['source']} "
+            f"health={row['valuator_health_rate']} liquidity={row['liquidity_bonus']:.1f} "
+            f"title='{_safe_text(item.title, max_len=70)}'"
+        )
+    return preview
+
+
+def _region_counts(products: list[AmazonProduct]) -> dict[str, int]:
+    counts = {"it": 0, "eu": 0, "other": 0}
+    for item in products:
+        region = _candidate_region(item)
+        counts[region] = counts.get(region, 0) + 1
+    return counts
+
+
+def _select_balanced_candidates(products: list[AmazonProduct], target: int) -> list[AmazonProduct]:
+    if len(products) <= target:
+        return products
+
+    queues = {"it": [], "eu": [], "other": []}
+    for item in products:
+        queues[_candidate_region(item)].append(item)
+
+    it_quota = max(0, int(_env_or_default("SCAN_IT_QUOTA", str(target // 2))))
+    eu_quota = max(0, int(_env_or_default("SCAN_EU_QUOTA", str(target // 2))))
+    if it_quota + eu_quota > target:
+        total_quota = max(1, it_quota + eu_quota)
+        it_quota = int((it_quota / total_quota) * target)
+        eu_quota = min(target - it_quota, eu_quota)
+
+    selected: list[AmazonProduct] = []
+    selected_ids: set[int] = set()
+
+    def _take(region: str, amount: int) -> None:
+        while amount > 0 and queues[region] and len(selected) < target:
+            item = queues[region].pop(0)
+            marker = id(item)
+            if marker in selected_ids:
+                continue
+            selected.append(item)
+            selected_ids.add(marker)
+            amount -= 1
+
+    _take("it", it_quota)
+    _take("eu", eu_quota)
+
+    if len(selected) < target:
+        for item in products:
+            marker = id(item)
+            if marker in selected_ids:
+                continue
+            selected.append(item)
+            selected_ids.add(marker)
+            if len(selected) >= target:
+                break
+
+    return selected
 
 
 async def _exclude_non_profitable_candidates(manager, products: list[AmazonProduct]) -> list[AmazonProduct]:  # noqa: ANN001
@@ -565,13 +975,36 @@ async def _run_scan_command(payload: dict[str, Any]) -> int:
         print(f"[scan] Deduplicated products: {len(products)} -> {len(deduped)}")
     products = deduped
     products = await _exclude_non_profitable_candidates(manager, products)
-    products = _prioritize_products(products)
+    scoring_context = await _build_prioritization_context(manager)
+    if scoring_context.get("enabled"):
+        health_snapshot = scoring_context.get("platform_health", {})
+        print(
+            "[scan] Scoring context | "
+            f"rows={scoring_context.get('rows_count', 0)} "
+            f"exact_models={len(scoring_context.get('exact_offer_median', {}))} "
+            f"category_models={len(scoring_context.get('category_offer_median', {}))} "
+            f"platform_health={json.dumps(health_snapshot, ensure_ascii=False)}"
+        )
+    else:
+        print("[scan] Scoring context disabled; using legacy priority.")
+
+    products = _prioritize_products(products, scoring_context=scoring_context)
+    preview_rows = _priority_preview(products, scoring_context, limit=min(len(products), 8))
+    if preview_rows:
+        print("[scan] Priority preview:")
+        for row in preview_rows:
+            print(f"[scan]   {row}")
+
     if len(products) > scan_target_products:
+        selected = _select_balanced_candidates(products, scan_target_products)
+        selected_region_counts = _region_counts(selected)
+        total_region_counts = _region_counts(products)
         print(
             "[scan] Candidate selection | "
-            f"target={scan_target_products} budget={candidate_budget} selected={scan_target_products} total_after_filter={len(products)}"
+            f"target={scan_target_products} budget={candidate_budget} selected={len(selected)} "
+            f"total_after_filter={len(products)} total_regions={total_region_counts} selected_regions={selected_region_counts}"
         )
-        products = products[:scan_target_products]
+        products = selected
 
     if not products:
         message = "Nessun candidato disponibile dopo i filtri di esclusione storica."

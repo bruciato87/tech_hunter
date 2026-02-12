@@ -135,6 +135,34 @@ def main() -> int:
         errors.append("EXCLUDE_MIN_KEEP must be integer.")
 
     try:
+        scan_it_quota = int(_env_or_default("SCAN_IT_QUOTA", "6"))
+        if scan_it_quota < 0:
+            errors.append("SCAN_IT_QUOTA must be >= 0.")
+    except ValueError:
+        errors.append("SCAN_IT_QUOTA must be integer.")
+
+    try:
+        scan_eu_quota = int(_env_or_default("SCAN_EU_QUOTA", "6"))
+        if scan_eu_quota < 0:
+            errors.append("SCAN_EU_QUOTA must be >= 0.")
+    except ValueError:
+        errors.append("SCAN_EU_QUOTA must be integer.")
+
+    try:
+        scoring_lookback = int(_env_or_default("SCORING_LOOKBACK_DAYS", "30"))
+        if scoring_lookback < 1:
+            errors.append("SCORING_LOOKBACK_DAYS must be >= 1.")
+    except ValueError:
+        errors.append("SCORING_LOOKBACK_DAYS must be integer.")
+
+    try:
+        scoring_limit = int(_env_or_default("SCORING_HISTORY_LIMIT", "2000"))
+        if scoring_limit < 100:
+            errors.append("SCORING_HISTORY_LIMIT must be >= 100.")
+    except ValueError:
+        errors.append("SCORING_HISTORY_LIMIT must be integer.")
+
+    try:
         int(_env_or_default("PLAYWRIGHT_NAV_TIMEOUT_MS", "45000"))
     except ValueError:
         errors.append("PLAYWRIGHT_NAV_TIMEOUT_MS must be integer.")
@@ -187,7 +215,7 @@ def main() -> int:
 
     if _warehouse_enabled():
         try:
-            int(_env_or_default("AMAZON_WAREHOUSE_MAX_PRODUCTS", "8"))
+            int(_env_or_default("AMAZON_WAREHOUSE_MAX_PRODUCTS", "12"))
         except ValueError:
             errors.append("AMAZON_WAREHOUSE_MAX_PRODUCTS must be integer.")
 

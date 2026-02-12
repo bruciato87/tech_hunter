@@ -12,13 +12,15 @@ class FakeTableQuery:
     def __init__(self) -> None:
         self.insert_payload = None
         self.limit_value = None
+        self.selected_fields = None
         self.data = [{"normalized_name": "iPhone", "spread_eur": 120, "best_platform": "rebuy"}]
 
-    def insert(self, payload):
+    def insert(self, payload):  # noqa: ANN001
         self.insert_payload = payload
         return self
 
-    def select(self, *_args, **_kwargs):
+    def select(self, *args, **_kwargs):  # noqa: ANN001
+        self.selected_fields = args
         return self
 
     def order(self, *_args, **_kwargs):
@@ -26,6 +28,12 @@ class FakeTableQuery:
 
     def limit(self, value: int):
         self.limit_value = value
+        return self
+
+    def gte(self, *_args, **_kwargs):
+        return self
+
+    def lte(self, *_args, **_kwargs):
         return self
 
     def execute(self):
@@ -88,3 +96,26 @@ async def test_get_recent_opportunities_clamps_limit(monkeypatch: pytest.MonkeyP
 
     assert fake_client.table_query.limit_value == 20
     assert rows and rows[0]["normalized_name"] == "iPhone"
+
+
+@pytest.mark.asyncio
+async def test_get_recent_scoring_rows_selects_expected_fields(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_client = FakeSupabaseClient()
+    monkeypatch.setattr("tech_sniper_it.storage.create_client", lambda _url, _key: fake_client)
+    fake_client.table_query.data = [
+        {
+            "normalized_name": "Apple iPhone 15 Pro 128GB",
+            "category": "apple_phone",
+            "best_offer_eur": 900.0,
+            "spread_eur": 200.0,
+            "offers_payload": [{"platform": "rebuy", "error": None}],
+            "source_url": "https://www.amazon.it/dp/B0TEST",
+        }
+    ]
+
+    storage = SupabaseStorage(url="https://supabase.local", key="service-role-key", table="arbitrage_opportunities")
+    rows = await storage.get_recent_scoring_rows(lookback_days=30, limit=250)
+
+    assert fake_client.table_query.limit_value == 250
+    assert fake_client.table_query.selected_fields is not None
+    assert rows and rows[0]["normalized_name"] == "Apple iPhone 15 Pro 128GB"
