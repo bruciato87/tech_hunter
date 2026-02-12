@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
+import json
 import os
 import re
 from typing import Any
-from urllib.parse import quote_plus, urljoin
+from urllib.parse import quote_plus, unquote, urljoin, urlparse
 
 from bs4 import BeautifulSoup
 from playwright.async_api import Error as PlaywrightError
@@ -29,6 +31,40 @@ DEFAULT_QUERIES: tuple[str, ...] = (
     "sony alpha amazon warehouse",
     "canon eos amazon warehouse",
 )
+DEFAULT_USER_AGENTS: tuple[str, ...] = (
+    (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+    ),
+    (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+    ),
+    (
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+    ),
+    (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:133.0) Gecko/20100101 Firefox/133.0"
+    ),
+    (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 "
+        "(KHTML, like Gecko) Version/18.0 Safari/605.1.15"
+    ),
+)
+DEFAULT_VIEWPORTS: tuple[tuple[int, int], ...] = (
+    (1366, 768),
+    (1440, 900),
+    (1536, 864),
+    (1600, 900),
+)
+ACCEPT_LANGUAGE_BY_HOST: dict[str, str] = {
+    "www.amazon.it": "it-IT,it;q=0.9,en;q=0.8",
+    "www.amazon.de": "de-DE,de;q=0.9,en;q=0.8",
+    "www.amazon.fr": "fr-FR,fr;q=0.9,en;q=0.8",
+    "www.amazon.es": "es-ES,es;q=0.9,en;q=0.8",
+}
+SUPPORTED_PROXY_SCHEMES: set[str] = {"http", "https", "socks5", "socks5h"}
 SEARCH_ROW_SELECTORS: tuple[str, ...] = (
     "div[data-component-type='s-search-result']",
     "div.s-result-item[data-asin]",
@@ -214,6 +250,126 @@ def _should_dump_debug_files() -> bool:
     return _is_truthy_env("AMAZON_WAREHOUSE_DEBUG_ON_EMPTY", "true")
 
 
+def _dedupe_keep_order(values: list[str]) -> list[str]:
+    deduped: list[str] = []
+    for value in values:
+        if value not in deduped:
+            deduped.append(value)
+    return deduped
+
+
+def _parse_proxy_entry(raw: str) -> dict[str, str] | None:
+    text = (raw or "").strip()
+    if not text:
+        return None
+    if "://" not in text:
+        text = f"http://{text}"
+    try:
+        parsed = urlparse(text)
+    except ValueError:
+        return None
+    scheme = (parsed.scheme or "http").lower()
+    if scheme not in SUPPORTED_PROXY_SCHEMES:
+        return None
+    host = parsed.hostname
+    if not host:
+        return None
+
+    server = f"{scheme}://{host}"
+    if parsed.port:
+        server = f"{server}:{parsed.port}"
+
+    proxy: dict[str, str] = {"server": server}
+    if parsed.username:
+        proxy["username"] = unquote(parsed.username)
+    if parsed.password:
+        proxy["password"] = unquote(parsed.password)
+    return proxy
+
+
+def _load_proxy_pool() -> list[dict[str, str]]:
+    raw_values = _split_csv(os.getenv("AMAZON_WAREHOUSE_PROXY_URLS"))
+    proxies: list[dict[str, str]] = []
+    for raw in raw_values:
+        proxy = _parse_proxy_entry(raw)
+        if proxy is None:
+            print("[warehouse] Ignoring invalid proxy entry from AMAZON_WAREHOUSE_PROXY_URLS.")
+            continue
+        proxies.append(proxy)
+    return proxies
+
+
+def _proxy_key(proxy: dict[str, str] | None) -> str:
+    if not proxy:
+        return "direct"
+    username = proxy.get("username", "")
+    server = proxy.get("server", "")
+    return f"{server}|{username}"
+
+
+def _proxy_label(proxy: dict[str, str] | None) -> str:
+    if not proxy:
+        return "direct"
+    server = proxy.get("server", "")
+    return server or "direct"
+
+
+def _parse_user_agent_list(raw: str | None) -> list[str]:
+    value = (raw or "").strip()
+    if not value:
+        return []
+    if value.startswith("["):
+        try:
+            loaded = json.loads(value)
+            if isinstance(loaded, list):
+                return _dedupe_keep_order([str(item).strip() for item in loaded if str(item).strip()])
+        except json.JSONDecodeError:
+            return []
+    if "||" in value:
+        return _dedupe_keep_order([item.strip() for item in value.split("||") if item.strip()])
+    if "\n" in value:
+        return _dedupe_keep_order([item.strip() for item in value.splitlines() if item.strip()])
+    return [value]
+
+
+def _load_user_agents() -> list[str]:
+    configured = _parse_user_agent_list(os.getenv("AMAZON_WAREHOUSE_USER_AGENTS"))
+    if configured:
+        return configured
+    return list(DEFAULT_USER_AGENTS)
+
+
+def _max_attempts_per_query() -> int:
+    return max(1, int(_env_or_default("AMAZON_WAREHOUSE_MAX_ATTEMPTS_PER_QUERY", "3")))
+
+
+def _retry_delay_ms() -> int:
+    return max(0, int(_env_or_default("AMAZON_WAREHOUSE_RETRY_DELAY_MS", "700")))
+
+
+def _choose_from_pool(pool: list[Any], index: int, rotate: bool) -> tuple[Any, int]:
+    if not pool:
+        return None, index
+    if not rotate:
+        return pool[0], index
+    chosen = pool[index % len(pool)]
+    return chosen, index + 1
+
+
+def _viewport_for_session(session_id: int) -> dict[str, int]:
+    width, height = DEFAULT_VIEWPORTS[session_id % len(DEFAULT_VIEWPORTS)]
+    return {"width": width, "height": height}
+
+
+def _shorten(text: str | None, limit: int = 64) -> str:
+    value = (text or "").strip()
+    if not value:
+        return "n/d"
+    if len(value) <= limit:
+        return value
+    return f"{value[: limit - 3]}..."
+
+
 def _slug(text: str) -> str:
     value = re.sub(r"[^a-z0-9]+", "_", (text or "").lower()).strip("_")
     return value[:64] or "query"
@@ -231,7 +387,10 @@ async def _log_empty_parse_diagnostics(  # noqa: ANN001
     query: str,
     html: str,
     row_count: int,
-) -> None:
+    session_id: int,
+    user_agent: str | None,
+    proxy_label: str,
+) -> list[str]:
     try:
         title = await page.title()
     except Exception:
@@ -240,15 +399,16 @@ async def _log_empty_parse_diagnostics(  # noqa: ANN001
     barrier_text = ",".join(barriers) if barriers else "none"
     print(
         f"[warehouse] Empty parse on {host} | query='{query}' | candidate_rows={row_count} "
+        f"| session={session_id} | ua='{_shorten(user_agent)}' | proxy={proxy_label} "
         f"| title='{title}' | barriers={barrier_text}"
     )
     print(f"[warehouse] HTML excerpt: {_html_excerpt(html)}")
 
     if not _should_dump_debug_files():
-        return
+        return barriers
     dump_dir = _debug_dump_dir()
     os.makedirs(dump_dir, exist_ok=True)
-    base = f"{host.replace('.', '_')}_{_slug(query)}"
+    base = f"{host.replace('.', '_')}_{_slug(query)}_s{session_id}"
     html_path = os.path.join(dump_dir, f"{base}.html")
     screenshot_path = os.path.join(dump_dir, f"{base}.png")
     try:
@@ -262,6 +422,7 @@ async def _log_empty_parse_diagnostics(  # noqa: ANN001
         print(f"[warehouse] Saved debug screenshot: {screenshot_path}")
     except Exception as exc:
         print(f"[warehouse] Failed to save debug screenshot: {type(exc).__name__}: {exc}")
+    return barriers
 
 
 def _extract_products_from_html(html: str, host: str) -> list[dict[str, Any]]:
@@ -330,15 +491,28 @@ async def fetch_amazon_warehouse_products(
     queries = _split_csv(os.getenv("AMAZON_WAREHOUSE_QUERIES")) or list(DEFAULT_QUERIES)
     max_products = max(1, int(_env_or_default("AMAZON_WAREHOUSE_MAX_PRODUCTS", "8")))
     max_price = _max_price_eur()
+    proxy_pool = _load_proxy_pool()
+    user_agents = _load_user_agents()
+    max_attempts = _max_attempts_per_query()
+    retry_delay_ms = _retry_delay_ms()
+    rotate_proxy = _is_truthy_env("AMAZON_WAREHOUSE_ROTATE_PROXY", "true")
+    rotate_user_agent = _is_truthy_env("AMAZON_WAREHOUSE_ROTATE_USER_AGENT", "true")
 
     results: list[dict[str, Any]] = []
     seen_urls: set[str] = set()
+    proxy_index = 0
+    user_agent_index = 0
+    session_id = 0
+
+    print(
+        "[warehouse] Rotation config: "
+        f"proxy_pool={len(proxy_pool)} rotate_proxy={rotate_proxy} "
+        f"user_agents={len(user_agents)} rotate_user_agent={rotate_user_agent} "
+        f"attempts_per_query={max_attempts}"
+    )
 
     async with async_playwright() as playwright:
-        browser = await playwright.chromium.launch(headless=headless)
-        context = await browser.new_context(locale="it-IT")
-        page = await context.new_page()
-        page.set_default_timeout(nav_timeout_ms)
+        browsers: dict[str, Any] = {}
         try:
             for marketplace in marketplaces:
                 host = MARKETPLACE_HOSTS.get(marketplace.lower())
@@ -350,26 +524,88 @@ async def fetch_amazon_warehouse_products(
                     if len(results) >= max_products:
                         break
                     search_url = _build_search_url(host, query)
-                    print(f"[warehouse] Loading {search_url}")
-                    try:
-                        await page.goto(search_url, wait_until="domcontentloaded")
-                        await _accept_cookie_if_present(page)
-                        await page.wait_for_timeout(1200)
-                        html = await page.content()
-                        parsed = _extract_products_from_html(html, host)
-                        print(f"[warehouse] Parsed offers for {host} query='{query}': {len(parsed)}")
-                        if not parsed:
-                            row_count = len(_collect_search_rows(BeautifulSoup(html, "html.parser")))
-                            await _log_empty_parse_diagnostics(
-                                page,
-                                host=host,
-                                query=query,
-                                html=html,
-                                row_count=row_count,
+                    parsed: list[dict[str, Any]] = []
+                    for attempt in range(1, max_attempts + 1):
+                        proxy_config, proxy_index = _choose_from_pool(proxy_pool, proxy_index, rotate_proxy)
+                        user_agent, user_agent_index = _choose_from_pool(
+                            user_agents,
+                            user_agent_index,
+                            rotate_user_agent,
+                        )
+                        proxy_label = _proxy_label(proxy_config)
+                        session_id += 1
+
+                        browser_key = _proxy_key(proxy_config)
+                        browser = browsers.get(browser_key)
+                        if browser is None:
+                            launch_kwargs: dict[str, Any] = {"headless": headless}
+                            if proxy_config:
+                                launch_kwargs["proxy"] = proxy_config
+                            browser = await playwright.chromium.launch(**launch_kwargs)
+                            browsers[browser_key] = browser
+                            print(f"[warehouse] Opened browser session for proxy={proxy_label}")
+
+                        context_kwargs: dict[str, Any] = {
+                            "locale": "it-IT",
+                            "viewport": _viewport_for_session(session_id),
+                            "extra_http_headers": {
+                                "Accept-Language": ACCEPT_LANGUAGE_BY_HOST.get(host, "it-IT,it;q=0.9,en;q=0.8")
+                            },
+                        }
+                        if user_agent:
+                            context_kwargs["user_agent"] = user_agent
+
+                        context = await browser.new_context(**context_kwargs)
+                        page = await context.new_page()
+                        page.set_default_timeout(nav_timeout_ms)
+                        print(
+                            f"[warehouse] Loading {search_url} | attempt={attempt}/{max_attempts} "
+                            f"| session={session_id} | ua='{_shorten(user_agent)}' | proxy={proxy_label}"
+                        )
+                        barriers: list[str] = []
+                        try:
+                            await page.goto(search_url, wait_until="domcontentloaded")
+                            await _accept_cookie_if_present(page)
+                            await page.wait_for_timeout(1200)
+                            html = await page.content()
+                            parsed = _extract_products_from_html(html, host)
+                            print(
+                                f"[warehouse] Parsed offers for {host} query='{query}' "
+                                f"attempt={attempt}: {len(parsed)}"
                             )
-                    except Exception as exc:
-                        print(f"[warehouse] Search error on {host}: {type(exc).__name__}: {exc}")
-                        continue
+                            if not parsed:
+                                row_count = len(_collect_search_rows(BeautifulSoup(html, "html.parser")))
+                                barriers = await _log_empty_parse_diagnostics(
+                                    page,
+                                    host=host,
+                                    query=query,
+                                    html=html,
+                                    row_count=row_count,
+                                    session_id=session_id,
+                                    user_agent=user_agent,
+                                    proxy_label=proxy_label,
+                                )
+                        except Exception as exc:
+                            parsed = []
+                            print(
+                                f"[warehouse] Search error on {host} query='{query}' "
+                                f"attempt={attempt} session={session_id} proxy={proxy_label}: "
+                                f"{type(exc).__name__}: {exc}"
+                            )
+                        finally:
+                            await context.close()
+
+                        if parsed:
+                            break
+
+                        if attempt < max_attempts:
+                            reason = ",".join(barriers) if barriers else "empty-parse"
+                            print(
+                                f"[warehouse] Retrying {host} query='{query}' in {retry_delay_ms}ms "
+                                f"after {reason}."
+                            )
+                            if retry_delay_ms:
+                                await asyncio.sleep(retry_delay_ms / 1000)
 
                     for item in parsed:
                         item_url = str(item.get("url") or "")
@@ -385,8 +621,11 @@ async def fetch_amazon_warehouse_products(
                         if len(results) >= max_products:
                             break
         finally:
-            await context.close()
-            await browser.close()
+            for browser in list(browsers.values()):
+                try:
+                    await browser.close()
+                except Exception:
+                    continue
 
     print(f"[warehouse] Collected products: {len(results)}")
     return results

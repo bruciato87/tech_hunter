@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 
@@ -22,6 +23,24 @@ def _warehouse_enabled() -> bool:
 
 def _parse_marketplaces(value: str | None) -> list[str]:
     return [item.strip().lower() for item in (value or "").split(",") if item.strip()]
+
+
+def _parse_proxy(value: str) -> tuple[bool, str]:
+    raw = value.strip()
+    if not raw:
+        return False, "empty"
+    if "://" not in raw:
+        raw = f"http://{raw}"
+    try:
+        parsed = urlparse(raw)
+    except ValueError:
+        return False, "invalid-url"
+    scheme = (parsed.scheme or "").lower()
+    if scheme not in {"http", "https", "socks5", "socks5h"}:
+        return False, f"unsupported-scheme:{scheme or 'none'}"
+    if not parsed.hostname:
+        return False, "missing-host"
+    return True, ""
 
 
 def main() -> int:
@@ -84,6 +103,30 @@ def main() -> int:
                 + ",".join(sorted(set(unsupported)))
                 + " (supported: it,de,fr,es,eu)."
             )
+
+        try:
+            attempts = int(_env_or_default("AMAZON_WAREHOUSE_MAX_ATTEMPTS_PER_QUERY", "3"))
+            if attempts < 1:
+                errors.append("AMAZON_WAREHOUSE_MAX_ATTEMPTS_PER_QUERY must be >= 1.")
+        except ValueError:
+            errors.append("AMAZON_WAREHOUSE_MAX_ATTEMPTS_PER_QUERY must be integer.")
+
+        try:
+            retry_delay = int(_env_or_default("AMAZON_WAREHOUSE_RETRY_DELAY_MS", "700"))
+            if retry_delay < 0:
+                errors.append("AMAZON_WAREHOUSE_RETRY_DELAY_MS must be >= 0.")
+        except ValueError:
+            errors.append("AMAZON_WAREHOUSE_RETRY_DELAY_MS must be integer.")
+
+        proxy_values = _split_csv(os.getenv("AMAZON_WAREHOUSE_PROXY_URLS"))
+        for proxy in proxy_values:
+            ok, reason = _parse_proxy(proxy)
+            if not ok:
+                warnings.append(
+                    "AMAZON_WAREHOUSE_PROXY_URLS contains invalid proxy entry: "
+                    + proxy
+                    + f" ({reason})."
+                )
 
     if errors:
         print("Environment validation failed:")

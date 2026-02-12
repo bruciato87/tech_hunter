@@ -62,6 +62,12 @@ python -m tech_sniper_it.worker
 - `AMAZON_WAREHOUSE_MAX_PRODUCTS` (default: `8`)
 - `AMAZON_WAREHOUSE_MAX_PRICE_EUR` (optional ceiling)
 - `AMAZON_WAREHOUSE_QUERIES` (optional comma-separated search seeds)
+- `AMAZON_WAREHOUSE_PROXY_URLS` (optional comma-separated proxy endpoints, e.g. `http://user:pass@host:port`)
+- `AMAZON_WAREHOUSE_ROTATE_PROXY` (default: `true`)
+- `AMAZON_WAREHOUSE_USER_AGENTS` (optional JSON array or `||`-separated list)
+- `AMAZON_WAREHOUSE_ROTATE_USER_AGENT` (default: `true`)
+- `AMAZON_WAREHOUSE_MAX_ATTEMPTS_PER_QUERY` (default: `3`)
+- `AMAZON_WAREHOUSE_RETRY_DELAY_MS` (default: `700`)
 - `AMAZON_WAREHOUSE_DEBUG_ON_EMPTY` (default: `true`, saves diagnostic dump on zero parsed results)
 - `AMAZON_WAREHOUSE_DEBUG_DIR` (default: `/tmp/tech_sniper_it_debug`)
 

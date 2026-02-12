@@ -5,6 +5,8 @@ from tech_sniper_it.sources.amazon_warehouse import (
     _detect_page_barriers,
     _expand_marketplaces,
     _extract_products_from_html,
+    _parse_proxy_entry,
+    _parse_user_agent_list,
 )
 
 
@@ -92,3 +94,23 @@ def test_detect_page_barriers_flags_captcha_and_consent() -> None:
     assert "robot-check" in captcha_barriers
     assert "consent" in consent_barriers
     assert "sorry-page" in sorry_barriers
+
+
+def test_parse_proxy_entry_supports_auth_and_port() -> None:
+    proxy = _parse_proxy_entry("http://user:pass@proxy.example.com:8080")
+    assert proxy == {
+        "server": "http://proxy.example.com:8080",
+        "username": "user",
+        "password": "pass",
+    }
+
+
+def test_parse_proxy_entry_rejects_invalid_scheme() -> None:
+    assert _parse_proxy_entry("ftp://proxy.example.com:21") is None
+
+
+def test_parse_user_agent_list_supports_json_and_separator() -> None:
+    parsed_json = _parse_user_agent_list('["UA-1","UA-2","UA-1"]')
+    parsed_pipe = _parse_user_agent_list("UA-3||UA-4")
+    assert parsed_json == ["UA-1", "UA-2"]
+    assert parsed_pipe == ["UA-3", "UA-4"]
