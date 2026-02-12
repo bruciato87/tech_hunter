@@ -29,6 +29,43 @@ DEFAULT_QUERIES: tuple[str, ...] = (
     "sony alpha amazon warehouse",
     "canon eos amazon warehouse",
 )
+SEARCH_ROW_SELECTORS: tuple[str, ...] = (
+    "div[data-component-type='s-search-result']",
+    "div.s-result-item[data-asin]",
+)
+SPONSORED_HINTS: tuple[str, ...] = (
+    "sponsorizzato",
+    "sponsored",
+    "gesponsert",
+    "sponsorisé",
+)
+BARRIER_HINTS: dict[str, tuple[str, ...]] = {
+    "captcha": (
+        "captchacharacters",
+        "/errors/validatecaptcha",
+        "type the characters you see in this image",
+    ),
+    "robot-check": (
+        "robot check",
+        "not a robot",
+        "sei un robot",
+    ),
+    "consent": (
+        "consenso",
+        "cookie",
+        "your choices regarding cookies",
+        "sp-cc-accept",
+        "accetta i cookie",
+        "accept all cookies",
+    ),
+    "signin": (
+        "signin",
+        "accedi",
+        "anmelden",
+        "se connecter",
+        "identificati",
+    ),
+}
 
 
 def _split_csv(value: str | None) -> list[str]:
@@ -90,28 +127,153 @@ def _canonical_amazon_url(host: str, href: str | None) -> str | None:
     return absolute
 
 
+def _collect_search_rows(soup: BeautifulSoup) -> list[Any]:
+    rows: list[Any] = []
+    seen: set[int] = set()
+    for selector in SEARCH_ROW_SELECTORS:
+        for row in soup.select(selector):
+            marker = id(row)
+            if marker in seen:
+                continue
+            seen.add(marker)
+            rows.append(row)
+    return rows
+
+
+def _extract_title_from_row(row: Any) -> str | None:
+    selectors = [
+        "h2 a span",
+        "span.a-size-medium.a-color-base.a-text-normal",
+        "span.a-size-base-plus.a-color-base.a-text-normal",
+        "a.a-link-normal.s-no-outline span",
+    ]
+    for selector in selectors:
+        node = row.select_one(selector)
+        if not node:
+            continue
+        title = node.get_text(" ", strip=True)
+        if title:
+            return title
+    return None
+
+
+def _extract_link_from_row(host: str, row: Any) -> str | None:
+    anchors = row.select("a[href]")
+    preferred = None
+    fallback = None
+    for anchor in anchors:
+        href = anchor.get("href")
+        if not href:
+            continue
+        if fallback is None:
+            fallback = href
+        if re.search(r"/(dp|gp/product)/[A-Z0-9]{10}", href, flags=re.IGNORECASE):
+            preferred = href
+            break
+    return _canonical_amazon_url(host, preferred or fallback)
+
+
+def _extract_price_from_row(row: Any) -> float | None:
+    for node in row.select(".a-price .a-offscreen"):
+        price = parse_eur_price(node.get_text(" ", strip=True))
+        if price is not None:
+            return price
+    return parse_eur_price(row.get_text(" ", strip=True))
+
+
+def _is_sponsored(text: str) -> bool:
+    lowered = text.lower()
+    return any(hint in lowered for hint in SPONSORED_HINTS)
+
+
+def _detect_page_barriers(html: str, title: str | None = None) -> list[str]:
+    lowered = f"{title or ''}\n{html}".lower()
+    barriers: list[str] = []
+    for label, hints in BARRIER_HINTS.items():
+        if any(hint in lowered for hint in hints):
+            barriers.append(label)
+    return barriers
+
+
+def _is_truthy_env(name: str, default: str) -> bool:
+    return _env_or_default(name, default).lower() not in {"0", "false", "no", "off"}
+
+
+def _debug_dump_dir() -> str:
+    return _env_or_default("AMAZON_WAREHOUSE_DEBUG_DIR", "/tmp/tech_sniper_it_debug")
+
+
+def _should_dump_debug_files() -> bool:
+    return _is_truthy_env("AMAZON_WAREHOUSE_DEBUG_ON_EMPTY", "true")
+
+
+def _slug(text: str) -> str:
+    value = re.sub(r"[^a-z0-9]+", "_", (text or "").lower()).strip("_")
+    return value[:64] or "query"
+
+
+def _html_excerpt(html: str, *, limit: int = 220) -> str:
+    collapsed = re.sub(r"\s+", " ", html).strip()
+    return collapsed[:limit]
+
+
+async def _log_empty_parse_diagnostics(  # noqa: ANN001
+    page,
+    *,
+    host: str,
+    query: str,
+    html: str,
+    row_count: int,
+) -> None:
+    try:
+        title = await page.title()
+    except Exception:
+        title = ""
+    barriers = _detect_page_barriers(html, title)
+    barrier_text = ",".join(barriers) if barriers else "none"
+    print(
+        f"[warehouse] Empty parse on {host} | query='{query}' | candidate_rows={row_count} "
+        f"| title='{title}' | barriers={barrier_text}"
+    )
+    print(f"[warehouse] HTML excerpt: {_html_excerpt(html)}")
+
+    if not _should_dump_debug_files():
+        return
+    dump_dir = _debug_dump_dir()
+    os.makedirs(dump_dir, exist_ok=True)
+    base = f"{host.replace('.', '_')}_{_slug(query)}"
+    html_path = os.path.join(dump_dir, f"{base}.html")
+    screenshot_path = os.path.join(dump_dir, f"{base}.png")
+    try:
+        with open(html_path, "w", encoding="utf-8") as handle:
+            handle.write(html)
+        print(f"[warehouse] Saved debug html: {html_path}")
+    except Exception as exc:
+        print(f"[warehouse] Failed to save debug html: {type(exc).__name__}: {exc}")
+    try:
+        await page.screenshot(path=screenshot_path, full_page=True)
+        print(f"[warehouse] Saved debug screenshot: {screenshot_path}")
+    except Exception as exc:
+        print(f"[warehouse] Failed to save debug screenshot: {type(exc).__name__}: {exc}")
+
+
 def _extract_products_from_html(html: str, host: str) -> list[dict[str, Any]]:
     soup = BeautifulSoup(html, "html.parser")
-    rows = soup.select("div[data-component-type='s-search-result']")
+    rows = _collect_search_rows(soup)
     results: list[dict[str, Any]] = []
 
     for row in rows:
-        title_node = row.select_one("h2 a span")
-        link_node = row.select_one("h2 a[href]")
-        if not title_node or not link_node:
-            continue
-
-        title = title_node.get_text(" ", strip=True)
+        title = _extract_title_from_row(row)
         if not title:
             continue
-        if "sponsorizzato" in title.lower():
+        if _is_sponsored(title):
             continue
 
-        price = parse_eur_price(row.get_text(" ", strip=True))
+        price = _extract_price_from_row(row)
         if price is None:
             continue
 
-        url = _canonical_amazon_url(host, link_node.get("href"))
+        url = _extract_link_from_row(host, row)
         if not url:
             continue
 
@@ -186,7 +348,18 @@ async def fetch_amazon_warehouse_products(
                         await page.goto(search_url, wait_until="domcontentloaded")
                         await _accept_cookie_if_present(page)
                         await page.wait_for_timeout(1200)
-                        parsed = _extract_products_from_html(await page.content(), host)
+                        html = await page.content()
+                        parsed = _extract_products_from_html(html, host)
+                        print(f"[warehouse] Parsed offers for {host} query='{query}': {len(parsed)}")
+                        if not parsed:
+                            row_count = len(_collect_search_rows(BeautifulSoup(html, "html.parser")))
+                            await _log_empty_parse_diagnostics(
+                                page,
+                                host=host,
+                                query=query,
+                                html=html,
+                                row_count=row_count,
+                            )
                     except Exception as exc:
                         print(f"[warehouse] Search error on {host}: {type(exc).__name__}: {exc}")
                         continue

@@ -62,6 +62,8 @@ python -m tech_sniper_it.worker
 - `AMAZON_WAREHOUSE_MAX_PRODUCTS` (default: `8`)
 - `AMAZON_WAREHOUSE_MAX_PRICE_EUR` (optional ceiling)
 - `AMAZON_WAREHOUSE_QUERIES` (optional comma-separated search seeds)
+- `AMAZON_WAREHOUSE_DEBUG_ON_EMPTY` (default: `true`, saves diagnostic dump on zero parsed results)
+- `AMAZON_WAREHOUSE_DEBUG_DIR` (default: `/tmp/tech_sniper_it_debug`)
 
 ## Supabase Setup (RLS Enabled)
 
