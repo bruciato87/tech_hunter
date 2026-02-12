@@ -75,6 +75,27 @@ python -m tech_sniper_it.worker
 - `AMAZON_WAREHOUSE_DEBUG_ON_EMPTY` (default: `true`, saves diagnostic dump on zero parsed results)
 - `AMAZON_WAREHOUSE_DEBUG_DIR` (default: `/tmp/tech_sniper_it_debug`)
 
+### Free Bypass With Your Amazon Account Session
+
+To reduce `sorry-page` blocks without paid proxies, capture a logged-in Amazon Playwright session locally and store it as secret.
+
+Generate storage state base64:
+
+```bash
+source .venv/bin/activate
+python scripts/capture_amazon_storage_state.py --domain www.amazon.it
+```
+
+Copy the printed base64 value to GitHub Secret:
+
+- `AMAZON_WAREHOUSE_STORAGE_STATE_B64`
+
+Keep enabled:
+
+- `AMAZON_WAREHOUSE_USE_STORAGE_STATE=true`
+- `AMAZON_WAREHOUSE_STEALTH=true`
+- `AMAZON_WAREHOUSE_FAIL_FAST_ON_SORRY=true`
+
 ## Supabase Setup (RLS Enabled)
 
 Migration file is already prepared at:
