@@ -42,8 +42,28 @@ class SmartAIBalancer:
         self.timeout = timeout_seconds
         self._gemini_cycle = itertools.cycle(self.gemini_keys) if self.gemini_keys else None
         self._openrouter_cycle = itertools.cycle(self.openrouter_keys) if self.openrouter_keys else None
+        self._cache: dict[str, tuple[str, dict[str, str | bool | None]]] = {}
+        self._last_usage: dict[str, str | bool | None] = {
+            "provider": None,
+            "model": None,
+            "mode": "fallback",
+            "ai_used": False,
+        }
 
     async def normalize_product_name(self, title: str) -> str:
+        normalized, _ = await self.normalize_with_meta(title)
+        return normalized
+
+    async def normalize_with_meta(self, title: str) -> tuple[str, dict[str, str | bool | None]]:
+        cache_key = (title or "").strip()
+        cached = self._cache.get(cache_key)
+        if cached:
+            normalized, meta = cached
+            cached_meta = dict(meta)
+            cached_meta["mode"] = "cache"
+            self._last_usage = cached_meta
+            return normalized, cached_meta
+
         prompt = (
             "Estrai il modello prodotto in formato breve e rivendibile in Italia. "
             "Mantieni marca/modello/taglio memoria essenziale. "
@@ -58,7 +78,15 @@ class SmartAIBalancer:
                     response = await self._call_gemini(api_key, prompt, title)
                     cleaned = self._sanitize_result(response)
                     if cleaned:
-                        return cleaned
+                        usage = {
+                            "provider": "gemini",
+                            "model": self.gemini_model,
+                            "mode": "live",
+                            "ai_used": True,
+                        }
+                        self._cache[cache_key] = (cleaned, usage)
+                        self._last_usage = usage
+                        return cleaned, usage
                 except Exception:
                     continue
 
@@ -69,11 +97,31 @@ class SmartAIBalancer:
                     response = await self._call_openrouter(api_key, prompt, title)
                     cleaned = self._sanitize_result(response)
                     if cleaned:
-                        return cleaned
+                        usage = {
+                            "provider": "openrouter",
+                            "model": self.openrouter_model,
+                            "mode": "live",
+                            "ai_used": True,
+                        }
+                        self._cache[cache_key] = (cleaned, usage)
+                        self._last_usage = usage
+                        return cleaned, usage
                 except Exception:
                     continue
 
-        return self._heuristic_normalize(title)
+        fallback = self._heuristic_normalize(title)
+        usage = {
+            "provider": "heuristic",
+            "model": None,
+            "mode": "fallback",
+            "ai_used": False,
+        }
+        self._cache[cache_key] = (fallback, usage)
+        self._last_usage = usage
+        return fallback, usage
+
+    def get_last_usage(self) -> dict[str, str | bool | None]:
+        return dict(self._last_usage)
 
     async def _call_gemini(self, api_key: str, prompt: str, title: str) -> str:
         url = (

@@ -368,6 +368,20 @@ def _retry_delay_ms() -> int:
     return max(0, int(_env_or_default("AMAZON_WAREHOUSE_RETRY_DELAY_MS", "700")))
 
 
+def _per_query_limit(total_budget: int, query_count: int) -> int:
+    configured = (os.getenv("AMAZON_WAREHOUSE_PER_QUERY_LIMIT") or "").strip()
+    if configured:
+        try:
+            value = int(configured)
+        except ValueError:
+            value = 0
+        if value > 0:
+            return value
+    if query_count <= 0:
+        return total_budget
+    return max(1, (total_budget + query_count - 1) // query_count)
+
+
 def _fail_fast_on_sorry() -> bool:
     return _is_truthy_env("AMAZON_WAREHOUSE_FAIL_FAST_ON_SORRY", "true")
 
@@ -585,6 +599,7 @@ async def fetch_amazon_warehouse_products(
     *,
     headless: bool = True,
     nav_timeout_ms: int = 45000,
+    max_products: int | None = None,
 ) -> list[dict[str, Any]]:
     if not _is_enabled():
         return []
@@ -592,7 +607,7 @@ async def fetch_amazon_warehouse_products(
     configured_marketplaces = _split_csv(os.getenv("AMAZON_WAREHOUSE_MARKETPLACES")) or list(DEFAULT_MARKETPLACES)
     marketplaces = _expand_marketplaces(configured_marketplaces)
     queries = _split_csv(os.getenv("AMAZON_WAREHOUSE_QUERIES")) or list(DEFAULT_QUERIES)
-    max_products = max(1, int(_env_or_default("AMAZON_WAREHOUSE_MAX_PRODUCTS", "8")))
+    max_products = max(1, int(max_products or _env_or_default("AMAZON_WAREHOUSE_MAX_PRODUCTS", "8")))
     max_price = _max_price_eur()
     proxy_pool = _load_proxy_pool()
     user_agents = _load_user_agents()
@@ -608,6 +623,8 @@ async def fetch_amazon_warehouse_products(
         print("[warehouse] Storage state loaded for Amazon authenticated session.")
     rotate_proxy = _is_truthy_env("AMAZON_WAREHOUSE_ROTATE_PROXY", "true")
     rotate_user_agent = _is_truthy_env("AMAZON_WAREHOUSE_ROTATE_USER_AGENT", "true")
+    per_query_limit = _per_query_limit(max_products, len(queries))
+    query_totals: dict[str, int] = {query: 0 for query in queries}
 
     results: list[dict[str, Any]] = []
     seen_urls: set[str] = set()
@@ -620,7 +637,8 @@ async def fetch_amazon_warehouse_products(
         f"proxy_pool={len(proxy_pool)} rotate_proxy={rotate_proxy} "
         f"user_agents={len(user_agents)} rotate_user_agent={rotate_user_agent} "
         f"attempts_per_query={max_attempts} fail_fast_on_sorry={fail_fast_on_sorry} "
-        f"stealth={stealth} storage_state={'on' if storage_state_path else 'off'}"
+        f"stealth={stealth} storage_state={'on' if storage_state_path else 'off'} "
+        f"max_products={max_products} per_query_limit={per_query_limit}"
     )
 
     async with async_playwright() as playwright:
@@ -739,6 +757,8 @@ async def fetch_amazon_warehouse_products(
                         item_url = str(item.get("url") or "")
                         if item_url in seen_urls:
                             continue
+                        if query_totals.get(query, 0) >= per_query_limit:
+                            continue
                         price = item.get("price_eur")
                         if max_price is not None and isinstance(price, (float, int)) and float(price) > max_price:
                             continue
@@ -746,6 +766,7 @@ async def fetch_amazon_warehouse_products(
                         seen_urls.add(item_url)
                         item["source_marketplace"] = marketplace.lower()
                         results.append(item)
+                        query_totals[query] = query_totals.get(query, 0) + 1
                         if len(results) >= max_products:
                             break
         finally:
@@ -756,7 +777,8 @@ async def fetch_amazon_warehouse_products(
                     continue
             _remove_file_if_exists(storage_state_path)
 
-    print(f"[warehouse] Collected products: {len(results)}")
+    query_stats = ", ".join(f"'{query}':{query_totals.get(query, 0)}" for query in queries)
+    print(f"[warehouse] Collected products: {len(results)} | per-query stats: {query_stats}")
     return results
 
 

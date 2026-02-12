@@ -7,16 +7,23 @@ import pytest
 
 from tech_sniper_it.models import ProductCategory
 from tech_sniper_it.worker import (
+    _ai_usage_label,
+    _ai_usage_stats,
     _amazon_search_url,
     _chunk_telegram_text,
     _coerce_product,
+    _dedupe_products,
+    _exclude_non_profitable_candidates,
     _format_scan_summary,
+    _is_truthy_env,
     _normalize_http_url,
     _offer_log_payload,
     _parse_last_limit,
+    _prioritize_products,
     _resolve_command,
     _run_scan_command,
     _run_status_command,
+    _save_non_profitable_decisions,
     _safe_error_details,
     _send_telegram_message,
     load_products,
@@ -102,12 +109,69 @@ def test_load_products_from_env_json(monkeypatch: pytest.MonkeyPatch) -> None:
     assert products[0].title == "Camera"
 
 
+def test_is_truthy_env_helper(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("X_FLAG", "false")
+    assert _is_truthy_env("X_FLAG", "true") is False
+    monkeypatch.setenv("X_FLAG", "true")
+    assert _is_truthy_env("X_FLAG", "false") is True
+
+
+def test_dedupe_products_prefers_unique_url() -> None:
+    p1 = type(
+        "P",
+        (),
+        {
+            "title": "Apple iPhone 14 Pro 128GB",
+            "price_eur": 500.0,
+            "category": ProductCategory.APPLE_PHONE,
+            "url": "https://www.amazon.it/dp/B0TEST",
+        },
+    )()
+    p2 = type(
+        "P",
+        (),
+        {
+            "title": "Apple iPhone 14 Pro 128GB",
+            "price_eur": 500.0,
+            "category": ProductCategory.APPLE_PHONE,
+            "url": "https://www.amazon.it/dp/B0TEST",
+        },
+    )()
+    items = _dedupe_products([p1, p2])
+    assert len(items) == 1
+
+
+def test_prioritize_products_orders_by_price_then_category() -> None:
+    p1 = type("P", (), {"title": "Camera", "price_eur": 320.0, "category": ProductCategory.PHOTOGRAPHY})()
+    p2 = type("P", (), {"title": "iPhone", "price_eur": 320.0, "category": ProductCategory.APPLE_PHONE})()
+    p3 = type("P", (), {"title": "Laptop", "price_eur": 500.0, "category": ProductCategory.GENERAL_TECH})()
+    ordered = _prioritize_products([p1, p3, p2])
+    assert ordered[0].title == "iPhone"
+    assert ordered[1].title == "Camera"
+    assert ordered[2].title == "Laptop"
+
+
+def test_ai_usage_helpers() -> None:
+    decision = type(
+        "D",
+        (),
+        {"ai_provider": "gemini", "ai_model": "gemini-2.0-flash", "ai_mode": "live"},
+    )()
+    label = _ai_usage_label(decision)
+    assert "gemini" in label
+    counts = _ai_usage_stats([decision, type("D2", (), {"ai_provider": "heuristic"})()])
+    assert counts == (1, 0, 1)
+
+
 def test_format_scan_summary() -> None:
     class DummyDecision:
         def __init__(self, name, spread, should_notify, platform):  # noqa: ANN001
             self.normalized_name = name
             self.spread_eur = spread
             self.should_notify = should_notify
+            self.ai_provider = "gemini"
+            self.ai_model = "gemini-2.0-flash"
+            self.ai_mode = "live"
             self.product = type("Product", (), {"price_eur": 500.0, "url": "https://amazon.it/item"})()
             self.best_offer = type(
                 "Best",
@@ -146,7 +210,9 @@ def test_format_scan_summary_falls_back_to_amazon_search_link() -> None:
             self.offers = [type("Offer", (), {"platform": "rebuy", "offer_eur": 510.0, "error": None})()]
 
     summary = _format_scan_summary([DummyDecision()], threshold=40.0)
-    assert "🛒 Amazon link: https://www.amazon.it/s?k=Apple+iPhone+14+Pro+128GB" in summary
+    assert "✅ Opportunita sopra soglia: 0" in summary
+    assert "😴 Nessuna opportunita sopra soglia in questa run." in summary
+    assert "🛒 Amazon link:" not in summary
 
 
 @pytest.mark.asyncio
@@ -214,7 +280,7 @@ async def test_run_status_command_includes_emojis(monkeypatch: pytest.MonkeyPatc
     sent_messages = []
 
     class DummyStorage:
-        async def get_recent_opportunities(self, limit: int = 1):  # noqa: ANN201
+        async def get_recent_opportunities(self, limit: int = 1, min_spread_eur: float | None = None):  # noqa: ANN201
             return []
 
     class DummyManager:
@@ -251,7 +317,7 @@ async def test_run_status_command_reports_last_opportunity(monkeypatch: pytest.M
     sent_messages = []
 
     class DummyStorage:
-        async def get_recent_opportunities(self, limit: int = 1):  # noqa: ANN201
+        async def get_recent_opportunities(self, limit: int = 1, min_spread_eur: float | None = None):  # noqa: ANN201
             return [{"normalized_name": "iPhone 15 128GB", "spread_eur": 52.4, "best_platform": "rebuy"}]
 
     class DummyManager:
@@ -278,7 +344,7 @@ async def test_run_status_command_handles_storage_read_error(monkeypatch: pytest
     sent_messages = []
 
     class DummyStorage:
-        async def get_recent_opportunities(self, limit: int = 1):  # noqa: ANN201
+        async def get_recent_opportunities(self, limit: int = 1, min_spread_eur: float | None = None):  # noqa: ANN201
             raise RuntimeError("db unavailable")
 
     class DummyManager:
@@ -318,6 +384,9 @@ async def test_run_scan_command_sends_summary_for_manual_debug(monkeypatch: pyte
             self.best_offer = type("B", (), {"offer_eur": 650.0, "platform": "rebuy"})()
             self.spread_eur = -29.0
             self.should_notify = False
+            self.ai_provider = "heuristic"
+            self.ai_model = None
+            self.ai_mode = "fallback"
             self.offers = []
 
     class DummyManager:
@@ -345,7 +414,8 @@ async def test_run_scan_command_sends_summary_for_manual_debug(monkeypatch: pyte
     assert len(sent_messages) == 1
     assert sent_messages[0][0] is None
     assert "🔎 Scan completata" in sent_messages[0][1]
-    assert "🏆 Best offer: 650.00 EUR (rebuy)" in sent_messages[0][1]
+    assert "✅ Opportunita sopra soglia: 0" in sent_messages[0][1]
+    assert "🏆 Best offer:" not in sent_messages[0][1]
 
 
 @pytest.mark.asyncio
@@ -375,6 +445,9 @@ async def test_run_scan_command_uses_warehouse_fallback_when_no_input(monkeypatc
             )()
             self.spread_eur = 21.0
             self.should_notify = False
+            self.ai_provider = "gemini"
+            self.ai_model = "gemini-2.0-flash"
+            self.ai_mode = "live"
             self.offers = [type("Offer", (), {"platform": "rebuy", "offer_eur": 700.0, "error": None})()]
 
     class DummyManager:
@@ -407,6 +480,7 @@ async def test_run_scan_command_uses_warehouse_fallback_when_no_input(monkeypatc
     assert exit_code == 0
     assert len(sent_messages) == 1
     assert "Prodotti analizzati: 1" in sent_messages[0][1]
+    assert "✅ Opportunita sopra soglia: 0" in sent_messages[0][1]
 
 
 @pytest.mark.asyncio
@@ -428,6 +502,9 @@ async def test_run_scan_command_sends_summary_when_default_telegram_configured(m
             self.best_offer = type("B", (), {"offer_eur": 650.0, "platform": "rebuy", "source_url": None})()
             self.spread_eur = -29.0
             self.should_notify = False
+            self.ai_provider = "heuristic"
+            self.ai_model = None
+            self.ai_mode = "fallback"
             self.offers = []
 
     class DummyManager:
@@ -469,6 +546,9 @@ async def test_run_scan_command_skips_summary_without_telegram_configuration(mon
             self.best_offer = type("B", (), {"offer_eur": 650.0, "platform": "rebuy", "source_url": None})()
             self.spread_eur = -29.0
             self.should_notify = False
+            self.ai_provider = "heuristic"
+            self.ai_model = None
+            self.ai_mode = "fallback"
             self.offers = []
 
     class DummyManager:
@@ -496,3 +576,45 @@ async def test_run_scan_command_skips_summary_without_telegram_configuration(mon
 
     assert exit_code == 0
     assert len(sent_messages) == 0
+
+
+@pytest.mark.asyncio
+async def test_exclude_non_profitable_candidates_filters_by_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    class DummyStorage:
+        async def get_excluded_source_urls(self, *, max_spread_eur: float, lookback_days: int, limit: int):  # noqa: ANN201
+            return {"https://www.amazon.it/dp/B0SKIP"}
+
+    manager = type("M", (), {"storage": DummyStorage(), "min_spread_eur": 40.0})()
+    monkeypatch.setenv("EXCLUDE_NON_PROFITABLE", "true")
+
+    keep = type(
+        "P1",
+        (),
+        {"title": "Keep", "price_eur": 100.0, "category": ProductCategory.GENERAL_TECH, "url": "https://www.amazon.it/dp/B0KEEP"},
+    )()
+    skip = type(
+        "P2",
+        (),
+        {"title": "Skip", "price_eur": 100.0, "category": ProductCategory.GENERAL_TECH, "url": "https://www.amazon.it/dp/B0SKIP"},
+    )()
+    filtered = await _exclude_non_profitable_candidates(manager, [keep, skip])
+    assert len(filtered) == 1
+    assert filtered[0].title == "Keep"
+
+
+@pytest.mark.asyncio
+async def test_save_non_profitable_decisions_counts(monkeypatch: pytest.MonkeyPatch) -> None:
+    saved = []
+
+    class DummyStorage:
+        async def save_non_profitable(self, decision, threshold: float):  # noqa: ANN001
+            saved.append((decision, threshold))
+
+    manager = type("M", (), {"storage": DummyStorage(), "min_spread_eur": 40.0})()
+    decision_low = type("D1", (), {"spread_eur": 10.0})()
+    decision_high = type("D2", (), {"spread_eur": 60.0})()
+    decision_none = type("D3", (), {"spread_eur": None})()
+
+    count = await _save_non_profitable_decisions(manager, [decision_low, decision_high, decision_none])
+    assert count == 1
+    assert len(saved) == 3

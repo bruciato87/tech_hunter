@@ -53,4 +53,7 @@ class ArbitrageDecision:
     best_offer: ValuationResult | None
     spread_eur: float | None
     should_notify: bool
-
+    ai_provider: str | None = None
+    ai_model: str | None = None
+    ai_mode: str | None = None
+    ai_used: bool = False

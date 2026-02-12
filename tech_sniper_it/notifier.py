@@ -24,6 +24,7 @@ class TelegramNotifier:
             f"💶 Amazon Warehouse: {product.price_eur:.2f} EUR",
             f"🏆 Miglior cash-out: {best.offer_eur:.2f} EUR ({platform})",
             f"📈 Spread netto: +{decision.spread_eur:.2f} EUR",
+            f"🧠 AI match: {decision.ai_provider or 'heuristic'} ({decision.ai_mode or 'fallback'})",
             "⚡ Azione consigliata: verifica disponibilita e prezzo in tempo reale.",
         ]
         if product.url:

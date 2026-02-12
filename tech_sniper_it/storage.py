@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from supabase import Client, create_client
@@ -39,18 +40,54 @@ class SupabaseStorage:
 
         await asyncio.to_thread(_insert)
 
-    async def get_recent_opportunities(self, limit: int = 5) -> list[dict[str, Any]]:
+    async def save_non_profitable(self, decision: ArbitrageDecision, *, threshold: float) -> None:
+        if not decision.best_offer or decision.spread_eur is None:
+            return
+        if decision.spread_eur > threshold:
+            return
+        await self.save_opportunity(decision)
+
+    async def get_recent_opportunities(self, limit: int = 5, *, min_spread_eur: float | None = None) -> list[dict[str, Any]]:
         safe_limit = max(1, min(limit, 20))
 
         def _select() -> list[dict[str, Any]]:
-            response = (
-                self.client.table(self.table)
-                .select("*")
-                .order("created_at", desc=True)
-                .limit(safe_limit)
-                .execute()
-            )
+            query = self.client.table(self.table).select("*")
+            if min_spread_eur is not None:
+                query = query.gt("spread_eur", float(min_spread_eur))
+            response = query.order("created_at", desc=True).limit(safe_limit).execute()
             data = getattr(response, "data", None)
             return data if isinstance(data, list) else []
+
+        return await asyncio.to_thread(_select)
+
+    async def get_excluded_source_urls(
+        self,
+        *,
+        max_spread_eur: float,
+        lookback_days: int = 14,
+        limit: int = 1000,
+    ) -> set[str]:
+        safe_limit = max(10, min(limit, 5000))
+        cutoff_iso: str | None = None
+        if lookback_days > 0:
+            cutoff = datetime.now(UTC) - timedelta(days=lookback_days)
+            cutoff_iso = cutoff.isoformat()
+
+        def _select() -> set[str]:
+            query = self.client.table(self.table).select("source_url,spread_eur").lte("spread_eur", float(max_spread_eur))
+            if cutoff_iso:
+                query = query.gte("created_at", cutoff_iso)
+            response = query.order("created_at", desc=True).limit(safe_limit).execute()
+            data = getattr(response, "data", None)
+            if not isinstance(data, list):
+                return set()
+            urls: set[str] = set()
+            for row in data:
+                if not isinstance(row, dict):
+                    continue
+                value = row.get("source_url")
+                if isinstance(value, str) and value.strip():
+                    urls.add(value.strip())
+            return urls
 
         return await asyncio.to_thread(_select)

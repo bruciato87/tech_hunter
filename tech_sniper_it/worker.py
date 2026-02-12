@@ -26,6 +26,10 @@ def _env_or_default(name: str, default: str) -> str:
     return default
 
 
+def _is_truthy_env(name: str, default: str) -> bool:
+    return _env_or_default(name, default).lower() not in {"0", "false", "no", "off"}
+
+
 def _load_github_event_data() -> dict[str, Any]:
     event_path = os.getenv("GITHUB_EVENT_PATH")
     if not event_path or not Path(event_path).exists():
@@ -179,6 +183,30 @@ def _format_offers_compact(decision) -> str:  # noqa: ANN001
     return " | ".join(items) if items else "n/d"
 
 
+def _ai_usage_label(decision) -> str:  # noqa: ANN001
+    provider = str(getattr(decision, "ai_provider", None) or "heuristic")
+    model = getattr(decision, "ai_model", None)
+    mode = str(getattr(decision, "ai_mode", None) or "fallback")
+    if model:
+        return f"{provider} ({model}, {mode})"
+    return f"{provider} ({mode})"
+
+
+def _ai_usage_stats(decisions: list) -> tuple[int, int, int]:  # noqa: ANN001
+    gemini = 0
+    openrouter = 0
+    heuristic = 0
+    for decision in decisions:
+        provider = str(getattr(decision, "ai_provider", "")).lower()
+        if provider == "gemini":
+            gemini += 1
+        elif provider == "openrouter":
+            openrouter += 1
+        else:
+            heuristic += 1
+    return gemini, openrouter, heuristic
+
+
 def _spread_status_badge(spread_eur: float | None, threshold: float) -> tuple[str, str]:
     if spread_eur is None:
         return "⚪", "Valutazione incompleta"
@@ -291,9 +319,94 @@ def load_products(event_data: dict[str, Any] | None = None) -> list[AmazonProduc
     return products
 
 
+def _product_dedupe_key(product: AmazonProduct) -> str:
+    normalized_url = _normalize_http_url(getattr(product, "url", None))
+    if normalized_url:
+        return f"url:{normalized_url}"
+    title = str(getattr(product, "title", ""))
+    price = float(getattr(product, "price_eur", 0.0))
+    category = getattr(getattr(product, "category", None), "value", "general_tech")
+    title_key = " ".join(title.lower().split())
+    return f"title:{title_key}|price:{price:.2f}|cat:{category}"
+
+
+def _dedupe_products(products: list[AmazonProduct]) -> list[AmazonProduct]:
+    deduped: list[AmazonProduct] = []
+    seen: set[str] = set()
+    for product in products:
+        key = _product_dedupe_key(product)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(product)
+    return deduped
+
+
+def _prioritize_products(products: list[AmazonProduct]) -> list[AmazonProduct]:
+    category_weight = {
+        ProductCategory.APPLE_PHONE: 0,
+        ProductCategory.PHOTOGRAPHY: 1,
+        ProductCategory.GENERAL_TECH: 2,
+    }
+    return sorted(
+        products,
+        key=lambda item: (
+            float(item.price_eur),
+            category_weight.get(item.category, 9),
+            len(item.title),
+        ),
+    )
+
+
+async def _exclude_non_profitable_candidates(manager, products: list[AmazonProduct]) -> list[AmazonProduct]:  # noqa: ANN001
+    storage = getattr(manager, "storage", None)
+    if not storage or not _is_truthy_env("EXCLUDE_NON_PROFITABLE", "true"):
+        return products
+
+    lookback_days = max(1, int(_env_or_default("EXCLUDE_LOOKBACK_DAYS", "14")))
+    max_rows = max(50, int(_env_or_default("EXCLUDE_MAX_ROWS", "1500")))
+    excluded_urls = await storage.get_excluded_source_urls(
+        max_spread_eur=manager.min_spread_eur,
+        lookback_days=lookback_days,
+        limit=max_rows,
+    )
+    if not excluded_urls:
+        print("[scan] Exclusion cache: no historical under-threshold urls.")
+        return products
+
+    filtered: list[AmazonProduct] = []
+    removed = 0
+    for product in products:
+        normalized_url = _normalize_http_url(product.url)
+        if normalized_url and normalized_url in excluded_urls:
+            removed += 1
+            continue
+        filtered.append(product)
+    print(
+        "[scan] Exclusion cache applied | "
+        f"removed={removed} kept={len(filtered)} lookback_days={lookback_days} rows={len(excluded_urls)}"
+    )
+    return filtered
+
+
+async def _save_non_profitable_decisions(manager, decisions: list) -> int:  # noqa: ANN001
+    storage = getattr(manager, "storage", None)
+    if not storage:
+        return 0
+    tasks = [storage.save_non_profitable(decision, threshold=manager.min_spread_eur) for decision in decisions]
+    if not tasks:
+        return 0
+    await asyncio.gather(*tasks)
+    saved = sum(1 for decision in decisions if decision.spread_eur is not None and decision.spread_eur <= manager.min_spread_eur)
+    print(f"[scan] Stored non-profitable records for exclusion cache: {saved}")
+    return saved
+
+
 def _format_scan_summary(decisions: list, threshold: float) -> str:
     profitable = [item for item in decisions if item.should_notify and item.spread_eur is not None]
     best_spread = max((item.spread_eur for item in decisions if item.spread_eur is not None), default=None)
+    gemini_count, openrouter_count, heuristic_count = _ai_usage_stats(decisions)
+    ai_live_count = gemini_count + openrouter_count
     lines = [
         "🚀 Tech_Sniper_IT | Scan Report",
         "━━━━━━━━━━━━━━━━━━━━",
@@ -302,14 +415,17 @@ def _format_scan_summary(decisions: list, threshold: float) -> str:
         f"📦 Prodotti analizzati: {len(decisions)}",
         f"🎯 Soglia spread: {threshold:.2f} EUR",
         f"✅ Opportunita sopra soglia: {len(profitable)}",
+        f"🗑️ Scartati sotto soglia: {len(decisions) - len(profitable)}",
+        f"🧠 AI usata: {ai_live_count}/{len(decisions)} | gemini={gemini_count} openrouter={openrouter_count} fallback={heuristic_count}",
         f"🏁 Miglior spread trovato: {_format_signed_eur(best_spread)}",
     ]
 
-    if not decisions:
-        lines.append("😴 Nessun prodotto analizzato in questa run.")
+    if not profitable:
+        lines.append("😴 Nessuna opportunita sopra soglia in questa run.")
         return "\n".join(lines)
 
-    for index, decision in enumerate(decisions, start=1):
+    ranked = sorted(profitable, key=lambda item: item.spread_eur or 0.0, reverse=True)
+    for index, decision in enumerate(ranked, start=1):
         best_offer = decision.best_offer
         spread = _format_signed_eur(decision.spread_eur)
         status_icon, status_text = _spread_status_badge(decision.spread_eur, threshold)
@@ -319,7 +435,7 @@ def _format_scan_summary(decisions: list, threshold: float) -> str:
         best_offer_url = _normalize_http_url(getattr(best_offer, "source_url", None) if best_offer else None)
         platform_name = best_offer.platform if best_offer else "n/d"
         platform_icon = _platform_icon(platform_name)
-        decision_label = "🔥 SI" if decision.should_notify else "🫧 no"
+        decision_label = "🔥 SI"
         display_name = decision.normalized_name or getattr(decision.product, "title", "n/d")
         category = getattr(getattr(decision.product, "category", None), "value", None) or "n/d"
         lines.extend(
@@ -333,6 +449,7 @@ def _format_scan_summary(decisions: list, threshold: float) -> str:
                 f"{platform_icon} Reseller top: {platform_name}",
                 f"📈 Spread netto: {spread}",
                 f"🚨 Opportunita: {decision_label}",
+                f"🧠 AI match: {_ai_usage_label(decision)}",
                 f"📊 Offerte: {_format_offers_compact(decision)}",
                 f"🛒 Amazon link: {product_url}",
                 f"🔗 Link migliore offerta: {best_offer_url or 'n/d'}",
@@ -346,13 +463,22 @@ async def _run_scan_command(payload: dict[str, Any]) -> int:
     print("[scan] Starting worker scan command.")
     products = load_products(_load_github_event_data())
     command_chat = _telegram_target_chat(payload)
+    scan_target_products = max(1, int(_env_or_default("SCAN_TARGET_PRODUCTS", _env_or_default("AMAZON_WAREHOUSE_MAX_PRODUCTS", "8"))))
+    candidate_multiplier = max(1, int(_env_or_default("SCAN_CANDIDATE_MULTIPLIER", "3")))
+    candidate_budget = scan_target_products * candidate_multiplier
     if not products:
         print("[scan] No explicit products provided. Trying Amazon Warehouse automatic source (IT+EU).")
         try:
-            warehouse_items = await fetch_amazon_warehouse_products(
-                headless=_env_or_default("HEADLESS", "true").lower() != "false",
-                nav_timeout_ms=int(_env_or_default("PLAYWRIGHT_NAV_TIMEOUT_MS", "45000")),
-            )
+            fetch_kwargs = {
+                "headless": _env_or_default("HEADLESS", "true").lower() != "false",
+                "nav_timeout_ms": int(_env_or_default("PLAYWRIGHT_NAV_TIMEOUT_MS", "45000")),
+                "max_products": candidate_budget,
+            }
+            try:
+                warehouse_items = await fetch_amazon_warehouse_products(**fetch_kwargs)
+            except TypeError:
+                fetch_kwargs.pop("max_products", None)
+                warehouse_items = await fetch_amazon_warehouse_products(**fetch_kwargs)
         except Exception as exc:  # pragma: no cover - defensive fallback
             warehouse_items = []
             print(f"[scan] Amazon Warehouse source error: {_safe_error_details(exc)}")
@@ -373,9 +499,30 @@ async def _run_scan_command(payload: dict[str, Any]) -> int:
                 await _send_telegram_message(message, command_chat)
             return 0
 
+    deduped = _dedupe_products(products)
+    if len(deduped) != len(products):
+        print(f"[scan] Deduplicated products: {len(products)} -> {len(deduped)}")
+    products = deduped
+    products = await _exclude_non_profitable_candidates(manager, products)
+    products = _prioritize_products(products)
+    if len(products) > scan_target_products:
+        print(
+            "[scan] Candidate selection | "
+            f"target={scan_target_products} budget={candidate_budget} selected={scan_target_products} total_after_filter={len(products)}"
+        )
+        products = products[:scan_target_products]
+
+    if not products:
+        message = "Nessun candidato disponibile dopo i filtri di esclusione storica."
+        print(message)
+        if payload.get("source") in {"telegram", "vercel_scan_api", "manual_debug"}:
+            await _send_telegram_message(message, command_chat)
+        return 0
+
     max_parallel_products = int(_env_or_default("MAX_PARALLEL_PRODUCTS", "3"))
     print(f"[scan] Loaded products: {len(products)} | max_parallel_products={max_parallel_products}")
     decisions = await manager.evaluate_many(products, max_parallel_products=max_parallel_products)
+    await _save_non_profitable_decisions(manager, decisions)
     profitable = [item for item in decisions if item.should_notify]
     print(f"Scanned: {len(decisions)} | Profitable: {len(profitable)}")
     for decision in decisions:
@@ -385,6 +532,10 @@ async def _run_scan_command(payload: dict[str, Any]) -> int:
                 {
                     "title": decision.product.title,
                     "normalized": decision.normalized_name,
+                    "ai_provider": getattr(decision, "ai_provider", None),
+                    "ai_model": getattr(decision, "ai_model", None),
+                    "ai_mode": getattr(decision, "ai_mode", None),
+                    "ai_used": getattr(decision, "ai_used", False),
                     "amazon_price": decision.product.price_eur,
                     "best_offer": best,
                     "best_platform": decision.best_offer.platform if decision.best_offer else None,
@@ -431,7 +582,10 @@ async def _run_status_command(payload: dict[str, Any]) -> int:
 
     if manager.storage:
         try:
-            recent = await manager.storage.get_recent_opportunities(limit=1)
+            try:
+                recent = await manager.storage.get_recent_opportunities(limit=1, min_spread_eur=manager.min_spread_eur)
+            except TypeError:
+                recent = await manager.storage.get_recent_opportunities(limit=1)
             if recent:
                 row = recent[0]
                 lines.append(
@@ -460,7 +614,10 @@ async def _run_last_command(payload: dict[str, Any]) -> int:
 
     limit = _parse_last_limit(payload)
     try:
-        rows = await manager.storage.get_recent_opportunities(limit=limit)
+        try:
+            rows = await manager.storage.get_recent_opportunities(limit=limit, min_spread_eur=manager.min_spread_eur)
+        except TypeError:
+            rows = await manager.storage.get_recent_opportunities(limit=limit)
     except Exception as exc:
         message = f"Errore lettura Supabase: {_safe_error_details(exc)}"
         print(message)
