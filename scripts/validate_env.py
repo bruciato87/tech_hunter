@@ -61,6 +61,24 @@ def _parse_selector_overrides(value: str | None) -> bool:
     return True
 
 
+def _parse_openrouter_model_power_json(value: str | None) -> bool:
+    raw = (value or "").strip()
+    if not raw:
+        return True
+    try:
+        decoded = json.loads(raw)
+    except Exception:
+        return False
+    if not isinstance(decoded, dict):
+        return False
+    for key, score in decoded.items():
+        if not isinstance(key, str) or not key.strip():
+            return False
+        if not isinstance(score, (int, float)):
+            return False
+    return True
+
+
 def main() -> int:
     load_dotenv()
     errors: list[str] = []
@@ -107,6 +125,44 @@ def main() -> int:
     raw_selector_overrides = (os.getenv("VALUATOR_SELECTOR_OVERRIDES_JSON") or "").strip()
     if raw_selector_overrides and not _parse_selector_overrides(raw_selector_overrides):
         warnings.append("VALUATOR_SELECTOR_OVERRIDES_JSON is set but invalid (ignored).")
+
+    openrouter_free_models = _split_csv(os.getenv("OPENROUTER_FREE_MODELS"))
+    if openrouter_keys and not openrouter_free_models:
+        warnings.append(
+            "OPENROUTER_FREE_MODELS is empty. The balancer will use the built-in default free-tier pool."
+        )
+
+    openrouter_model_power_json = (os.getenv("OPENROUTER_MODEL_POWER_JSON") or "").strip()
+    if openrouter_model_power_json and not _parse_openrouter_model_power_json(openrouter_model_power_json):
+        warnings.append("OPENROUTER_MODEL_POWER_JSON is set but invalid (ignored).")
+
+    try:
+        openrouter_max_models = int(_env_or_default("OPENROUTER_MAX_MODELS_PER_REQUEST", "3"))
+        if openrouter_max_models < 1:
+            errors.append("OPENROUTER_MAX_MODELS_PER_REQUEST must be >= 1.")
+    except ValueError:
+        errors.append("OPENROUTER_MAX_MODELS_PER_REQUEST must be integer.")
+
+    try:
+        cooldown = int(_env_or_default("OPENROUTER_MODEL_COOLDOWN_SECONDS", "900"))
+        if cooldown < 1:
+            errors.append("OPENROUTER_MODEL_COOLDOWN_SECONDS must be >= 1.")
+    except ValueError:
+        errors.append("OPENROUTER_MODEL_COOLDOWN_SECONDS must be integer.")
+
+    try:
+        not_found_cooldown = int(_env_or_default("OPENROUTER_MODEL_NOT_FOUND_COOLDOWN_SECONDS", "86400"))
+        if not_found_cooldown < 1:
+            errors.append("OPENROUTER_MODEL_NOT_FOUND_COOLDOWN_SECONDS must be >= 1.")
+    except ValueError:
+        errors.append("OPENROUTER_MODEL_NOT_FOUND_COOLDOWN_SECONDS must be integer.")
+
+    try:
+        transient_cooldown = int(_env_or_default("OPENROUTER_MODEL_TRANSIENT_COOLDOWN_SECONDS", "120"))
+        if transient_cooldown < 1:
+            errors.append("OPENROUTER_MODEL_TRANSIENT_COOLDOWN_SECONDS must be >= 1.")
+    except ValueError:
+        errors.append("OPENROUTER_MODEL_TRANSIENT_COOLDOWN_SECONDS must be integer.")
 
     if _warehouse_enabled():
         try:

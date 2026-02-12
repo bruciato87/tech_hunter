@@ -51,6 +51,12 @@ python -m tech_sniper_it.worker
 - `OPENROUTER_API_KEYS` (comma-separated)
 - `OPENROUTER_MODEL` (default: `openrouter/auto`)
 - `OPENROUTER_BASE_URL` (default: `https://openrouter.ai/api/v1/chat/completions`)
+- `OPENROUTER_FREE_MODELS` (ordered free-tier model pool, strongest -> weakest)
+- `OPENROUTER_MODEL_POWER_JSON` (optional JSON score overrides for ranking)
+- `OPENROUTER_MAX_MODELS_PER_REQUEST` (default: `3`)
+- `OPENROUTER_MODEL_COOLDOWN_SECONDS` (default: `900`, quota/rate-limit cooldown)
+- `OPENROUTER_MODEL_NOT_FOUND_COOLDOWN_SECONDS` (default: `86400`)
+- `OPENROUTER_MODEL_TRANSIENT_COOLDOWN_SECONDS` (default: `120`)
 - `MIN_SPREAD_EUR` (default: `40`)
 - `MAX_PARALLEL_PRODUCTS` (default: `3`)
 - `PLAYWRIGHT_NAV_TIMEOUT_MS` (default: `45000`)
@@ -77,6 +83,22 @@ python -m tech_sniper_it.worker
 - `AMAZON_WAREHOUSE_STORAGE_STATE_B64` (optional base64 Playwright storage state for logged-in Amazon session)
 - `AMAZON_WAREHOUSE_DEBUG_ON_EMPTY` (default: `true`, saves diagnostic dump on zero parsed results)
 - `AMAZON_WAREHOUSE_DEBUG_DIR` (default: `/tmp/tech_sniper_it_debug`)
+
+### AI Free-Tier Selection Logic
+
+When `OPENROUTER_MODEL=openrouter/auto`, the balancer does not rely blindly on auto-routing.
+It ranks models from `OPENROUTER_FREE_MODELS` (power-first), then skips temporarily unavailable models based on runtime errors:
+
+- `rate limit / quota / token exhausted` -> cooldown `OPENROUTER_MODEL_COOLDOWN_SECONDS`
+- `model not found` -> cooldown `OPENROUTER_MODEL_NOT_FOUND_COOLDOWN_SECONDS`
+- `transient upstream/network` -> cooldown `OPENROUTER_MODEL_TRANSIENT_COOLDOWN_SECONDS`
+
+For each normalization request it tries up to `OPENROUTER_MAX_MODELS_PER_REQUEST` candidates in ranked order and logs:
+
+- requested model (`openrouter/auto` or explicit)
+- candidate model attempted
+- resolved upstream model actually used
+- cooldown reason when a model is temporarily skipped
 
 ### UI Drift Auto-Adaptation
 
@@ -176,6 +198,12 @@ Optional secrets:
 - `GEMINI_MODEL`
 - `OPENROUTER_MODEL`
 - `OPENROUTER_BASE_URL`
+- `OPENROUTER_FREE_MODELS`
+- `OPENROUTER_MODEL_POWER_JSON`
+- `OPENROUTER_MAX_MODELS_PER_REQUEST`
+- `OPENROUTER_MODEL_COOLDOWN_SECONDS`
+- `OPENROUTER_MODEL_NOT_FOUND_COOLDOWN_SECONDS`
+- `OPENROUTER_MODEL_TRANSIENT_COOLDOWN_SECONDS`
 - `AMAZON_WAREHOUSE_ENABLED`
 - `AMAZON_WAREHOUSE_MARKETPLACES`
 - `AMAZON_WAREHOUSE_MAX_PRODUCTS`

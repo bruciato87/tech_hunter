@@ -55,3 +55,33 @@ def test_validate_env_warns_on_invalid_selector_override(tmp_path: Path) -> None
     )
     assert result.returncode == 0
     assert "VALUATOR_SELECTOR_OVERRIDES_JSON is set but invalid" in result.stdout
+
+
+def test_validate_env_warns_on_invalid_openrouter_power_json(tmp_path: Path) -> None:
+    result = _run_validate_env(
+        tmp_path,
+        {
+            "OPENROUTER_API_KEYS": "k1",
+            "MIN_SPREAD_EUR": "40",
+            "MAX_PARALLEL_PRODUCTS": "2",
+            "PLAYWRIGHT_NAV_TIMEOUT_MS": "45000",
+            "OPENROUTER_MODEL_POWER_JSON": '["invalid"]',
+        },
+    )
+    assert result.returncode == 0
+    assert "OPENROUTER_MODEL_POWER_JSON is set but invalid" in result.stdout
+
+
+def test_validate_env_fails_on_invalid_openrouter_max_models(tmp_path: Path) -> None:
+    result = _run_validate_env(
+        tmp_path,
+        {
+            "OPENROUTER_API_KEYS": "k1",
+            "MIN_SPREAD_EUR": "40",
+            "MAX_PARALLEL_PRODUCTS": "2",
+            "PLAYWRIGHT_NAV_TIMEOUT_MS": "45000",
+            "OPENROUTER_MAX_MODELS_PER_REQUEST": "0",
+        },
+    )
+    assert result.returncode == 1
+    assert "OPENROUTER_MAX_MODELS_PER_REQUEST must be >= 1." in result.stdout
