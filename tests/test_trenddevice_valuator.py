@@ -14,9 +14,14 @@ from tech_sniper_it.valuators.trenddevice import (
     WizardOption,
     _detect_wizard_step,
     _extract_contextual_price,
+    _extract_keyed_prices_from_text,
     _extract_iphone_model_hint,
+    _extract_prices_from_json_blob,
+    _is_credible_network_candidate,
     _is_email_gate_text,
     _normalize_wizard_text,
+    _parse_plain_price,
+    _pick_best_network_candidate,
     _pick_wizard_option,
 )
 
@@ -222,3 +227,59 @@ def test_is_email_gate_text_detects_lead_form_copy() -> None:
 
 def test_is_email_gate_text_rejects_generic_page_text() -> None:
     assert _is_email_gate_text("Vendi il tuo iPhone in pochi minuti.") is False
+
+
+def test_parse_plain_price_supports_eu_and_cents() -> None:
+    assert _parse_plain_price("412,99") == 412.99
+    assert _parse_plain_price("41299") == 412.99
+    assert _parse_plain_price("10") is None
+
+
+def test_extract_keyed_prices_from_text_detects_offer_tokens() -> None:
+    rows = _extract_keyed_prices_from_text("price: 399,99 EUR | offerta 412.50€")
+    values = [item[1] for item in rows]
+    assert any(abs(value - 399.99) < 0.001 for value in values)
+    assert any(abs(value - 412.5) < 0.001 for value in values)
+
+
+def test_extract_prices_from_json_blob_detects_nested_price_fields() -> None:
+    data = {"result": {"offerPrice": 37900, "meta": {"prezzo_finale": "412,99 €"}}}
+    rows = _extract_prices_from_json_blob(data)
+    values = sorted(item[1] for item in rows)
+    assert 379.0 in values
+    assert 412.99 in values
+
+
+def test_pick_best_network_candidate_prefers_high_score_then_value() -> None:
+    value, snippet = _pick_best_network_candidate(
+        [
+            {"score": 50, "value": 300.0, "snippet": "candidate a", "source": "context", "url": "https://www.trendevice.com/vendi/valutazione/"},
+            {
+                "score": 72,
+                "value": 250.0,
+                "snippet": "ti offriamo 250€ dopo valutazione",
+                "source": "context",
+                "url": "https://www.trendevice.com/vendi/valutazione/",
+            },
+            {
+                "score": 72,
+                "value": 280.0,
+                "snippet": "ti offriamo 280€ dopo valutazione",
+                "source": "context",
+                "url": "https://www.trendevice.com/vendi/valutazione/",
+            },
+        ]
+    )
+    assert value == 280.0
+    assert "280" in snippet
+
+
+def test_is_credible_network_candidate_rejects_static_promotional_chunk() -> None:
+    candidate = {
+        "url": "https://www.trendevice.com/_next/static/chunks/abc.js",
+        "score": 80,
+        "value": 800.0,
+        "snippet": "fino a -800€",
+        "source": "context",
+    }
+    assert _is_credible_network_candidate(candidate) is False

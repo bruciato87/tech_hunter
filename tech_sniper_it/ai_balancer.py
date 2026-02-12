@@ -4,6 +4,7 @@ import asyncio
 import itertools
 import os
 import re
+from typing import Any
 from typing import Iterable
 
 import httpx
@@ -43,6 +44,27 @@ def _short_title(value: str, limit: int = 80) -> str:
     if len(text) <= limit:
         return text
     return text[: limit - 3] + "..."
+
+
+def _extract_openrouter_resolved_model(data: dict[str, Any], headers: dict[str, str] | None = None) -> str | None:
+    top_level_model = data.get("model")
+    if isinstance(top_level_model, str) and top_level_model.strip():
+        return top_level_model.strip()
+
+    choices = data.get("choices", [])
+    if isinstance(choices, list) and choices:
+        first = choices[0] if isinstance(choices[0], dict) else {}
+        for key in ("model", "provider_model", "resolved_model"):
+            value = first.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+
+    if headers:
+        for key in ("x-openrouter-model", "x-model", "x-upstream-model"):
+            value = headers.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return None
 
 
 class SmartAIBalancer:
@@ -155,11 +177,16 @@ class SmartAIBalancer:
                 )
                 try:
                     response = await self._call_openrouter(api_key, prompt, title)
-                    cleaned = self._sanitize_result(response)
+                    if isinstance(response, tuple):
+                        response_text, resolved_model = response
+                    else:
+                        response_text, resolved_model = str(response), None
+                    selected_model = resolved_model or self.openrouter_model
+                    cleaned = self._sanitize_result(response_text)
                     if cleaned:
                         usage = {
                             "provider": "openrouter",
-                            "model": self.openrouter_model,
+                            "model": selected_model,
                             "mode": "live",
                             "ai_used": True,
                         }
@@ -167,7 +194,7 @@ class SmartAIBalancer:
                         self._last_usage = usage
                         print(
                             "[ai] selected | "
-                            f"provider=openrouter model={self.openrouter_model} normalized='{cleaned}'"
+                            f"provider=openrouter model={selected_model} requested={self.openrouter_model} normalized='{cleaned}'"
                         )
                         return cleaned, usage
                     print(
@@ -233,7 +260,7 @@ class SmartAIBalancer:
             return ""
         return parts[0].get("text", "").strip()
 
-    async def _call_openrouter(self, api_key: str, prompt: str, title: str) -> str:
+    async def _call_openrouter(self, api_key: str, prompt: str, title: str) -> tuple[str, str | None]:
         headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
@@ -251,10 +278,13 @@ class SmartAIBalancer:
             response = await client.post(self.openrouter_base_url, headers=headers, json=payload)
             response.raise_for_status()
             data = response.json()
+            response_headers = {key.lower(): value for key, value in response.headers.items()}
+        resolved_model = _extract_openrouter_resolved_model(data, response_headers)
         choices = data.get("choices", [])
         if not choices:
-            return ""
-        return choices[0].get("message", {}).get("content", "").strip()
+            return "", resolved_model
+        content = choices[0].get("message", {}).get("content", "").strip()
+        return content, resolved_model
 
     def _sanitize_result(self, text: str) -> str:
         value = (text or "").strip()

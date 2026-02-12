@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from tech_sniper_it.ai_balancer import SmartAIBalancer, _split_csv
+from tech_sniper_it.ai_balancer import SmartAIBalancer, _extract_openrouter_resolved_model, _split_csv
 
 
 def test_split_csv() -> None:
@@ -74,3 +74,14 @@ def test_sanitize_result_removes_citation_markers() -> None:
     balancer = SmartAIBalancer(gemini_keys=[], openrouter_keys=[])
     value = balancer._sanitize_result("Apple iPhone 16 Pro 128GB[1][2][4]")
     assert value == "Apple iPhone 16 Pro 128GB"
+
+
+def test_extract_openrouter_resolved_model_prefers_top_level() -> None:
+    data = {"model": "anthropic/claude-3.5-sonnet"}
+    assert _extract_openrouter_resolved_model(data) == "anthropic/claude-3.5-sonnet"
+
+
+def test_extract_openrouter_resolved_model_uses_header_fallback() -> None:
+    data = {"choices": [{"message": {"content": "ok"}}]}
+    headers = {"x-openrouter-model": "openai/gpt-4.1-mini"}
+    assert _extract_openrouter_resolved_model(data, headers) == "openai/gpt-4.1-mini"

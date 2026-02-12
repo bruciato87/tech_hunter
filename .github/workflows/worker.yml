@@ -11,7 +11,7 @@ on:
   repository_dispatch:
     types: [scan, telegram_command]
   schedule:
-    - cron: "0 */6 * * *"
+    - cron: "0 * * * *"
 
 concurrency:
   group: tech-sniper-it-worker

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import json
 import os
 import re
 from dataclasses import dataclass
@@ -85,6 +87,29 @@ PRICE_CONTEXT_BLOCKERS: tuple[str, ...] = (
     "cookie",
     "p.iva",
     "rea",
+)
+NETWORK_PRICE_KEYS: tuple[str, ...] = (
+    "price",
+    "prezzo",
+    "offer",
+    "offerta",
+    "valuation",
+    "quote",
+    "quotazione",
+    "valore",
+    "amount",
+    "totale",
+    "cash",
+    "payout",
+)
+NETWORK_PROMO_BLOCKERS: tuple[str, ...] = (
+    "fino al",
+    "fino a",
+    "sconti",
+    "promo",
+    "garanzia",
+    "reso gratis",
+    "rate",
 )
 
 
@@ -334,6 +359,111 @@ def _is_email_gate_text(text: str) -> bool:
     has_submit_cta = "scopri la valutazione" in normalized
     has_wizard_context = "dispositivo usato" in normalized or "guadagnare" in normalized or "valutazione" in normalized
     return has_mail and has_submit_cta and has_wizard_context
+
+
+def _parse_plain_price(value: str | int | float) -> float | None:
+    if isinstance(value, (int, float)):
+        parsed = float(value)
+    else:
+        raw = str(value or "").strip()
+        if not raw:
+            return None
+        raw = raw.replace(" ", "")
+        if "," in raw and "." in raw:
+            # assume European format 1.234,56
+            raw = raw.replace(".", "").replace(",", ".")
+        else:
+            raw = raw.replace(",", ".")
+        try:
+            parsed = float(raw)
+        except ValueError:
+            return None
+    if parsed > 5000 and parsed <= 500000:
+        parsed = parsed / 100
+    if 20 <= parsed <= 5000:
+        return round(parsed, 2)
+    return None
+
+
+def _extract_keyed_prices_from_text(text: str) -> list[tuple[int, float, str]]:
+    if not text:
+        return []
+    normalized = " ".join(text.split())
+    candidates: list[tuple[int, float, str]] = []
+    for keyword in NETWORK_PRICE_KEYS:
+        pattern = re.compile(rf"(?i){re.escape(keyword)}[^0-9€]{{0,40}}(\d{{2,5}}(?:[.,]\d{{1,2}})?)\s*€?")
+        for match in pattern.finditer(normalized):
+            value = _parse_plain_price(match.group(1))
+            if value is None:
+                continue
+            snippet = normalized[max(0, match.start() - 70) : min(len(normalized), match.end() + 70)]
+            score = 46 + (8 if "€" in match.group(0) else 0)
+            candidates.append((score, value, snippet.strip()))
+    return candidates
+
+
+def _extract_prices_from_json_blob(blob: Any, path: str = "") -> list[tuple[int, float, str]]:
+    candidates: list[tuple[int, float, str]] = []
+    if isinstance(blob, dict):
+        for key, value in blob.items():
+            key_text = str(key)
+            next_path = f"{path}.{key_text}" if path else key_text
+            candidates.extend(_extract_prices_from_json_blob(value, next_path))
+        return candidates
+    if isinstance(blob, list):
+        for index, value in enumerate(blob):
+            next_path = f"{path}[{index}]"
+            candidates.extend(_extract_prices_from_json_blob(value, next_path))
+        return candidates
+
+    if not isinstance(blob, (str, int, float)):
+        return candidates
+    path_norm = _normalize_wizard_text(path)
+    if not any(keyword in path_norm for keyword in NETWORK_PRICE_KEYS):
+        return candidates
+
+    if isinstance(blob, str):
+        value = parse_eur_price(blob) or _parse_plain_price(blob)
+        if value is None:
+            return candidates
+    else:
+        value = _parse_plain_price(blob)
+        if value is None:
+            return candidates
+
+    candidates.append((72, value, f"{path}={blob}"))
+    return candidates
+
+
+def _pick_best_network_candidate(candidates: list[dict[str, Any]]) -> tuple[float | None, str]:
+    credible = [item for item in candidates if _is_credible_network_candidate(item)]
+    if not credible:
+        return None, ""
+    best = max(credible, key=lambda item: (int(item.get("score", 0)), float(item.get("value", 0.0))))
+    value = _parse_plain_price(best.get("value"))
+    if value is None:
+        return None, ""
+    snippet = str(best.get("snippet", "")).strip() or str(best.get("url", "")).strip()
+    return value, snippet[:260]
+
+
+def _is_credible_network_candidate(candidate: dict[str, Any]) -> bool:
+    url = str(candidate.get("url", "")).lower()
+    if "/_next/static/" in url or url.endswith(".js") or url.endswith(".css"):
+        return False
+
+    score = int(candidate.get("score", 0))
+    source = str(candidate.get("source", ""))
+    snippet_norm = _normalize_wizard_text(str(candidate.get("snippet", "")))
+    if any(blocker in snippet_norm for blocker in NETWORK_PROMO_BLOCKERS):
+        return False
+
+    if source == "json":
+        return score >= 68
+    if score < 62:
+        return False
+    valuation_terms = ("ti offriamo", "valutazione", "ricevi", "paghiamo", "quotazione", "offerta")
+    return any(term in snippet_norm for term in valuation_terms)
 
 
 class TrendDeviceValuator(BaseValuator):
@@ -645,6 +775,7 @@ class TrendDeviceValuator(BaseValuator):
             "condition_target": "Normale usura (grade A)",
             "wizard": [],
             "adaptive_fallbacks": {},
+            "network_price_candidates": [],
         }
 
         async with async_playwright() as playwright:
@@ -652,6 +783,98 @@ class TrendDeviceValuator(BaseValuator):
             context = await browser.new_context(locale="it-IT")
             page = await context.new_page()
             page.set_default_timeout(self.nav_timeout_ms)
+            network_price_candidates: list[dict[str, Any]] = []
+            response_tasks: set[asyncio.Task[Any]] = set()
+
+            async def _capture_response_body(response) -> None:  # noqa: ANN001
+                url = str(getattr(response, "url", "") or "")
+                if "trendevice.com" not in url.lower():
+                    return
+                headers = getattr(response, "headers", {}) or {}
+                content_type = str(headers.get("content-type", "")).lower()
+                interesting_url = any(
+                    token in url.lower()
+                    for token in ("valut", "offer", "offert", "quote", "quotazione", "/api/", "graphql", "vendi")
+                )
+                if not interesting_url and not any(token in content_type for token in ("json", "text", "javascript")):
+                    return
+                try:
+                    body = await response.text()
+                except Exception:
+                    return
+                if not body:
+                    return
+                trimmed = body[:120000]
+                local_candidates: list[dict[str, Any]] = []
+
+                contextual_value, contextual_snippet = _extract_contextual_price(trimmed)
+                if contextual_value is not None:
+                    local_candidates.append(
+                        {
+                            "score": 68,
+                            "value": contextual_value,
+                            "snippet": contextual_snippet,
+                            "source": "context",
+                        }
+                    )
+                for score, value, snippet in _extract_keyed_prices_from_text(trimmed):
+                    local_candidates.append(
+                        {
+                            "score": score,
+                            "value": value,
+                            "snippet": snippet,
+                            "source": "keyword",
+                        }
+                    )
+
+                parsed_json = None
+                body_stripped = trimmed.strip()
+                if (
+                    "json" in content_type
+                    or body_stripped.startswith("{")
+                    or body_stripped.startswith("[")
+                ):
+                    try:
+                        parsed_json = json.loads(body_stripped)
+                    except Exception:
+                        parsed_json = None
+                if parsed_json is not None:
+                    for score, value, snippet in _extract_prices_from_json_blob(parsed_json):
+                        local_candidates.append(
+                            {
+                                "score": score,
+                                "value": value,
+                                "snippet": snippet,
+                                "source": "json",
+                            }
+                        )
+
+                if not local_candidates:
+                    return
+
+                ranked = sorted(local_candidates, key=lambda item: (int(item["score"]), float(item["value"])), reverse=True)
+                for candidate in ranked[:3]:
+                    row = {
+                        "url": url,
+                        "status": getattr(response, "status", None),
+                        "content_type": content_type[:60],
+                        "score": int(candidate["score"]),
+                        "value": float(candidate["value"]),
+                        "snippet": str(candidate["snippet"])[:260],
+                        "source": candidate["source"],
+                    }
+                    if not _is_credible_network_candidate(row):
+                        continue
+                    network_price_candidates.append(row)
+                if len(network_price_candidates) > 40:
+                    del network_price_candidates[:-40]
+
+            def _on_response(response) -> None:  # noqa: ANN001
+                task = asyncio.create_task(_capture_response_body(response))
+                response_tasks.add(task)
+                task.add_done_callback(lambda done: response_tasks.discard(done))
+
+            page.on("response", _on_response)
             try:
                 await page.goto(self.base_url, wait_until="domcontentloaded")
                 hostname = (urlparse(page.url).hostname or "").lower()
@@ -788,7 +1011,19 @@ class TrendDeviceValuator(BaseValuator):
 
                     await page.wait_for_timeout(1100)
 
+                if response_tasks:
+                    await asyncio.gather(*tuple(response_tasks), return_exceptions=True)
+
+                if network_price_candidates:
+                    payload["network_price_candidates"] = network_price_candidates[-12:]
+
                 price, price_text = await self._extract_price(page, payload=payload)
+                if price is None:
+                    network_price, network_snippet = _pick_best_network_candidate(network_price_candidates)
+                    if network_price is not None:
+                        payload["price_source"] = "network"
+                        payload["price_text"] = network_snippet
+                        return network_price, page.url, payload
                 payload["price_text"] = price_text
                 if price is None:
                     reason = payload.get("wizard_end_reason", "price-missing")
@@ -802,6 +1037,8 @@ class TrendDeviceValuator(BaseValuator):
                     raise RuntimeError(f"TrendDevice price not found after wizard ({reason})")
                 return price, page.url, payload
             finally:
+                if response_tasks:
+                    await asyncio.gather(*tuple(response_tasks), return_exceptions=True)
                 await context.close()
                 await browser.close()
 
