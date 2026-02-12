@@ -12,6 +12,7 @@ from tech_sniper_it.sources.amazon_warehouse import (
     _extract_products_from_html,
     _parse_proxy_entry,
     _parse_user_agent_list,
+    _per_marketplace_limit,
     _remove_file_if_exists,
     _should_fail_fast,
 )
@@ -173,6 +174,12 @@ def test_should_fail_fast_only_without_proxy_pool() -> None:
     assert _should_fail_fast(["consent"], proxy_pool_size=0, fail_fast=True) is False
     assert _should_fail_fast(["sorry-page"], proxy_pool_size=1, fail_fast=True) is False
     assert _should_fail_fast(["sorry-page"], proxy_pool_size=0, fail_fast=False) is False
+
+
+def test_per_marketplace_limit_balances_total_budget(monkeypatch) -> None:  # noqa: ANN001
+    monkeypatch.delenv("AMAZON_WAREHOUSE_PER_MARKETPLACE_LIMIT", raising=False)
+    assert _per_marketplace_limit(12, 4) == 3
+    assert _per_marketplace_limit(24, 4) == 6
 
 
 def test_decode_storage_state_b64_valid(monkeypatch) -> None:  # noqa: ANN001

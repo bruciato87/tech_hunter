@@ -114,6 +114,27 @@ def main() -> int:
         errors.append("MAX_PARALLEL_PRODUCTS must be integer.")
 
     try:
+        scan_target = int(_env_or_default("SCAN_TARGET_PRODUCTS", "12"))
+        if scan_target < 1:
+            errors.append("SCAN_TARGET_PRODUCTS must be >= 1.")
+    except ValueError:
+        errors.append("SCAN_TARGET_PRODUCTS must be integer.")
+
+    try:
+        candidate_multiplier = int(_env_or_default("SCAN_CANDIDATE_MULTIPLIER", "4"))
+        if candidate_multiplier < 1:
+            errors.append("SCAN_CANDIDATE_MULTIPLIER must be >= 1.")
+    except ValueError:
+        errors.append("SCAN_CANDIDATE_MULTIPLIER must be integer.")
+
+    try:
+        exclude_min_keep = int(_env_or_default("EXCLUDE_MIN_KEEP", "4"))
+        if exclude_min_keep < 0:
+            errors.append("EXCLUDE_MIN_KEEP must be >= 0.")
+    except ValueError:
+        errors.append("EXCLUDE_MIN_KEEP must be integer.")
+
+    try:
         int(_env_or_default("PLAYWRIGHT_NAV_TIMEOUT_MS", "45000"))
     except ValueError:
         errors.append("PLAYWRIGHT_NAV_TIMEOUT_MS must be integer.")
@@ -169,6 +190,13 @@ def main() -> int:
             int(_env_or_default("AMAZON_WAREHOUSE_MAX_PRODUCTS", "8"))
         except ValueError:
             errors.append("AMAZON_WAREHOUSE_MAX_PRODUCTS must be integer.")
+
+        try:
+            per_marketplace_limit = int(_env_or_default("AMAZON_WAREHOUSE_PER_MARKETPLACE_LIMIT", "4"))
+            if per_marketplace_limit < 1:
+                errors.append("AMAZON_WAREHOUSE_PER_MARKETPLACE_LIMIT must be >= 1.")
+        except ValueError:
+            errors.append("AMAZON_WAREHOUSE_PER_MARKETPLACE_LIMIT must be integer.")
 
         max_price = (os.getenv("AMAZON_WAREHOUSE_MAX_PRICE_EUR") or "").strip()
         if max_price:

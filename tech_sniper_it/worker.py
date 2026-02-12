@@ -415,17 +415,27 @@ async def _exclude_non_profitable_candidates(manager, products: list[AmazonProdu
         return products
 
     filtered: list[AmazonProduct] = []
+    removed_products: list[AmazonProduct] = []
     removed = 0
     for product in products:
         normalized_url = _normalize_http_url(product.url)
         if normalized_url and normalized_url in excluded_urls:
             removed += 1
+            removed_products.append(product)
             continue
         filtered.append(product)
     print(
         "[scan] Exclusion cache applied | "
         f"removed={removed} kept={len(filtered)} lookback_days={lookback_days} rows={len(excluded_urls)}"
     )
+    min_keep = max(0, int(_env_or_default("EXCLUDE_MIN_KEEP", "0")))
+    if min_keep > 0 and len(filtered) < min_keep and removed_products:
+        restore_count = min(min_keep - len(filtered), len(removed_products))
+        filtered.extend(removed_products[:restore_count])
+        print(
+            "[scan] Exclusion cache relaxed | "
+            f"restored={restore_count} min_keep={min_keep} final={len(filtered)}"
+        )
     return filtered
 
 
@@ -514,8 +524,8 @@ async def _run_scan_command(payload: dict[str, Any]) -> int:
             print(f"[scan] AI strategy unavailable: {_safe_error_details(exc)}")
     products = load_products(_load_github_event_data())
     command_chat = _telegram_target_chat(payload)
-    scan_target_products = max(1, int(_env_or_default("SCAN_TARGET_PRODUCTS", _env_or_default("AMAZON_WAREHOUSE_MAX_PRODUCTS", "8"))))
-    candidate_multiplier = max(1, int(_env_or_default("SCAN_CANDIDATE_MULTIPLIER", "3")))
+    scan_target_products = max(1, int(_env_or_default("SCAN_TARGET_PRODUCTS", _env_or_default("AMAZON_WAREHOUSE_MAX_PRODUCTS", "12"))))
+    candidate_multiplier = max(1, int(_env_or_default("SCAN_CANDIDATE_MULTIPLIER", "4")))
     candidate_budget = scan_target_products * candidate_multiplier
     if not products:
         print("[scan] No explicit products provided. Trying Amazon Warehouse automatic source (IT+EU).")

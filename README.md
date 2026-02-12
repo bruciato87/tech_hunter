@@ -51,14 +51,17 @@ python -m tech_sniper_it.worker
 - `OPENROUTER_API_KEYS` (comma-separated)
 - `OPENROUTER_MODEL` (default: `openrouter/auto`)
 - `OPENROUTER_BASE_URL` (default: `https://openrouter.ai/api/v1/chat/completions`)
-- `OPENROUTER_FREE_MODELS` (ordered free-tier model pool, strongest -> weakest)
+- `OPENROUTER_FREE_MODELS` (ordered free-tier model pool; default starts from currently most reliable model in production runs)
 - `OPENROUTER_MODEL_POWER_JSON` (optional JSON score overrides for ranking)
-- `OPENROUTER_MAX_MODELS_PER_REQUEST` (default: `3`)
+- `OPENROUTER_MAX_MODELS_PER_REQUEST` (default: `2`)
 - `OPENROUTER_MODEL_COOLDOWN_SECONDS` (default: `900`, quota/rate-limit cooldown)
 - `OPENROUTER_MODEL_NOT_FOUND_COOLDOWN_SECONDS` (default: `86400`)
 - `OPENROUTER_MODEL_TRANSIENT_COOLDOWN_SECONDS` (default: `120`)
 - `MIN_SPREAD_EUR` (default: `40`)
 - `MAX_PARALLEL_PRODUCTS` (default: `3`)
+- `SCAN_TARGET_PRODUCTS` (default: `12`)
+- `SCAN_CANDIDATE_MULTIPLIER` (default: `4`)
+- `EXCLUDE_MIN_KEEP` (default: `4`, re-includes a small slice of excluded URLs to avoid 0/1-product scans)
 - `PLAYWRIGHT_NAV_TIMEOUT_MS` (default: `45000`)
 - `HEADLESS` (default: `true`)
 - `MPB_MAX_ATTEMPTS` (default: `3`)
@@ -68,9 +71,10 @@ python -m tech_sniper_it.worker
 - `AMAZON_PRODUCTS_FILE` (optional path to JSON file)
 - `AMAZON_WAREHOUSE_ENABLED` (default: `true`)
 - `AMAZON_WAREHOUSE_MARKETPLACES` (default: `it,eu`; `eu` expands to `de,fr,es`)
-- `AMAZON_WAREHOUSE_MAX_PRODUCTS` (default: `8`)
+- `AMAZON_WAREHOUSE_MAX_PRODUCTS` (default: `12`)
 - `AMAZON_WAREHOUSE_MAX_PRICE_EUR` (optional ceiling)
 - `AMAZON_WAREHOUSE_QUERIES` (optional comma-separated search seeds)
+- `AMAZON_WAREHOUSE_PER_MARKETPLACE_LIMIT` (default: `4`, balances IT/EU collection before top-up)
 - `AMAZON_WAREHOUSE_PROXY_URLS` (optional comma-separated proxy endpoints, e.g. `http://user:pass@host:port`)
 - `AMAZON_WAREHOUSE_ROTATE_PROXY` (default: `true`)
 - `AMAZON_WAREHOUSE_USER_AGENTS` (optional JSON array or `||`-separated list)
@@ -99,6 +103,24 @@ For each normalization request it tries up to `OPENROUTER_MAX_MODELS_PER_REQUEST
 - candidate model attempted
 - resolved upstream model actually used
 - cooldown reason when a model is temporarily skipped
+
+Production note:
+- the default worker config now starts with `perplexity/sonar` because in recent runs it is the only consistently available model for your key; then it falls back to stronger free-tier candidates if available.
+- worker defaults also include `OPENROUTER_MODEL_POWER_JSON` tuned to prioritize currently working models first, while keeping fallback options.
+
+### Why Some Runs Analyze Few Products
+
+If you see scans with 1-2 products, it is typically due to:
+
+- exclusion cache removing historically non-profitable URLs
+- low `SCAN_TARGET_PRODUCTS` / `AMAZON_WAREHOUSE_MAX_PRODUCTS`
+- unbalanced marketplace crawl (IT saturating budget before EU)
+
+Current defaults now mitigate this by:
+
+- raising target and candidate budgets
+- balancing per-marketplace collection (`AMAZON_WAREHOUSE_PER_MARKETPLACE_LIMIT`)
+- allowing controlled exclusion relaxation (`EXCLUDE_MIN_KEEP`)
 
 ### UI Drift Auto-Adaptation
 
@@ -204,11 +226,15 @@ Optional secrets:
 - `OPENROUTER_MODEL_COOLDOWN_SECONDS`
 - `OPENROUTER_MODEL_NOT_FOUND_COOLDOWN_SECONDS`
 - `OPENROUTER_MODEL_TRANSIENT_COOLDOWN_SECONDS`
+- `SCAN_TARGET_PRODUCTS`
+- `SCAN_CANDIDATE_MULTIPLIER`
+- `EXCLUDE_MIN_KEEP`
 - `AMAZON_WAREHOUSE_ENABLED`
 - `AMAZON_WAREHOUSE_MARKETPLACES`
 - `AMAZON_WAREHOUSE_MAX_PRODUCTS`
 - `AMAZON_WAREHOUSE_MAX_PRICE_EUR`
 - `AMAZON_WAREHOUSE_QUERIES`
+- `AMAZON_WAREHOUSE_PER_MARKETPLACE_LIMIT`
 - `AMAZON_WAREHOUSE_ROTATE_PROXY`
 - `AMAZON_WAREHOUSE_ROTATE_USER_AGENT`
 - `AMAZON_WAREHOUSE_USER_AGENTS`

@@ -382,6 +382,20 @@ def _per_query_limit(total_budget: int, query_count: int) -> int:
     return max(1, (total_budget + query_count - 1) // query_count)
 
 
+def _per_marketplace_limit(total_budget: int, marketplace_count: int) -> int:
+    configured = (os.getenv("AMAZON_WAREHOUSE_PER_MARKETPLACE_LIMIT") or "").strip()
+    if configured:
+        try:
+            value = int(configured)
+        except ValueError:
+            value = 0
+        if value > 0:
+            return value
+    if marketplace_count <= 0:
+        return total_budget
+    return max(1, (total_budget + marketplace_count - 1) // marketplace_count)
+
+
 def _fail_fast_on_sorry() -> bool:
     return _is_truthy_env("AMAZON_WAREHOUSE_FAIL_FAST_ON_SORRY", "true")
 
@@ -606,6 +620,10 @@ async def fetch_amazon_warehouse_products(
 
     configured_marketplaces = _split_csv(os.getenv("AMAZON_WAREHOUSE_MARKETPLACES")) or list(DEFAULT_MARKETPLACES)
     marketplaces = _expand_marketplaces(configured_marketplaces)
+    supported_marketplaces = [item for item in marketplaces if MARKETPLACE_HOSTS.get(item.lower())]
+    if not supported_marketplaces:
+        print("[warehouse] No supported marketplaces configured.")
+        return []
     queries = _split_csv(os.getenv("AMAZON_WAREHOUSE_QUERIES")) or list(DEFAULT_QUERIES)
     max_products = max(1, int(max_products or _env_or_default("AMAZON_WAREHOUSE_MAX_PRODUCTS", "8")))
     max_price = _max_price_eur()
@@ -624,7 +642,9 @@ async def fetch_amazon_warehouse_products(
     rotate_proxy = _is_truthy_env("AMAZON_WAREHOUSE_ROTATE_PROXY", "true")
     rotate_user_agent = _is_truthy_env("AMAZON_WAREHOUSE_ROTATE_USER_AGENT", "true")
     per_query_limit = _per_query_limit(max_products, len(queries))
+    per_marketplace_limit = _per_marketplace_limit(max_products, len(supported_marketplaces))
     query_totals: dict[str, int] = {query: 0 for query in queries}
+    marketplace_totals: dict[str, int] = {marketplace.lower(): 0 for marketplace in supported_marketplaces}
 
     results: list[dict[str, Any]] = []
     seen_urls: set[str] = set()
@@ -638,137 +658,153 @@ async def fetch_amazon_warehouse_products(
         f"user_agents={len(user_agents)} rotate_user_agent={rotate_user_agent} "
         f"attempts_per_query={max_attempts} fail_fast_on_sorry={fail_fast_on_sorry} "
         f"stealth={stealth} storage_state={'on' if storage_state_path else 'off'} "
-        f"max_products={max_products} per_query_limit={per_query_limit}"
+        f"max_products={max_products} per_query_limit={per_query_limit} "
+        f"marketplace_limit={per_marketplace_limit} marketplaces={','.join(supported_marketplaces)}"
     )
 
     async with async_playwright() as playwright:
         browsers: dict[str, Any] = {}
         try:
-            for marketplace in marketplaces:
-                host = MARKETPLACE_HOSTS.get(marketplace.lower())
-                if not host:
-                    print(f"[warehouse] Skipping unsupported marketplace '{marketplace}'.")
-                    continue
+            for phase in ("balanced", "topup"):
+                if len(results) >= max_products:
+                    break
+                enforce_marketplace_cap = phase == "balanced" and len(supported_marketplaces) > 1
+                if phase == "topup" and len(results) < max_products:
+                    print(
+                        "[warehouse] Top-up phase enabled | "
+                        f"current={len(results)} target={max_products}"
+                    )
+                for marketplace in supported_marketplaces:
+                    host = MARKETPLACE_HOSTS.get(marketplace.lower())
+                    if not host:
+                        continue
+                    if enforce_marketplace_cap and marketplace_totals.get(marketplace.lower(), 0) >= per_marketplace_limit:
+                        continue
 
-                for query in queries:
-                    if len(results) >= max_products:
-                        break
-                    search_url = _build_search_url(host, query)
-                    parsed: list[dict[str, Any]] = []
-                    for attempt in range(1, max_attempts + 1):
-                        proxy_config, proxy_index = _choose_from_pool(proxy_pool, proxy_index, rotate_proxy)
-                        user_agent, user_agent_index = _choose_from_pool(
-                            user_agents,
-                            user_agent_index,
-                            rotate_user_agent,
-                        )
-                        proxy_label = _proxy_label(proxy_config)
-                        session_id += 1
-
-                        browser_key = _proxy_key(proxy_config)
-                        browser = browsers.get(browser_key)
-                        if browser is None:
-                            launch_kwargs: dict[str, Any] = {"headless": headless}
-                            if proxy_config:
-                                launch_kwargs["proxy"] = proxy_config
-                            browser = await playwright.chromium.launch(**launch_kwargs)
-                            browsers[browser_key] = browser
-                            print(f"[warehouse] Opened browser session for proxy={proxy_label}")
-
-                        context_kwargs: dict[str, Any] = {
-                            "locale": "it-IT",
-                            "viewport": _viewport_for_session(session_id),
-                            "extra_http_headers": {
-                                "Accept-Language": ACCEPT_LANGUAGE_BY_HOST.get(host, "it-IT,it;q=0.9,en;q=0.8")
-                            },
-                        }
-                        if storage_state_path:
-                            context_kwargs["storage_state"] = storage_state_path
-                        if user_agent:
-                            context_kwargs["user_agent"] = user_agent
-
-                        context = await browser.new_context(**context_kwargs)
-                        await _apply_stealth_context(context, host=host)
-                        page = await context.new_page()
-                        page.set_default_timeout(nav_timeout_ms)
-                        print(
-                            f"[warehouse] Loading {search_url} | attempt={attempt}/{max_attempts} "
-                            f"| session={session_id} | ua='{_shorten(user_agent)}' | proxy={proxy_label}"
-                        )
-                        barriers: list[str] = []
-                        try:
-                            await page.goto(search_url, wait_until="domcontentloaded")
-                            await _accept_cookie_if_present(page)
-                            await page.wait_for_timeout(1200)
-                            html = await page.content()
-                            parsed = _extract_products_from_html(html, host)
-                            print(
-                                f"[warehouse] Parsed offers for {host} query='{query}' "
-                                f"attempt={attempt}: {len(parsed)}"
-                            )
-                            if not parsed:
-                                row_count = len(_collect_search_rows(BeautifulSoup(html, "html.parser")))
-                                barriers = await _log_empty_parse_diagnostics(
-                                    page,
-                                    host=host,
-                                    query=query,
-                                    html=html,
-                                    row_count=row_count,
-                                    session_id=session_id,
-                                    user_agent=user_agent,
-                                    proxy_label=proxy_label,
-                                )
-                        except Exception as exc:
-                            parsed = []
-                            print(
-                                f"[warehouse] Search error on {host} query='{query}' "
-                                f"attempt={attempt} session={session_id} proxy={proxy_label}: "
-                                f"{type(exc).__name__}: {exc}"
-                            )
-                        finally:
-                            await context.close()
-
-                        if parsed:
-                            break
-
-                        if _should_fail_fast(
-                            barriers,
-                            proxy_pool_size=len(proxy_pool),
-                            fail_fast=fail_fast_on_sorry,
-                        ):
-                            reason = ",".join(barriers) if barriers else "blocker"
-                            print(
-                                f"[warehouse] Fail-fast on {host} query='{query}' after {reason} "
-                                "because proxy_pool=0."
-                            )
-                            break
-
-                        if attempt < max_attempts:
-                            reason = ",".join(barriers) if barriers else "empty-parse"
-                            delay_ms = _retry_delay_for_attempt(retry_delay_ms, attempt)
-                            print(
-                                f"[warehouse] Retrying {host} query='{query}' in {delay_ms}ms "
-                                f"after {reason}."
-                            )
-                            if delay_ms:
-                                await asyncio.sleep(delay_ms / 1000)
-
-                    for item in parsed:
-                        item_url = str(item.get("url") or "")
-                        if item_url in seen_urls:
-                            continue
-                        if query_totals.get(query, 0) >= per_query_limit:
-                            continue
-                        price = item.get("price_eur")
-                        if max_price is not None and isinstance(price, (float, int)) and float(price) > max_price:
-                            continue
-
-                        seen_urls.add(item_url)
-                        item["source_marketplace"] = marketplace.lower()
-                        results.append(item)
-                        query_totals[query] = query_totals.get(query, 0) + 1
+                    for query in queries:
                         if len(results) >= max_products:
                             break
+                        if enforce_marketplace_cap and marketplace_totals.get(marketplace.lower(), 0) >= per_marketplace_limit:
+                            break
+                        search_url = _build_search_url(host, query)
+                        parsed: list[dict[str, Any]] = []
+                        for attempt in range(1, max_attempts + 1):
+                            proxy_config, proxy_index = _choose_from_pool(proxy_pool, proxy_index, rotate_proxy)
+                            user_agent, user_agent_index = _choose_from_pool(
+                                user_agents,
+                                user_agent_index,
+                                rotate_user_agent,
+                            )
+                            proxy_label = _proxy_label(proxy_config)
+                            session_id += 1
+
+                            browser_key = _proxy_key(proxy_config)
+                            browser = browsers.get(browser_key)
+                            if browser is None:
+                                launch_kwargs: dict[str, Any] = {"headless": headless}
+                                if proxy_config:
+                                    launch_kwargs["proxy"] = proxy_config
+                                browser = await playwright.chromium.launch(**launch_kwargs)
+                                browsers[browser_key] = browser
+                                print(f"[warehouse] Opened browser session for proxy={proxy_label}")
+
+                            context_kwargs: dict[str, Any] = {
+                                "locale": "it-IT",
+                                "viewport": _viewport_for_session(session_id),
+                                "extra_http_headers": {
+                                    "Accept-Language": ACCEPT_LANGUAGE_BY_HOST.get(host, "it-IT,it;q=0.9,en;q=0.8")
+                                },
+                            }
+                            if storage_state_path:
+                                context_kwargs["storage_state"] = storage_state_path
+                            if user_agent:
+                                context_kwargs["user_agent"] = user_agent
+
+                            context = await browser.new_context(**context_kwargs)
+                            await _apply_stealth_context(context, host=host)
+                            page = await context.new_page()
+                            page.set_default_timeout(nav_timeout_ms)
+                            print(
+                                f"[warehouse] Loading {search_url} | attempt={attempt}/{max_attempts} "
+                                f"| session={session_id} | ua='{_shorten(user_agent)}' | proxy={proxy_label}"
+                            )
+                            barriers: list[str] = []
+                            try:
+                                await page.goto(search_url, wait_until="domcontentloaded")
+                                await _accept_cookie_if_present(page)
+                                await page.wait_for_timeout(1200)
+                                html = await page.content()
+                                parsed = _extract_products_from_html(html, host)
+                                print(
+                                    f"[warehouse] Parsed offers for {host} query='{query}' "
+                                    f"attempt={attempt}: {len(parsed)}"
+                                )
+                                if not parsed:
+                                    row_count = len(_collect_search_rows(BeautifulSoup(html, "html.parser")))
+                                    barriers = await _log_empty_parse_diagnostics(
+                                        page,
+                                        host=host,
+                                        query=query,
+                                        html=html,
+                                        row_count=row_count,
+                                        session_id=session_id,
+                                        user_agent=user_agent,
+                                        proxy_label=proxy_label,
+                                    )
+                            except Exception as exc:
+                                parsed = []
+                                print(
+                                    f"[warehouse] Search error on {host} query='{query}' "
+                                    f"attempt={attempt} session={session_id} proxy={proxy_label}: "
+                                    f"{type(exc).__name__}: {exc}"
+                                )
+                            finally:
+                                await context.close()
+
+                            if parsed:
+                                break
+
+                            if _should_fail_fast(
+                                barriers,
+                                proxy_pool_size=len(proxy_pool),
+                                fail_fast=fail_fast_on_sorry,
+                            ):
+                                reason = ",".join(barriers) if barriers else "blocker"
+                                print(
+                                    f"[warehouse] Fail-fast on {host} query='{query}' after {reason} "
+                                    "because proxy_pool=0."
+                                )
+                                break
+
+                            if attempt < max_attempts:
+                                reason = ",".join(barriers) if barriers else "empty-parse"
+                                delay_ms = _retry_delay_for_attempt(retry_delay_ms, attempt)
+                                print(
+                                    f"[warehouse] Retrying {host} query='{query}' in {delay_ms}ms "
+                                    f"after {reason}."
+                                )
+                                if delay_ms:
+                                    await asyncio.sleep(delay_ms / 1000)
+
+                        for item in parsed:
+                            item_url = str(item.get("url") or "")
+                            if item_url in seen_urls:
+                                continue
+                            if query_totals.get(query, 0) >= per_query_limit:
+                                continue
+                            if enforce_marketplace_cap and marketplace_totals.get(marketplace.lower(), 0) >= per_marketplace_limit:
+                                break
+                            price = item.get("price_eur")
+                            if max_price is not None and isinstance(price, (float, int)) and float(price) > max_price:
+                                continue
+
+                            seen_urls.add(item_url)
+                            item["source_marketplace"] = marketplace.lower()
+                            results.append(item)
+                            query_totals[query] = query_totals.get(query, 0) + 1
+                            marketplace_totals[marketplace.lower()] = marketplace_totals.get(marketplace.lower(), 0) + 1
+                            if len(results) >= max_products:
+                                break
         finally:
             for browser in list(browsers.values()):
                 try:
@@ -778,7 +814,13 @@ async def fetch_amazon_warehouse_products(
             _remove_file_if_exists(storage_state_path)
 
     query_stats = ", ".join(f"'{query}':{query_totals.get(query, 0)}" for query in queries)
-    print(f"[warehouse] Collected products: {len(results)} | per-query stats: {query_stats}")
+    marketplace_stats = ", ".join(
+        f"'{marketplace}':{marketplace_totals.get(marketplace.lower(), 0)}" for marketplace in supported_marketplaces
+    )
+    print(
+        f"[warehouse] Collected products: {len(results)} | "
+        f"per-query stats: {query_stats} | per-marketplace stats: {marketplace_stats}"
+    )
     return results
 
 
@@ -786,4 +828,5 @@ __all__ = [
     "fetch_amazon_warehouse_products",
     "_canonical_amazon_url",
     "_extract_products_from_html",
+    "_per_marketplace_limit",
 ]
