@@ -41,7 +41,7 @@ def main() -> int:
         warnings.append("Telegram disabled. Profitable deals will not trigger notifications.")
 
     try:
-        float(_env_or_default("MIN_SPREAD_EUR", "80"))
+        float(_env_or_default("MIN_SPREAD_EUR", "40"))
     except ValueError:
         errors.append("MIN_SPREAD_EUR must be numeric.")
 

@@ -253,12 +253,12 @@ async def _run_status_command(payload: dict[str, Any]) -> int:
     openrouter_present = bool(os.getenv("OPENROUTER_API_KEYS", "").strip())
 
     lines = [
-        "Tech_Sniper_IT status:",
-        "worker: online",
-        f"threshold: {manager.min_spread_eur:.2f} EUR",
-        f"ai: gemini={'on' if gemini_present else 'off'}, openrouter={'on' if openrouter_present else 'off'}",
-        f"supabase: {'on' if manager.storage else 'off'}",
-        f"telegram alerts default chat: {'on' if manager.notifier else 'off'}",
+        "🤖 Tech_Sniper_IT status:",
+        "⚙️ worker: online",
+        f"🎯 threshold spread (offer-amazon): {manager.min_spread_eur:.2f} EUR",
+        f"🧠 ai: gemini={'on' if gemini_present else 'off'}, openrouter={'on' if openrouter_present else 'off'}",
+        f"🗄️ supabase: {'on' if manager.storage else 'off'}",
+        f"💬 telegram alerts default chat: {'on' if manager.notifier else 'off'}",
     ]
 
     if manager.storage:
@@ -267,13 +267,13 @@ async def _run_status_command(payload: dict[str, Any]) -> int:
             if recent:
                 row = recent[0]
                 lines.append(
-                    "last opportunity: "
+                    "📌 last opportunity: "
                     f"{row.get('normalized_name', 'n/a')} | spread {row.get('spread_eur', 'n/a')} EUR | {row.get('best_platform', 'n/a')}"
                 )
             else:
-                lines.append("last opportunity: none")
+                lines.append("📌 last opportunity: none")
         except Exception as exc:
-            lines.append(f"last opportunity: read error ({_safe_error_details(exc)})")
+            lines.append(f"📌 last opportunity: read error ({_safe_error_details(exc)})")
 
     message = "\n".join(lines)
     print(message)

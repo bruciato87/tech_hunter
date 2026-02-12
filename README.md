@@ -11,7 +11,7 @@ Serverless-friendly arbitrage worker for Amazon Warehouse IT -> recommerce valua
   - TrendDevice: `Grado A`
   - MPB: `Ottimo`
   - Rebuy: `Come nuovo`
-- If `spread_eur > MIN_SPREAD_EUR` (default `80`) -> save to Supabase + Telegram notification.
+- If `spread_eur > MIN_SPREAD_EUR` (default `40`) -> save to Supabase + Telegram notification.
 
 ## Quick Start
 
@@ -51,7 +51,7 @@ python -m tech_sniper_it.worker
 - `OPENROUTER_API_KEYS` (comma-separated)
 - `OPENROUTER_MODEL` (default: `openrouter/auto`)
 - `OPENROUTER_BASE_URL` (default: `https://openrouter.ai/api/v1/chat/completions`)
-- `MIN_SPREAD_EUR` (default: `80`)
+- `MIN_SPREAD_EUR` (default: `40`)
 - `MAX_PARALLEL_PRODUCTS` (default: `3`)
 - `PLAYWRIGHT_NAV_TIMEOUT_MS` (default: `45000`)
 - `HEADLESS` (default: `true`)

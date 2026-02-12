@@ -12,6 +12,7 @@ from tech_sniper_it.worker import (
     _format_scan_summary,
     _parse_last_limit,
     _resolve_command,
+    _run_status_command,
     _safe_error_details,
     _send_telegram_message,
     load_products,
@@ -149,3 +150,40 @@ async def test_send_telegram_message_splits_chunks(monkeypatch: pytest.MonkeyPat
     assert len(sent) == 3
     assert all(item[0] == "42" for item in sent)
     assert max(len(item[1]) for item in sent) <= 4000
+
+
+@pytest.mark.asyncio
+async def test_run_status_command_includes_emojis(monkeypatch: pytest.MonkeyPatch) -> None:
+    sent_messages = []
+
+    class DummyStorage:
+        async def get_recent_opportunities(self, limit: int = 1):  # noqa: ANN201
+            return []
+
+    class DummyManager:
+        def __init__(self) -> None:
+            self.min_spread_eur = 40.0
+            self.storage = DummyStorage()
+            self.notifier = object()
+
+    async def fake_send(text: str, chat_id: str | None) -> None:
+        sent_messages.append((chat_id, text))
+
+    monkeypatch.setattr("tech_sniper_it.worker.build_default_manager", lambda: DummyManager())
+    monkeypatch.setattr("tech_sniper_it.worker._send_telegram_message", fake_send)
+    monkeypatch.setenv("GEMINI_API_KEYS", "k1")
+    monkeypatch.delenv("OPENROUTER_API_KEYS", raising=False)
+
+    exit_code = await _run_status_command({"chat_id": "123"})
+
+    assert exit_code == 0
+    assert len(sent_messages) == 1
+    assert sent_messages[0][0] == "123"
+    text = sent_messages[0][1]
+    assert "🤖 Tech_Sniper_IT status:" in text
+    assert "⚙️ worker: online" in text
+    assert "🎯 threshold spread (offer-amazon): 40.00 EUR" in text
+    assert "🧠 ai: gemini=on, openrouter=off" in text
+    assert "🗄️ supabase: on" in text
+    assert "💬 telegram alerts default chat: on" in text
+    assert "📌 last opportunity: none" in text

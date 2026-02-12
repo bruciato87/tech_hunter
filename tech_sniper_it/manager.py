@@ -25,7 +25,7 @@ class ArbitrageManager:
         *,
         storage: SupabaseStorage | None = None,
         notifier: TelegramNotifier | None = None,
-        min_spread_eur: float = 80.0,
+        min_spread_eur: float = 40.0,
         headless: bool = True,
         nav_timeout_ms: int = 45000,
     ) -> None:
@@ -119,7 +119,7 @@ def build_default_manager() -> ArbitrageManager:
     if telegram_bot_token and telegram_chat_id:
         notifier = TelegramNotifier(bot_token=telegram_bot_token, chat_id=telegram_chat_id)
 
-    min_spread_eur = float(_env_or_default("MIN_SPREAD_EUR", "80"))
+    min_spread_eur = float(_env_or_default("MIN_SPREAD_EUR", "40"))
     headless = _env_or_default("HEADLESS", "true").lower() != "false"
     nav_timeout_ms = int(_env_or_default("PLAYWRIGHT_NAV_TIMEOUT_MS", "45000"))
 
