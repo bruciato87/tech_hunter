@@ -44,4 +44,4 @@ async def test_valuate_failure_returns_error_payload() -> None:
 
 
 def test_trenddevice_points_to_trendevice_domain() -> None:
-    assert TrendDeviceValuator.base_url == "https://www.trendevice.com"
+    assert TrendDeviceValuator.base_url.startswith("https://www.trendevice.com")

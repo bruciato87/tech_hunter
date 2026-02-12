@@ -150,15 +150,32 @@ def _format_eur(value: float | None) -> str:
     return f"{value:.2f} EUR"
 
 
+def _format_signed_eur(value: float | None) -> str:
+    if value is None:
+        return "n/d"
+    sign = "+" if value > 0 else ""
+    return f"{sign}{value:.2f} EUR"
+
+
+def _platform_icon(platform: str | None) -> str:
+    mapping = {
+        "rebuy": "♻️",
+        "trenddevice": "📱",
+        "mpb": "📸",
+    }
+    return mapping.get((platform or "").lower(), "🏷️")
+
+
 def _format_offers_compact(decision) -> str:  # noqa: ANN001
     items: list[str] = []
     for offer in decision.offers:
+        icon = _platform_icon(getattr(offer, "platform", None))
         if offer.offer_eur is not None:
-            items.append(f"{offer.platform}: {_format_eur(offer.offer_eur)}")
+            items.append(f"{icon} {offer.platform}: {_format_eur(offer.offer_eur)}")
         else:
             error = _safe_text(offer.error, max_len=60)
             suffix = f" ({error})" if error else ""
-            items.append(f"{offer.platform}: n/d{suffix}")
+            items.append(f"{icon} {offer.platform}: n/d{suffix}")
     return " | ".join(items) if items else "n/d"
 
 
@@ -266,28 +283,42 @@ def load_products(event_data: dict[str, Any] | None = None) -> list[AmazonProduc
 
 def _format_scan_summary(decisions: list, threshold: float) -> str:
     profitable = [item for item in decisions if item.should_notify and item.spread_eur is not None]
+    best_spread = max((item.spread_eur for item in decisions if item.spread_eur is not None), default=None)
     lines = [
+        "🚀 Tech_Sniper_IT | Scan Report",
+        "━━━━━━━━━━━━━━━━━━━━",
         "🔎 Scan completata",
         f"📦 Prodotti analizzati: {len(decisions)}",
         f"🎯 Soglia spread: {threshold:.2f} EUR",
         f"✅ Opportunita sopra soglia: {len(profitable)}",
+        f"🏁 Miglior spread trovato: {_format_signed_eur(best_spread)}",
     ]
 
     for index, decision in enumerate(decisions, start=1):
         best_offer = decision.best_offer
-        spread = _format_eur(decision.spread_eur)
-        status_icon = "🟢" if decision.should_notify else "⚪"
+        spread = _format_signed_eur(decision.spread_eur)
+        if decision.spread_eur is None:
+            status_icon = "⚪"
+        elif decision.spread_eur >= threshold:
+            status_icon = "🟢"
+        elif decision.spread_eur >= 0:
+            status_icon = "🟡"
+        else:
+            status_icon = "🔴"
         product_url = _normalize_http_url(getattr(decision.product, "url", None))
         if not product_url:
             product_url = _amazon_search_url(decision.normalized_name or decision.product.title)
         best_offer_url = _normalize_http_url(getattr(best_offer, "source_url", None) if best_offer else None)
+        platform_name = best_offer.platform if best_offer else "n/d"
+        platform_icon = _platform_icon(platform_name)
         lines.extend(
             [
                 "",
                 f"{status_icon} Prodotto {index}: {decision.normalized_name}",
                 f"💶 Amazon: {_format_eur(decision.product.price_eur)}",
-                f"🏆 Best offer: {_format_eur(best_offer.offer_eur if best_offer else None)} ({best_offer.platform if best_offer else 'n/d'})",
-                f"📈 Spread: {spread}",
+                f"🏆 Best offer: {_format_eur(best_offer.offer_eur if best_offer else None)} ({platform_name})",
+                f"{platform_icon} Reseller top: {platform_name}",
+                f"📈 Spread netto: {spread}",
                 f"📊 Offerte: {_format_offers_compact(decision)}",
                 f"🛒 Amazon link: {product_url}",
                 f"🔗 Link migliore offerta: {best_offer_url or 'n/d'}",
@@ -351,10 +382,21 @@ async def _run_scan_command(payload: dict[str, Any]) -> int:
             )
         )
 
-    should_send_summary = bool(command_chat) or payload.get("source") in {"telegram", "vercel_scan_api", "manual_debug"}
+    default_chat_configured = bool(os.getenv("TELEGRAM_BOT_TOKEN")) and bool(os.getenv("TELEGRAM_CHAT_ID"))
+    should_send_summary = (
+        bool(command_chat)
+        or default_chat_configured
+        or payload.get("source") in {"telegram", "vercel_scan_api", "manual_debug"}
+    )
     if should_send_summary:
         summary = _format_scan_summary(decisions, manager.min_spread_eur)
+        print(
+            "[scan] Sending Telegram summary "
+            f"(target={'explicit_chat' if command_chat else 'default_chat'})."
+        )
         await _send_telegram_message(summary, command_chat)
+    else:
+        print("[scan] Telegram summary skipped (chat not configured).")
     return 0
 
 

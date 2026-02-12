@@ -247,6 +247,60 @@ async def test_run_status_command_includes_emojis(monkeypatch: pytest.MonkeyPatc
 
 
 @pytest.mark.asyncio
+async def test_run_status_command_reports_last_opportunity(monkeypatch: pytest.MonkeyPatch) -> None:
+    sent_messages = []
+
+    class DummyStorage:
+        async def get_recent_opportunities(self, limit: int = 1):  # noqa: ANN201
+            return [{"normalized_name": "iPhone 15 128GB", "spread_eur": 52.4, "best_platform": "rebuy"}]
+
+    class DummyManager:
+        def __init__(self) -> None:
+            self.min_spread_eur = 40.0
+            self.storage = DummyStorage()
+            self.notifier = object()
+
+    async def fake_send(text: str, chat_id: str | None) -> None:
+        sent_messages.append(text)
+
+    monkeypatch.setattr("tech_sniper_it.worker.build_default_manager", lambda: DummyManager())
+    monkeypatch.setattr("tech_sniper_it.worker._send_telegram_message", fake_send)
+
+    exit_code = await _run_status_command({})
+
+    assert exit_code == 0
+    assert len(sent_messages) == 1
+    assert "📌 last opportunity: iPhone 15 128GB | spread 52.4 EUR | rebuy" in sent_messages[0]
+
+
+@pytest.mark.asyncio
+async def test_run_status_command_handles_storage_read_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    sent_messages = []
+
+    class DummyStorage:
+        async def get_recent_opportunities(self, limit: int = 1):  # noqa: ANN201
+            raise RuntimeError("db unavailable")
+
+    class DummyManager:
+        def __init__(self) -> None:
+            self.min_spread_eur = 40.0
+            self.storage = DummyStorage()
+            self.notifier = object()
+
+    async def fake_send(text: str, chat_id: str | None) -> None:
+        sent_messages.append(text)
+
+    monkeypatch.setattr("tech_sniper_it.worker.build_default_manager", lambda: DummyManager())
+    monkeypatch.setattr("tech_sniper_it.worker._send_telegram_message", fake_send)
+
+    exit_code = await _run_status_command({})
+
+    assert exit_code == 0
+    assert len(sent_messages) == 1
+    assert "📌 last opportunity: read error (db unavailable)" in sent_messages[0]
+
+
+@pytest.mark.asyncio
 async def test_run_scan_command_sends_summary_for_manual_debug(monkeypatch: pytest.MonkeyPatch) -> None:
     sent_messages = []
 
@@ -353,3 +407,92 @@ async def test_run_scan_command_uses_warehouse_fallback_when_no_input(monkeypatc
     assert exit_code == 0
     assert len(sent_messages) == 1
     assert "Prodotti analizzati: 1" in sent_messages[0][1]
+
+
+@pytest.mark.asyncio
+async def test_run_scan_command_sends_summary_when_default_telegram_configured(monkeypatch: pytest.MonkeyPatch) -> None:
+    sent_messages = []
+
+    class DummyDecision:
+        def __init__(self) -> None:
+            self.product = type(
+                "P",
+                (),
+                {
+                    "title": "iPhone",
+                    "price_eur": 679.0,
+                    "url": None,
+                },
+            )()
+            self.normalized_name = "iPhone 14 Pro 128GB"
+            self.best_offer = type("B", (), {"offer_eur": 650.0, "platform": "rebuy", "source_url": None})()
+            self.spread_eur = -29.0
+            self.should_notify = False
+            self.offers = []
+
+    class DummyManager:
+        min_spread_eur = 40.0
+
+        async def evaluate_many(self, products, max_parallel_products=3):  # noqa: ANN001, ANN201
+            return [DummyDecision()]
+
+    async def fake_send(text: str, chat_id: str | None) -> None:
+        sent_messages.append((chat_id, text))
+
+    monkeypatch.setattr("tech_sniper_it.worker.build_default_manager", lambda: DummyManager())
+    monkeypatch.setattr("tech_sniper_it.worker._load_github_event_data", lambda: {})
+    monkeypatch.setattr(
+        "tech_sniper_it.worker.load_products",
+        lambda event_data=None: [
+            type("Product", (), {"title": "iPhone", "price_eur": 679.0, "category": ProductCategory.APPLE_PHONE})()
+        ],
+    )
+    monkeypatch.setattr("tech_sniper_it.worker._send_telegram_message", fake_send)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "token")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "42")
+
+    exit_code = await _run_scan_command({})
+
+    assert exit_code == 0
+    assert len(sent_messages) == 1
+    assert "🚀 Tech_Sniper_IT | Scan Report" in sent_messages[0][1]
+
+
+@pytest.mark.asyncio
+async def test_run_scan_command_skips_summary_without_telegram_configuration(monkeypatch: pytest.MonkeyPatch) -> None:
+    sent_messages = []
+
+    class DummyDecision:
+        def __init__(self) -> None:
+            self.product = type("P", (), {"title": "iPhone", "price_eur": 679.0, "url": None})()
+            self.normalized_name = "iPhone 14 Pro 128GB"
+            self.best_offer = type("B", (), {"offer_eur": 650.0, "platform": "rebuy", "source_url": None})()
+            self.spread_eur = -29.0
+            self.should_notify = False
+            self.offers = []
+
+    class DummyManager:
+        min_spread_eur = 40.0
+
+        async def evaluate_many(self, products, max_parallel_products=3):  # noqa: ANN001, ANN201
+            return [DummyDecision()]
+
+    async def fake_send(text: str, chat_id: str | None) -> None:
+        sent_messages.append((chat_id, text))
+
+    monkeypatch.setattr("tech_sniper_it.worker.build_default_manager", lambda: DummyManager())
+    monkeypatch.setattr("tech_sniper_it.worker._load_github_event_data", lambda: {})
+    monkeypatch.setattr(
+        "tech_sniper_it.worker.load_products",
+        lambda event_data=None: [
+            type("Product", (), {"title": "iPhone", "price_eur": 679.0, "category": ProductCategory.APPLE_PHONE})()
+        ],
+    )
+    monkeypatch.setattr("tech_sniper_it.worker._send_telegram_message", fake_send)
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+    monkeypatch.delenv("TELEGRAM_CHAT_ID", raising=False)
+
+    exit_code = await _run_scan_command({})
+
+    assert exit_code == 0
+    assert len(sent_messages) == 0
