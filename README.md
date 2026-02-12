@@ -91,6 +91,16 @@ Install/update git hooks manually:
 ./scripts/install_git_hooks.sh
 ```
 
+### Automatic Vercel deploy from Git push
+
+`tests.yml` now deploys to Vercel production automatically after tests pass on every push to `main`.
+
+Required GitHub Secrets:
+
+- `VERCEL_TOKEN`
+- `VERCEL_ORG_ID`
+- `VERCEL_PROJECT_ID`
+
 ## Telegram + Vercel Orchestrator
 
 Heavy operations are delegated to GitHub Actions. Vercel only validates commands and enqueues jobs.
