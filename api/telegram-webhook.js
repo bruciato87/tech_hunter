@@ -115,13 +115,13 @@ module.exports = async function handler(req, res) {
   }
 
   const botToken = process.env.TELEGRAM_BOT_TOKEN;
+  if (!botToken) {
+    return res.status(500).json({ ok: false, error: "Missing env configuration" });
+  }
   const githubToken = process.env.GITHUB_TOKEN;
   const githubOwner = process.env.GITHUB_OWNER;
   const githubRepo = process.env.GITHUB_REPO;
   const eventType = envOrDefault("GITHUB_EVENT_TYPE", DEFAULT_DISPATCH_EVENT);
-  if (!botToken || !githubToken || !githubOwner || !githubRepo) {
-    return res.status(500).json({ ok: false, error: "Missing env configuration" });
-  }
 
   const update = req.body || {};
   const message = update.message || update.edited_message;
@@ -145,6 +145,7 @@ module.exports = async function handler(req, res) {
   const commandToken = text.split(/\s+/)[0] || "";
   const command = commandToken.replace(/^\/([^@\s]+).*$/, "$1").toLowerCase();
   const args = text.slice(commandToken.length).trim();
+  const githubReady = Boolean(githubToken && githubOwner && githubRepo);
 
   try {
     if (command === "start") {
@@ -165,6 +166,14 @@ module.exports = async function handler(req, res) {
     }
 
     if (command === "scan") {
+      if (!githubReady) {
+        await sendTelegramMessage(
+          botToken,
+          chatId,
+          "Config mancante su Vercel: GITHUB_TOKEN/GITHUB_OWNER/GITHUB_REPO."
+        );
+        return res.status(200).json({ ok: true });
+      }
       if (!args) {
         await sendTelegramMessage(
           botToken,
@@ -202,6 +211,14 @@ module.exports = async function handler(req, res) {
     }
 
     if (command === "status") {
+      if (!githubReady) {
+        await sendTelegramMessage(
+          botToken,
+          chatId,
+          "Config mancante su Vercel: GITHUB_TOKEN/GITHUB_OWNER/GITHUB_REPO."
+        );
+        return res.status(200).json({ ok: true });
+      }
       await dispatchToGitHub({
         githubToken,
         owner: githubOwner,
@@ -219,6 +236,14 @@ module.exports = async function handler(req, res) {
     }
 
     if (command === "last") {
+      if (!githubReady) {
+        await sendTelegramMessage(
+          botToken,
+          chatId,
+          "Config mancante su Vercel: GITHUB_TOKEN/GITHUB_OWNER/GITHUB_REPO."
+        );
+        return res.status(200).json({ ok: true });
+      }
       const requested = Number.parseInt(args || "5", 10);
       const limit = Number.isFinite(requested)
         ? Math.max(1, Math.min(requested, MAX_LAST_LIMIT))
