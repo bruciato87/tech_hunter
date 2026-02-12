@@ -145,7 +145,9 @@ def _classify_openrouter_error(exc: Exception) -> tuple[str, int | None]:
         return "credits_exhausted", status_code
     if "quota" in message or ("token" in message and ("exceed" in message or "insufficient" in message)):
         return "token_exhausted", status_code
-    if status_code in {400, 404} and (
+    if status_code == 404:
+        return "model_not_found", status_code
+    if status_code == 400 and (
         "model not found" in message
         or "unknown model" in message
         or "invalid model" in message
@@ -233,6 +235,7 @@ class SmartAIBalancer:
             }
             for model in self.openrouter_model_pool
         }
+        self._last_successful_openrouter_model: str | None = None
         self._cache: dict[str, tuple[str, dict[str, str | bool | None]]] = {}
         self._last_usage: dict[str, str | bool | None] = {
             "provider": None,
@@ -317,7 +320,10 @@ class SmartAIBalancer:
                 ranked_models = self._rank_openrouter_models()
                 if not ranked_models:
                     ranked_models = [self.openrouter_model]
-                candidate_models = ranked_models[: self.openrouter_max_models_per_request]
+                candidate_models = self._augment_openrouter_candidates(
+                    ranked_models[: self.openrouter_max_models_per_request],
+                    ranked_models,
+                )
                 preview = ", ".join(candidate_models)
                 print(
                     "[ai] openrouter ranking | "
@@ -633,6 +639,9 @@ class SmartAIBalancer:
         return [*available, *blocked]
 
     def _mark_openrouter_success(self, candidate_model: str, latency_ms: float, resolved_model: str | None) -> None:
+        selected = resolved_model or candidate_model
+        if selected:
+            self._last_successful_openrouter_model = selected
         for model in _dedupe_keep_order([candidate_model, resolved_model or ""]):
             stats = self._openrouter_model_stats.setdefault(
                 model,
@@ -687,6 +696,25 @@ class SmartAIBalancer:
         stats["last_error_kind"] = error_kind
         stats["last_error_message"] = error_message
         stats["blocked_until"] = time.monotonic() + max(1, cooldown_seconds)
+
+    def _augment_openrouter_candidates(self, initial: list[str], ranked_models: list[str]) -> list[str]:
+        candidates = _dedupe_keep_order(initial)
+        rescue_chain = [
+            self._last_successful_openrouter_model or "",
+            "perplexity/sonar",
+            "openrouter/auto",
+        ]
+        for model in rescue_chain:
+            if not model:
+                continue
+            if model not in ranked_models:
+                continue
+            if model in candidates:
+                continue
+            if self._cooldown_remaining(model) > 0:
+                continue
+            candidates.append(model)
+        return candidates
 
     def _sanitize_result(self, text: str) -> str:
         value = (text or "").strip()
