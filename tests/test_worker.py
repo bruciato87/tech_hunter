@@ -1052,3 +1052,19 @@ async def test_save_non_profitable_decisions_counts(monkeypatch: pytest.MonkeyPa
     count = await _save_non_profitable_decisions(manager, [decision_low, decision_high, decision_none])
     assert count == 1
     assert len(saved) == 3
+
+
+@pytest.mark.asyncio
+async def test_save_non_profitable_decisions_ignores_storage_transient_errors() -> None:
+    class DummyStorage:
+        async def save_non_profitable(self, decision, threshold: float):  # noqa: ANN001
+            if getattr(decision, "tag", "") == "fail":
+                raise RuntimeError("temporary supabase disconnect")
+
+    manager = type("M", (), {"storage": DummyStorage(), "min_spread_eur": 40.0})()
+    decision_ok = type("D1", (), {"spread_eur": 10.0, "tag": "ok"})()
+    decision_fail = type("D2", (), {"spread_eur": 20.0, "tag": "fail"})()
+    decision_skip = type("D3", (), {"spread_eur": 60.0, "tag": "skip"})()
+
+    count = await _save_non_profitable_decisions(manager, [decision_ok, decision_fail, decision_skip])
+    assert count == 1

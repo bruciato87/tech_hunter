@@ -1488,9 +1488,21 @@ async def _save_non_profitable_decisions(manager, decisions: list) -> int:  # no
     tasks = [storage.save_non_profitable(decision, threshold=manager.min_spread_eur) for decision in decisions]
     if not tasks:
         return 0
-    await asyncio.gather(*tasks)
-    saved = sum(1 for decision in decisions if decision.spread_eur is not None and decision.spread_eur <= manager.min_spread_eur)
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    eligible_indexes = [
+        index
+        for index, decision in enumerate(decisions)
+        if decision.spread_eur is not None and decision.spread_eur <= manager.min_spread_eur
+    ]
+    saved = sum(1 for index in eligible_indexes if not isinstance(results[index], Exception))
+    failed = [results[index] for index in eligible_indexes if isinstance(results[index], Exception)]
     print(f"[scan] Stored non-profitable records for exclusion cache: {saved}")
+    if failed:
+        first_error = _safe_error_details(failed[0], max_len=160)
+        print(
+            "[scan] Non-profitable cache persistence warnings | "
+            f"failed={len(failed)} first_error='{first_error}'"
+        )
     return saved
 
 
