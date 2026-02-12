@@ -68,3 +68,9 @@ Nome prodotto: iPhone 14 Pro Max 256GB
 ```"""
     value = balancer._sanitize_result(raw)
     assert value == "iPhone 14 Pro Max 256GB"
+
+
+def test_sanitize_result_removes_citation_markers() -> None:
+    balancer = SmartAIBalancer(gemini_keys=[], openrouter_keys=[])
+    value = balancer._sanitize_result("Apple iPhone 16 Pro 128GB[1][2][4]")
+    assert value == "Apple iPhone 16 Pro 128GB"

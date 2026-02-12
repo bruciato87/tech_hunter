@@ -134,6 +134,7 @@ class SmartAIBalancer:
         value = re.sub(r"^[\-\*\d\.\)\s]+", "", value)
         value = value.strip().strip("\"'")
         value = re.sub(r"[*_`~]", "", value)
+        value = re.sub(r"\[(?:\d+(?:\s*,\s*\d+)*)\]", "", value)
         value = re.sub(r"^nome(?:\s+prodotto)?\s*:\s*", "", value, flags=re.IGNORECASE)
         value = re.sub(r"\s+", " ", value)
         value = re.sub(r"\b(colore|color|ottime condizioni|ricondizionato)\b.*", "", value, flags=re.IGNORECASE)
