@@ -4,6 +4,7 @@ import pytest
 
 from tech_sniper_it.models import AmazonProduct, ProductCategory
 from tech_sniper_it.valuators.base import BaseValuator
+from tech_sniper_it.valuators.trenddevice import TrendDeviceValuator
 
 
 class DummySuccessValuator(BaseValuator):
@@ -40,3 +41,7 @@ async def test_valuate_failure_returns_error_payload() -> None:
     assert result.offer_eur is None
     assert "scrape_failed" in (result.error or "")
     assert result.raw_payload["error_type"] == "RuntimeError"
+
+
+def test_trenddevice_points_to_trendevice_domain() -> None:
+    assert TrendDeviceValuator.base_url == "https://www.trendevice.com"

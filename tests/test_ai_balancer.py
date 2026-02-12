@@ -53,3 +53,18 @@ async def test_normalize_uses_heuristic_when_no_keys() -> None:
     assert "Nero" not in result
     assert "Ottime Condizioni" not in result
     assert "iPhone 14 Pro 128GB" in result
+
+
+def test_sanitize_result_removes_markdown_wrappers() -> None:
+    balancer = SmartAIBalancer(gemini_keys=[], openrouter_keys=[])
+    value = balancer._sanitize_result("**Apple iPhone 15 128 GB**")
+    assert value == "Apple iPhone 15 128 GB"
+
+
+def test_sanitize_result_takes_first_clean_line() -> None:
+    balancer = SmartAIBalancer(gemini_keys=[], openrouter_keys=[])
+    raw = """```text
+Nome prodotto: iPhone 14 Pro Max 256GB
+```"""
+    value = balancer._sanitize_result(raw)
+    assert value == "iPhone 14 Pro Max 256GB"

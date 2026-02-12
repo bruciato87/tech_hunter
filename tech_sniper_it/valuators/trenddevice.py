@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any
+from urllib.parse import urlparse
 
 from bs4 import BeautifulSoup
 from playwright.async_api import Error as PlaywrightError
@@ -14,7 +15,7 @@ from tech_sniper_it.valuators.base import BaseValuator
 class TrendDeviceValuator(BaseValuator):
     platform_name = "trenddevice"
     condition_label = "grado_a"
-    base_url = "https://www.trenddevice.com"
+    base_url = "https://www.trendevice.com"
 
     async def _fetch_offer(
         self,
@@ -38,6 +39,9 @@ class TrendDeviceValuator(BaseValuator):
             page.set_default_timeout(self.nav_timeout_ms)
             try:
                 await page.goto(self.base_url, wait_until="domcontentloaded")
+                hostname = (urlparse(page.url).hostname or "").lower()
+                if "trendevice.com" not in hostname:
+                    raise RuntimeError(f"Unexpected TrendDevice hostname: {hostname or 'n/a'}")
                 await self._accept_cookie_if_present(page)
 
                 await self._click_first(
@@ -154,4 +158,3 @@ class TrendDeviceValuator(BaseValuator):
         soup = BeautifulSoup(html, "html.parser")
         text = soup.get_text(" ", strip=True)
         return parse_eur_price(text), text[:220]
-

@@ -126,7 +126,15 @@ class SmartAIBalancer:
         return choices[0].get("message", {}).get("content", "").strip()
 
     def _sanitize_result(self, text: str) -> str:
-        value = (text or "").strip().strip("\"'")
+        value = (text or "").strip()
+        value = re.sub(r"```(?:\w+)?", "", value)
+        value = value.replace("```", "")
+        lines = [line.strip() for line in value.splitlines() if line.strip()]
+        value = lines[0] if lines else value
+        value = re.sub(r"^[\-\*\d\.\)\s]+", "", value)
+        value = value.strip().strip("\"'")
+        value = re.sub(r"[*_`~]", "", value)
+        value = re.sub(r"^nome(?:\s+prodotto)?\s*:\s*", "", value, flags=re.IGNORECASE)
         value = re.sub(r"\s+", " ", value)
         value = re.sub(r"\b(colore|color|ottime condizioni|ricondizionato)\b.*", "", value, flags=re.IGNORECASE)
         value = value.strip(" -:,")
