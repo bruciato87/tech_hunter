@@ -22,6 +22,8 @@ python scripts/validate_env.py
 python -m tech_sniper_it.worker
 ```
 
+`bootstrap_local.sh` also installs a Git `pre-push` hook that runs the full test suite and blocks pushes on failures.
+
 `AMAZON_PRODUCTS_JSON` example:
 
 ```json
@@ -71,8 +73,23 @@ It creates `public.arbitrage_opportunities`, enables + forces RLS, and adds poli
 
 - Worker run: `.github/workflows/worker.yml`
 - Secret leak scan: `.github/workflows/security.yml` (Gitleaks)
+- Full regression suite: `.github/workflows/tests.yml`
 
 Store all production keys only in GitHub Secrets, never in tracked files.
+
+## Testing
+
+Run the complete suite locally:
+
+```bash
+./scripts/run_tests.sh
+```
+
+Install/update git hooks manually:
+
+```bash
+./scripts/install_git_hooks.sh
+```
 
 ## Telegram + Vercel Orchestrator
 

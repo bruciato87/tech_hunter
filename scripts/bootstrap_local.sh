@@ -9,13 +9,16 @@ if [[ ! -d "${VENV_DIR}" ]]; then
 fi
 
 "${VENV_DIR}/bin/pip" install --upgrade pip
-"${VENV_DIR}/bin/pip" install -r "${ROOT_DIR}/requirements.txt"
+"${VENV_DIR}/bin/pip" install -r "${ROOT_DIR}/requirements-dev.txt"
 "${VENV_DIR}/bin/python" -m playwright install chromium
 
 if [[ ! -f "${ROOT_DIR}/.env" ]]; then
   cp "${ROOT_DIR}/.env.example" "${ROOT_DIR}/.env"
 fi
 
+"${ROOT_DIR}/scripts/install_git_hooks.sh"
+
 echo "Local bootstrap completed."
 echo "Activate env with: source .venv/bin/activate"
 echo "Then run: python scripts/validate_env.py"
+echo "Run tests: ./scripts/run_tests.sh"
