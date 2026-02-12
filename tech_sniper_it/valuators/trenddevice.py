@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass
 from difflib import SequenceMatcher
@@ -92,6 +93,7 @@ class WizardOption:
     index: int
     text: str
     normalized: str
+    selector: str = "label:has(input[name='item'])"
 
 
 def _normalize_wizard_text(value: str | None) -> str:
@@ -324,28 +326,64 @@ def _extract_contextual_price(text: str) -> tuple[float | None, str]:
     return value, snippet
 
 
+def _is_email_gate_text(text: str) -> bool:
+    normalized = _normalize_wizard_text(text)
+    if not normalized:
+        return False
+    has_mail = "email" in normalized or "e mail" in normalized or "mail" in normalized
+    has_submit_cta = "scopri la valutazione" in normalized
+    has_wizard_context = "dispositivo usato" in normalized or "guadagnare" in normalized or "valutazione" in normalized
+    return has_mail and has_submit_cta and has_wizard_context
+
+
 class TrendDeviceValuator(BaseValuator):
     platform_name = "trenddevice"
     condition_label = "grado_a"
     base_url = "https://www.trendevice.com/vendi/valutazione/"
 
     async def _collect_wizard_options(self, page: Page) -> list[WizardOption]:
-        labels = page.locator("label:has(input[name='item'])")
-        count = await labels.count()
         options: list[WizardOption] = []
-        for index in range(count):
-            label = labels.nth(index)
+        seen: set[str] = set()
+        option_selectors = self._selector_candidates(
+            site=self.platform_name,
+            slot="wizard_option",
+            defaults=[
+                "label:has(input[name='item'])",
+                "[role='radio']",
+                "div[role='option']",
+                "button[class*='option' i]",
+            ],
+        )
+        for selector in option_selectors:
+            nodes = page.locator(selector)
             try:
-                if not await label.is_visible():
-                    continue
-                text = await label.inner_text(timeout=900)
+                count = min(await nodes.count(), 90)
             except PlaywrightError:
                 continue
+            for index in range(count):
+                node = nodes.nth(index)
+                try:
+                    if not await node.is_visible():
+                        continue
+                    text = await node.inner_text(timeout=900)
+                except PlaywrightError:
+                    continue
 
-            cleaned = re.sub(r"\s+", " ", text).strip()
-            if not cleaned:
-                continue
-            options.append(WizardOption(index=index, text=cleaned, normalized=_normalize_wizard_text(cleaned)))
+                cleaned = re.sub(r"\s+", " ", text).strip()
+                normalized = _normalize_wizard_text(cleaned)
+                if not cleaned or len(normalized) < 2:
+                    continue
+                if normalized in seen:
+                    continue
+                seen.add(normalized)
+                options.append(
+                    WizardOption(
+                        index=index,
+                        text=cleaned,
+                        normalized=normalized,
+                        selector=selector,
+                    )
+                )
         return options
 
     async def _wait_for_wizard_options(self, page: Page, timeout_ms: int = 6000) -> list[WizardOption]:
@@ -360,40 +398,65 @@ class TrendDeviceValuator(BaseValuator):
         return []
 
     async def _select_option(self, page: Page, option: WizardOption) -> None:
-        label = page.locator("label:has(input[name='item'])").nth(option.index)
-        radio = label.locator("input[name='item']").first
-        if await radio.count():
-            try:
+        target = page.locator(option.selector).nth(option.index)
+        radio = target.locator("input[type='radio'], input[name='item']").first
+        try:
+            if await radio.count():
                 await radio.check(force=True, timeout=2600)
                 return
-            except PlaywrightError:
-                pass
-        await label.click(force=True, timeout=3200)
+        except PlaywrightError:
+            pass
+        await target.click(force=True, timeout=3200)
 
     async def _click_confirm(self, page: Page) -> bool:
-        button = page.locator("button:has-text('Conferma')").first
-        try:
-            if not await button.count():
-                return False
-            await button.wait_for(state="visible", timeout=2200)
-            if not await button.is_enabled():
-                await page.wait_for_timeout(250)
-            await button.click(timeout=3500)
-            return True
-        except PlaywrightError:
-            return False
+        selectors = self._selector_candidates(
+            site=self.platform_name,
+            slot="confirm_button",
+            defaults=[
+                "button:has-text('Conferma')",
+                "button:has-text('Valuta')",
+                "button:has-text('Continua')",
+                "button:has-text('Avanti')",
+                "button:has-text('Calcola')",
+            ],
+        )
+        for selector in selectors:
+            button = page.locator(selector).first
+            try:
+                if not await button.count():
+                    continue
+                await button.wait_for(state="visible", timeout=2200)
+                if not await button.is_enabled():
+                    await page.wait_for_timeout(300)
+                if not await button.is_enabled():
+                    continue
+                await button.click(timeout=3500)
+                return True
+            except PlaywrightError:
+                continue
+        return await self._click_first_semantic(
+            page,
+            keywords=["conferma", "valuta", "continua", "avanti", "calcola"],
+            timeout_ms=1800,
+            selectors=["button", "[role='button']"],
+        )
 
-    async def _extract_price(self, page: Page) -> tuple[float | None, str]:
-        selectors = [
-            "[data-testid*='price' i]",
-            "[class*='price' i]",
-            "[class*='offerta' i]",
-            "[class*='valut' i]",
-            "text=/ti offriamo/i",
-            "text=/valutazione/i",
-            "text=/\\d+[\\.,]?\\d*\\s?€/i",
-            "text=/€\\s?\\d+[\\.,]?\\d*/i",
-        ]
+    async def _extract_price(self, page: Page, *, payload: dict[str, Any] | None = None) -> tuple[float | None, str]:
+        selectors = self._selector_candidates(
+            site=self.platform_name,
+            slot="price",
+            defaults=[
+                "[data-testid*='price' i]",
+                "[class*='price' i]",
+                "[class*='offerta' i]",
+                "[class*='valut' i]",
+                "text=/ti offriamo/i",
+                "text=/valutazione/i",
+                "text=/\\d+[\\.,]?\\d*\\s?€/i",
+                "text=/€\\s?\\d+[\\.,]?\\d*/i",
+            ],
+            payload=payload,
+        )
         for selector in selectors:
             try:
                 locator = page.locator(selector)
@@ -433,6 +496,145 @@ class TrendDeviceValuator(BaseValuator):
         body_text = soup.get_text(" ", strip=True)
         return None, body_text[:220]
 
+    async def _is_email_gate(self, page: Page) -> bool:
+        email_input_selectors = [
+            "input[type='email']",
+            "input[name*='mail' i]",
+            "input[id*='mail' i]",
+            "input[placeholder*='mail' i]",
+        ]
+        cta_selectors = [
+            "button:has-text('Scopri la valutazione')",
+            "button:has-text('Scopri valutazione')",
+            "button:has-text('Scopri')",
+        ]
+        for email_selector in email_input_selectors:
+            try:
+                if not await page.locator(email_selector).first.count():
+                    continue
+            except PlaywrightError:
+                continue
+            for cta_selector in cta_selectors:
+                try:
+                    if await page.locator(cta_selector).first.count():
+                        return True
+                except PlaywrightError:
+                    continue
+        try:
+            body_text = await page.inner_text("body", timeout=900)
+        except PlaywrightError:
+            return False
+        return _is_email_gate_text(body_text)
+
+    async def _submit_email_gate(self, page: Page, payload: dict[str, Any]) -> bool:
+        if not await self._is_email_gate(page):
+            return False
+
+        email_value = (os.getenv("TRENDDEVICE_LEAD_EMAIL") or "techsniperit@example.com").strip()
+        if "@" not in email_value:
+            email_value = "techsniperit@example.com"
+
+        email_selectors = self._selector_candidates(
+            site=self.platform_name,
+            slot="email_input",
+            defaults=[
+                "input[type='email']",
+                "input[name*='mail' i]",
+                "input[id*='mail' i]",
+                "input[placeholder*='mail' i]",
+            ],
+            payload=payload,
+        )
+        filled = await self._fill_first(
+            page,
+            selectors=email_selectors,
+            value=email_value,
+            timeout_ms=3500,
+        )
+        if not filled:
+            filled = await self._fill_first_semantic(
+                page,
+                value=email_value,
+                keywords=["email", "mail"],
+                timeout_ms=2200,
+            )
+
+        consent_checked = 0
+        checkboxes = page.locator("input[type='checkbox']")
+        try:
+            checkbox_count = min(await checkboxes.count(), 4)
+        except PlaywrightError:
+            checkbox_count = 0
+        for index in range(checkbox_count):
+            checkbox = checkboxes.nth(index)
+            try:
+                if not await checkbox.is_visible():
+                    continue
+                await checkbox.check(force=True, timeout=1500)
+                consent_checked += 1
+            except PlaywrightError:
+                try:
+                    await checkbox.click(force=True, timeout=1000)
+                    consent_checked += 1
+                except PlaywrightError:
+                    continue
+
+        if consent_checked == 0:
+            clicked_label = await self._click_first(
+                page,
+                selectors=[
+                    "label:has-text('Ho letto')",
+                    "label:has-text('Condizioni d\\'uso')",
+                    "label:has-text('Privacy Policy')",
+                ],
+                timeout_ms=1800,
+            )
+            if not clicked_label:
+                await self._click_first_semantic(
+                    page,
+                    keywords=["ho letto", "condizioni", "privacy"],
+                    timeout_ms=1800,
+                    selectors=["label", "span", "div", "button"],
+                )
+
+        submit_selectors = self._selector_candidates(
+            site=self.platform_name,
+            slot="email_submit",
+            defaults=[
+                "button:has-text('Scopri la valutazione')",
+                "button:has-text('Scopri valutazione')",
+                "button:has-text('Scopri')",
+            ],
+            payload=payload,
+        )
+        submitted = await self._click_first(
+            page,
+            selectors=submit_selectors,
+            timeout_ms=4500,
+        )
+        if not submitted:
+            submitted = await self._click_first_semantic(
+                page,
+                keywords=["scopri la valutazione", "scopri valutazione", "scopri"],
+                timeout_ms=2400,
+                selectors=["button", "[role='button']", "a"],
+            )
+        payload["email_gate"] = {
+            "detected": True,
+            "filled": filled,
+            "consent_checked": consent_checked,
+            "submitted": submitted,
+            "email_domain": email_value.split("@")[-1],
+        }
+
+        if submitted:
+            try:
+                await page.wait_for_load_state("domcontentloaded", timeout=6500)
+            except PlaywrightError:
+                pass
+            await page.wait_for_timeout(1400)
+        return submitted
+
     async def _fetch_offer(
         self,
         product: AmazonProduct,
@@ -442,6 +644,7 @@ class TrendDeviceValuator(BaseValuator):
             "query": normalized_name,
             "condition_target": "Normale usura (grade A)",
             "wizard": [],
+            "adaptive_fallbacks": {},
         }
 
         async with async_playwright() as playwright:
@@ -462,40 +665,101 @@ class TrendDeviceValuator(BaseValuator):
                         "button:has-text('Accetta tutti')",
                         "button:has-text('Accetta')",
                     ],
-                    timeout_ms=1200,
+                    timeout_ms=3500,
                 )
                 await page.wait_for_timeout(800)
 
                 previous_signature = ""
                 stagnant_steps = 0
-                max_steps = 14
+                max_steps = 18
                 excluded_models: set[str] = set()
                 reset_after_model = 0
                 for step_index in range(1, max_steps + 1):
                     options = await self._wait_for_wizard_options(page)
                     if not options:
-                        payload["wizard_end_reason"] = "no-options"
-                        break
+                        await self._click_first(
+                            page,
+                            [
+                                "button:has-text('Accetta tutti')",
+                                "button:has-text('Accetta')",
+                            ],
+                            timeout_ms=1800,
+                        )
+                        await page.wait_for_timeout(900)
+                        options = await self._wait_for_wizard_options(page, timeout_ms=3500)
+                        if not options:
+                            submitted_email = await self._submit_email_gate(page, payload)
+                            if submitted_email:
+                                payload["wizard_end_reason"] = "email-gate-submitted"
+                                options = await self._wait_for_wizard_options(page, timeout_ms=2800)
+                                if not options:
+                                    await self._attach_ui_probe(
+                                        payload=payload,
+                                        page=page,
+                                        site=self.platform_name,
+                                        stage="email_gate_submitted_no_price",
+                                        expected_keywords=["mail", "valutazione", "guadagnare", "dispositivo usato"],
+                                    )
+                                    break
+                            else:
+                                payload["wizard_end_reason"] = "no-options"
+                                await self._attach_ui_probe(
+                                    payload=payload,
+                                    page=page,
+                                    site=self.platform_name,
+                                    stage="wizard_no_options",
+                                    expected_keywords=["valutazione", "vendi", "iphone", "trendevice"],
+                                )
+                                break
 
+                    step_name = _detect_wizard_step(options)
                     signature = _options_signature(options)
                     if signature == previous_signature:
                         stagnant_steps += 1
                     else:
                         stagnant_steps = 0
                     previous_signature = signature
+                    if stagnant_steps >= 1 and step_name in {STEP_MARKET, STEP_COLOR, STEP_YES_NO}:
+                        # Some final steps render "Valuta" instead of "Conferma".
+                        if await self._click_confirm(page):
+                            payload["wizard"].append(
+                                {
+                                    "step": step_index,
+                                    "step_type": f"{step_name}_finalize",
+                                    "selected": "auto-finalize",
+                                    "options_count": len(options),
+                                    "confirmed": True,
+                                }
+                            )
+                            await page.wait_for_timeout(1200)
+                            continue
                     if stagnant_steps >= 2:
+                        submitted_email = await self._submit_email_gate(page, payload)
+                        if submitted_email:
+                            payload["wizard_end_reason"] = "email-gate-submitted-stagnant"
+                            await self._attach_ui_probe(
+                                payload=payload,
+                                page=page,
+                                site=self.platform_name,
+                                stage="email_gate_submitted_stagnant",
+                                expected_keywords=["mail", "valutazione", "guadagnare", "dispositivo usato"],
+                            )
+                            break
                         payload["wizard_end_reason"] = "stagnant-options"
+                        await self._attach_ui_probe(
+                            payload=payload,
+                            page=page,
+                            site=self.platform_name,
+                            stage="wizard_stagnant_options",
+                            expected_keywords=["valutazione", "vendi", "iphone", "trendevice"],
+                        )
                         break
 
-                    step_name = _detect_wizard_step(options)
                     if step_name == STEP_DEVICE_FAMILY and payload["wizard"]:
                         previous_step = payload["wizard"][-1]
                         if previous_step.get("step_type") == STEP_MODEL:
                             reset_after_model += 1
-                            selected_model = _normalize_wizard_text(str(previous_step.get("selected", "")))
-                            if selected_model:
-                                excluded_models.add(selected_model)
-                            if reset_after_model >= 2:
+                            if reset_after_model >= 3:
                                 payload["wizard_end_reason"] = "model-selection-reset"
                                 raise RuntimeError("TrendDevice wizard reset after model selection (catalog route unavailable).")
 
@@ -524,10 +788,17 @@ class TrendDeviceValuator(BaseValuator):
 
                     await page.wait_for_timeout(1100)
 
-                price, price_text = await self._extract_price(page)
+                price, price_text = await self._extract_price(page, payload=payload)
                 payload["price_text"] = price_text
                 if price is None:
                     reason = payload.get("wizard_end_reason", "price-missing")
+                    await self._attach_ui_probe(
+                        payload=payload,
+                        page=page,
+                        site=self.platform_name,
+                        stage="price_missing",
+                        expected_keywords=["offerta", "valutazione", "ricevi", "€"],
+                    )
                     raise RuntimeError(f"TrendDevice price not found after wizard ({reason})")
                 return price, page.url, payload
             finally:
@@ -540,5 +811,6 @@ __all__ = [
     "_detect_wizard_step",
     "_extract_contextual_price",
     "_extract_iphone_model_hint",
+    "_is_email_gate_text",
     "_normalize_wizard_text",
 ]

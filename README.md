@@ -55,6 +55,9 @@ python -m tech_sniper_it.worker
 - `MAX_PARALLEL_PRODUCTS` (default: `3`)
 - `PLAYWRIGHT_NAV_TIMEOUT_MS` (default: `45000`)
 - `HEADLESS` (default: `true`)
+- `MPB_MAX_ATTEMPTS` (default: `3`)
+- `TRENDDEVICE_LEAD_EMAIL` (optional lead email used by TrendDevice wizard when required)
+- `VALUATOR_SELECTOR_OVERRIDES_JSON` (optional JSON selector overrides for automatic UI drift adaptation)
 - `AMAZON_PRODUCTS_JSON` (optional JSON array)
 - `AMAZON_PRODUCTS_FILE` (optional path to JSON file)
 - `AMAZON_WAREHOUSE_ENABLED` (default: `true`)
@@ -74,6 +77,33 @@ python -m tech_sniper_it.worker
 - `AMAZON_WAREHOUSE_STORAGE_STATE_B64` (optional base64 Playwright storage state for logged-in Amazon session)
 - `AMAZON_WAREHOUSE_DEBUG_ON_EMPTY` (default: `true`, saves diagnostic dump on zero parsed results)
 - `AMAZON_WAREHOUSE_DEBUG_DIR` (default: `/tmp/tech_sniper_it_debug`)
+
+### UI Drift Auto-Adaptation
+
+Each reseller valuator now has:
+
+- semantic fallback selectors (search/condition/result buttons)
+- runtime UI probes (page signature + expected keyword hits)
+- drift flag in logs (`ui_drift=true`) when page structure/content is suspicious
+
+Override selectors without deploy via env:
+
+```json
+{
+  "*": {
+    "price": ["[data-testid*='price' i]"]
+  },
+  "rebuy": {
+    "search_input": ["input[aria-label*='cerca' i]"]
+  },
+  "mpb": {
+    "result_open": ["[role='option'] a"]
+  },
+  "trenddevice": {
+    "confirm_button": ["button:has-text('Valuta')"]
+  }
+}
+```
 
 ### Free Bypass With Your Amazon Account Session
 

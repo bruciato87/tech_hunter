@@ -20,6 +20,31 @@ def _env_or_default(name: str, default: str) -> str:
     return default
 
 
+def _mask_secret(value: str | None) -> str:
+    raw = (value or "").strip()
+    if not raw:
+        return "n/a"
+    if len(raw) <= 6:
+        return "***"
+    return f"{raw[:2]}***{raw[-2:]}"
+
+
+def _short_error(exc: Exception, limit: int = 120) -> str:
+    text = " ".join(str(exc).split())
+    if not text:
+        return exc.__class__.__name__
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3] + "..."
+
+
+def _short_title(value: str, limit: int = 80) -> str:
+    text = " ".join((value or "").split())
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3] + "..."
+
+
 class SmartAIBalancer:
     """Rotates Gemini free keys first, then falls back to OpenRouter keys."""
 
@@ -56,12 +81,24 @@ class SmartAIBalancer:
 
     async def normalize_with_meta(self, title: str) -> tuple[str, dict[str, str | bool | None]]:
         cache_key = (title or "").strip()
+        print(
+            "[ai] normalize request | "
+            f"title='{_short_title(cache_key)}' | "
+            f"gemini_keys={len(self.gemini_keys)} model={self.gemini_model} | "
+            f"openrouter_keys={len(self.openrouter_keys)} model={self.openrouter_model}"
+        )
         cached = self._cache.get(cache_key)
         if cached:
             normalized, meta = cached
             cached_meta = dict(meta)
             cached_meta["mode"] = "cache"
             self._last_usage = cached_meta
+            print(
+                "[ai] cache hit | "
+                f"provider={cached_meta.get('provider')} | "
+                f"model={cached_meta.get('model') or 'rule-based'} | "
+                f"normalized='{normalized}'"
+            )
             return normalized, cached_meta
 
         prompt = (
@@ -72,8 +109,13 @@ class SmartAIBalancer:
         )
 
         if self._gemini_cycle:
-            for _ in range(len(self.gemini_keys)):
+            for attempt in range(1, len(self.gemini_keys) + 1):
                 api_key = next(self._gemini_cycle)
+                print(
+                    "[ai] attempt | "
+                    f"provider=gemini model={self.gemini_model} "
+                    f"attempt={attempt}/{len(self.gemini_keys)} key={_mask_secret(api_key)}"
+                )
                 try:
                     response = await self._call_gemini(api_key, prompt, title)
                     cleaned = self._sanitize_result(response)
@@ -86,13 +128,31 @@ class SmartAIBalancer:
                         }
                         self._cache[cache_key] = (cleaned, usage)
                         self._last_usage = usage
+                        print(
+                            "[ai] selected | "
+                            f"provider=gemini model={self.gemini_model} normalized='{cleaned}'"
+                        )
                         return cleaned, usage
-                except Exception:
+                    print(
+                        "[ai] empty response | "
+                        f"provider=gemini model={self.gemini_model} attempt={attempt}"
+                    )
+                except Exception as exc:
+                    print(
+                        "[ai] failed | "
+                        f"provider=gemini model={self.gemini_model} attempt={attempt} "
+                        f"error={_short_error(exc)}"
+                    )
                     continue
 
         if self._openrouter_cycle:
-            for _ in range(len(self.openrouter_keys)):
+            for attempt in range(1, len(self.openrouter_keys) + 1):
                 api_key = next(self._openrouter_cycle)
+                print(
+                    "[ai] attempt | "
+                    f"provider=openrouter model={self.openrouter_model} "
+                    f"attempt={attempt}/{len(self.openrouter_keys)} key={_mask_secret(api_key)}"
+                )
                 try:
                     response = await self._call_openrouter(api_key, prompt, title)
                     cleaned = self._sanitize_result(response)
@@ -105,8 +165,21 @@ class SmartAIBalancer:
                         }
                         self._cache[cache_key] = (cleaned, usage)
                         self._last_usage = usage
+                        print(
+                            "[ai] selected | "
+                            f"provider=openrouter model={self.openrouter_model} normalized='{cleaned}'"
+                        )
                         return cleaned, usage
-                except Exception:
+                    print(
+                        "[ai] empty response | "
+                        f"provider=openrouter model={self.openrouter_model} attempt={attempt}"
+                    )
+                except Exception as exc:
+                    print(
+                        "[ai] failed | "
+                        f"provider=openrouter model={self.openrouter_model} attempt={attempt} "
+                        f"error={_short_error(exc)}"
+                    )
                     continue
 
         fallback = self._heuristic_normalize(title)
@@ -118,10 +191,20 @@ class SmartAIBalancer:
         }
         self._cache[cache_key] = (fallback, usage)
         self._last_usage = usage
+        print(f"[ai] fallback heuristic | normalized='{fallback}'")
         return fallback, usage
 
     def get_last_usage(self) -> dict[str, str | bool | None]:
         return dict(self._last_usage)
+
+    def get_strategy_snapshot(self) -> dict[str, str | int]:
+        return {
+            "gemini_keys": len(self.gemini_keys),
+            "gemini_model": self.gemini_model,
+            "openrouter_keys": len(self.openrouter_keys),
+            "openrouter_model": self.openrouter_model,
+            "order": "gemini->openrouter->heuristic",
+        }
 
     async def _call_gemini(self, api_key: str, prompt: str, title: str) -> str:
         url = (

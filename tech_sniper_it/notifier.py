@@ -17,6 +17,9 @@ class TelegramNotifier:
         best = decision.best_offer
         platform = best.platform or "n/d"
         product_name = decision.normalized_name or product.title
+        ai_provider = decision.ai_provider or "heuristic"
+        ai_model = decision.ai_model or "rule-based"
+        ai_mode = decision.ai_mode or "fallback"
         lines = [
             "🚨 Tech_Sniper_IT | Opportunita trovata",
             "━━━━━━━━━━━━━━━━━━━━",
@@ -24,7 +27,7 @@ class TelegramNotifier:
             f"💶 Amazon Warehouse: {product.price_eur:.2f} EUR",
             f"🏆 Miglior cash-out: {best.offer_eur:.2f} EUR ({platform})",
             f"📈 Spread netto: +{decision.spread_eur:.2f} EUR",
-            f"🧠 AI match: {decision.ai_provider or 'heuristic'} ({decision.ai_mode or 'fallback'})",
+            f"🧠 AI match: provider={ai_provider} | model={ai_model} | mode={ai_mode}",
             "⚡ Azione consigliata: verifica disponibilita e prezzo in tempo reale.",
         ]
         if product.url:

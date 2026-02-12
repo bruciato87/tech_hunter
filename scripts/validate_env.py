@@ -45,6 +45,22 @@ def _parse_proxy(value: str) -> tuple[bool, str]:
     return True, ""
 
 
+def _parse_selector_overrides(value: str | None) -> bool:
+    raw = (value or "").strip()
+    if not raw:
+        return True
+    try:
+        decoded = json.loads(raw)
+    except Exception:
+        return False
+    if not isinstance(decoded, dict):
+        return False
+    for _, site_value in decoded.items():
+        if not isinstance(site_value, dict):
+            return False
+    return True
+
+
 def main() -> int:
     load_dotenv()
     errors: list[str] = []
@@ -83,6 +99,14 @@ def main() -> int:
         int(_env_or_default("PLAYWRIGHT_NAV_TIMEOUT_MS", "45000"))
     except ValueError:
         errors.append("PLAYWRIGHT_NAV_TIMEOUT_MS must be integer.")
+
+    trenddevice_email = (os.getenv("TRENDDEVICE_LEAD_EMAIL") or "").strip()
+    if trenddevice_email and "@" not in trenddevice_email:
+        warnings.append("TRENDDEVICE_LEAD_EMAIL seems invalid (missing '@').")
+
+    raw_selector_overrides = (os.getenv("VALUATOR_SELECTOR_OVERRIDES_JSON") or "").strip()
+    if raw_selector_overrides and not _parse_selector_overrides(raw_selector_overrides):
+        warnings.append("VALUATOR_SELECTOR_OVERRIDES_JSON is set but invalid (ignored).")
 
     if _warehouse_enabled():
         try:

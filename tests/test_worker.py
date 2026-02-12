@@ -88,6 +88,54 @@ def test_offer_log_payload_truncates_error() -> None:
     assert len(payload["error"]) <= 220
 
 
+def test_offer_log_payload_includes_ui_probe_summary() -> None:
+    class DummyOffer:
+        platform = "trenddevice"
+        offer_eur = None
+        condition = "grado_a"
+        currency = "EUR"
+        error = "price missing"
+        source_url = None
+        is_valid = False
+        raw_payload = {
+            "ui_probes": [{"drift_suspected": True}, {"drift_suspected": False}],
+            "adaptive_fallbacks": {"search_semantic": True},
+        }
+
+    payload = _offer_log_payload(DummyOffer())
+    assert payload["ui_drift"] is True
+    assert payload["ui_probe_count"] == 2
+    assert payload["adaptive_fallbacks"] == {"search_semantic": True}
+
+
+def test_format_scan_summary_includes_ui_drift_counter() -> None:
+    class DummyDecision:
+        def __init__(self) -> None:
+            self.normalized_name = "A"
+            self.spread_eur = 10.0
+            self.should_notify = False
+            self.ai_provider = "heuristic"
+            self.ai_model = None
+            self.ai_mode = "fallback"
+            self.product = type("Product", (), {"price_eur": 100.0, "url": None, "title": "A"})()
+            self.best_offer = None
+            self.offers = [
+                type(
+                    "Offer",
+                    (),
+                    {
+                        "platform": "rebuy",
+                        "offer_eur": None,
+                        "error": "missing",
+                        "raw_payload": {"ui_probes": [{"drift_suspected": True}]},
+                    },
+                )(),
+            ]
+
+    summary = _format_scan_summary([DummyDecision()], threshold=40.0)
+    assert "🧩 UI drift rilevati: 1/1" in summary
+
+
 def test_normalize_http_url_adds_scheme() -> None:
     assert _normalize_http_url("amazon.it/dp/B0ABC123") == "https://amazon.it/dp/B0ABC123"
 

@@ -40,3 +40,18 @@ def test_validate_env_passes_with_minimal_valid_config(tmp_path: Path) -> None:
     )
     assert result.returncode == 0
     assert "Environment validation passed." in result.stdout
+
+
+def test_validate_env_warns_on_invalid_selector_override(tmp_path: Path) -> None:
+    result = _run_validate_env(
+        tmp_path,
+        {
+            "GEMINI_API_KEYS": "k1",
+            "MIN_SPREAD_EUR": "40",
+            "MAX_PARALLEL_PRODUCTS": "2",
+            "PLAYWRIGHT_NAV_TIMEOUT_MS": "45000",
+            "VALUATOR_SELECTOR_OVERRIDES_JSON": "{invalid-json}",
+        },
+    )
+    assert result.returncode == 0
+    assert "VALUATOR_SELECTOR_OVERRIDES_JSON is set but invalid" in result.stdout

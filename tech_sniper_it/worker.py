@@ -137,6 +137,11 @@ def _offer_log_payload(offer) -> dict[str, Any]:  # noqa: ANN001
             valid_value = bool(valid_value())
         except Exception:
             valid_value = None
+    raw_payload = getattr(offer, "raw_payload", {}) or {}
+    ui_probes = raw_payload.get("ui_probes")
+    probe_rows = ui_probes if isinstance(ui_probes, list) else []
+    ui_drift = any(isinstance(item, dict) and bool(item.get("drift_suspected")) for item in probe_rows)
+    adaptive_fallbacks = raw_payload.get("adaptive_fallbacks", {})
     return {
         "platform": getattr(offer, "platform", "unknown"),
         "offer_eur": getattr(offer, "offer_eur", None),
@@ -145,7 +150,29 @@ def _offer_log_payload(offer) -> dict[str, Any]:  # noqa: ANN001
         "valid": valid_value,
         "error": _safe_text(getattr(offer, "error", None)),
         "source_url": getattr(offer, "source_url", None),
+        "ui_drift": ui_drift,
+        "ui_probe_count": len(probe_rows),
+        "adaptive_fallbacks": adaptive_fallbacks if isinstance(adaptive_fallbacks, dict) else {},
     }
+
+
+def _offer_has_ui_drift(offer) -> bool:  # noqa: ANN001
+    raw_payload = getattr(offer, "raw_payload", {}) or {}
+    probes = raw_payload.get("ui_probes")
+    if not isinstance(probes, list):
+        return False
+    return any(isinstance(item, dict) and bool(item.get("drift_suspected")) for item in probes)
+
+
+def _ui_drift_stats(decisions: list) -> tuple[int, int]:  # noqa: ANN001
+    drift_count = 0
+    total_offers = 0
+    for decision in decisions:
+        for offer in getattr(decision, "offers", []):
+            total_offers += 1
+            if _offer_has_ui_drift(offer):
+                drift_count += 1
+    return drift_count, total_offers
 
 
 def _format_eur(value: float | None) -> str:
@@ -188,8 +215,8 @@ def _ai_usage_label(decision) -> str:  # noqa: ANN001
     model = getattr(decision, "ai_model", None)
     mode = str(getattr(decision, "ai_mode", None) or "fallback")
     if model:
-        return f"{provider} ({model}, {mode})"
-    return f"{provider} ({mode})"
+        return f"provider={provider} | model={model} | mode={mode}"
+    return f"provider={provider} | model=rule-based | mode={mode}"
 
 
 def _ai_usage_stats(decisions: list) -> tuple[int, int, int]:  # noqa: ANN001
@@ -205,6 +232,19 @@ def _ai_usage_stats(decisions: list) -> tuple[int, int, int]:  # noqa: ANN001
         else:
             heuristic += 1
     return gemini, openrouter, heuristic
+
+
+def _ai_model_overview(decisions: list) -> str:  # noqa: ANN001
+    counters: dict[str, int] = {}
+    for decision in decisions:
+        provider = str(getattr(decision, "ai_provider", None) or "heuristic")
+        model = str(getattr(decision, "ai_model", None) or "rule-based")
+        key = f"{provider}:{model}"
+        counters[key] = counters.get(key, 0) + 1
+    if not counters:
+        return "n/d"
+    ordered = sorted(counters.items(), key=lambda item: (-item[1], item[0]))
+    return " | ".join(f"{key} x{count}" for key, count in ordered)
 
 
 def _spread_status_badge(spread_eur: float | None, threshold: float) -> tuple[str, str]:
@@ -407,6 +447,8 @@ def _format_scan_summary(decisions: list, threshold: float) -> str:
     best_spread = max((item.spread_eur for item in decisions if item.spread_eur is not None), default=None)
     gemini_count, openrouter_count, heuristic_count = _ai_usage_stats(decisions)
     ai_live_count = gemini_count + openrouter_count
+    ai_models = _ai_model_overview(decisions)
+    ui_drift_count, ui_drift_total = _ui_drift_stats(decisions)
     lines = [
         "🚀 Tech_Sniper_IT | Scan Report",
         "━━━━━━━━━━━━━━━━━━━━",
@@ -417,6 +459,8 @@ def _format_scan_summary(decisions: list, threshold: float) -> str:
         f"✅ Opportunita sopra soglia: {len(profitable)}",
         f"🗑️ Scartati sotto soglia: {len(decisions) - len(profitable)}",
         f"🧠 AI usata: {ai_live_count}/{len(decisions)} | gemini={gemini_count} openrouter={openrouter_count} fallback={heuristic_count}",
+        f"🧠 Modelli AI: {ai_models}",
+        f"🧩 UI drift rilevati: {ui_drift_count}/{ui_drift_total}",
         f"🏁 Miglior spread trovato: {_format_signed_eur(best_spread)}",
     ]
 
@@ -461,6 +505,13 @@ def _format_scan_summary(decisions: list, threshold: float) -> str:
 async def _run_scan_command(payload: dict[str, Any]) -> int:
     manager = build_default_manager()
     print("[scan] Starting worker scan command.")
+    strategy_getter = getattr(getattr(manager, "ai_balancer", None), "get_strategy_snapshot", None)
+    if callable(strategy_getter):
+        try:
+            snapshot = strategy_getter()
+            print(f"[scan] AI strategy -> {json.dumps(snapshot, ensure_ascii=False)}")
+        except Exception as exc:
+            print(f"[scan] AI strategy unavailable: {_safe_error_details(exc)}")
     products = load_products(_load_github_event_data())
     command_chat = _telegram_target_chat(payload)
     scan_target_products = max(1, int(_env_or_default("SCAN_TARGET_PRODUCTS", _env_or_default("AMAZON_WAREHOUSE_MAX_PRODUCTS", "8"))))
