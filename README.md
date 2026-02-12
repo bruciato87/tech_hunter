@@ -66,6 +66,9 @@ python -m tech_sniper_it.worker
 - `SCAN_DYNAMIC_EXPLORATION_RATIO` (default: `0.35`, share of rotating exploration queries vs historical trend queries)
 - `SCAN_DYNAMIC_TREND_MIN_SCORE` (default: `-35`, minimum trend score required for history-driven query inclusion)
 - `EXCLUDE_MIN_KEEP` (default: `4`, re-includes a small slice of excluded URLs to avoid 0/1-product scans)
+- `EXCLUDE_LOOKBACK_DAYS` (default: `1`)
+- `EXCLUDE_DAILY_RESET` (default: `true`, reset exclusion cache at day boundary)
+- `EXCLUDE_RESET_TIMEZONE` (default: `Europe/Rome`)
 - `SCAN_IT_QUOTA` (default: `6`, preferred IT candidates in final selection)
 - `SCAN_EU_QUOTA` (default: `6`, preferred EU candidates in final selection)
 - `SCORING_ENABLE` (default: `true`, enables historical expected-spread ranking)
@@ -134,6 +137,7 @@ Current defaults now mitigate this by:
 - raising target and candidate budgets
 - balancing per-marketplace collection (`AMAZON_WAREHOUSE_PER_MARKETPLACE_LIMIT`)
 - allowing controlled exclusion relaxation (`EXCLUDE_MIN_KEEP`)
+- daily exclusion reset (`EXCLUDE_DAILY_RESET=true`, `EXCLUDE_RESET_TIMEZONE=Europe/Rome`)
 
 Candidate ordering now also prioritizes likely profitable items first using:
 
@@ -286,6 +290,9 @@ Optional secrets:
 - `SCAN_DYNAMIC_EXPLORATION_RATIO`
 - `SCAN_DYNAMIC_TREND_MIN_SCORE`
 - `EXCLUDE_MIN_KEEP`
+- `EXCLUDE_LOOKBACK_DAYS`
+- `EXCLUDE_DAILY_RESET`
+- `EXCLUDE_RESET_TIMEZONE`
 - `SCAN_IT_QUOTA`
 - `SCAN_EU_QUOTA`
 - `SCORING_ENABLE`

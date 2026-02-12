@@ -14,6 +14,7 @@ from tech_sniper_it.worker import (
     _build_prioritization_context,
     _chunk_telegram_text,
     _coerce_product,
+    _daily_exclusion_since_iso,
     _dedupe_products,
     _exclude_non_profitable_candidates,
     _filter_non_core_device_candidates,
@@ -309,9 +310,30 @@ def test_build_dynamic_warehouse_queries_prefers_trend_models(monkeypatch: pytes
             "mpb": {"rate": 0.75, "samples": 20},
         },
         "trend_models": [
-            {"model": "Apple iPhone 15 Pro 256GB", "category": "apple_phone", "trend_score": 120.0},
-            {"model": "Apple iPhone 14 Pro 128GB", "category": "apple_phone", "trend_score": 95.0},
-            {"model": "Canon EOS R6", "category": "photography", "trend_score": 70.0},
+            {
+                "model": "Apple iPhone 15 Pro 256GB",
+                "category": "apple_phone",
+                "trend_score": 120.0,
+                "positive_rate": 0.8,
+                "threshold_rate": 0.5,
+                "max_spread": 110.0,
+            },
+            {
+                "model": "Apple iPhone 14 Pro 128GB",
+                "category": "apple_phone",
+                "trend_score": 95.0,
+                "positive_rate": 0.6,
+                "threshold_rate": 0.3,
+                "max_spread": 72.0,
+            },
+            {
+                "model": "Canon EOS R6",
+                "category": "photography",
+                "trend_score": 70.0,
+                "positive_rate": 0.4,
+                "threshold_rate": 0.1,
+                "max_spread": 50.0,
+            },
         ],
     }
     queries, meta = _build_dynamic_warehouse_queries(scoring_context=context, target_count=6)
@@ -334,6 +356,38 @@ def test_build_dynamic_warehouse_queries_disabled_uses_fallback(monkeypatch: pyt
         "iphone 13 128gb amazon warehouse",
         "sony alpha amazon warehouse",
     ]
+
+
+def test_build_dynamic_warehouse_queries_filters_accessory_like_trend_models(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SCAN_DYNAMIC_QUERIES_ENABLED", "true")
+    monkeypatch.setenv("SCAN_DYNAMIC_QUERY_LIMIT", "6")
+    monkeypatch.setenv("SCAN_DYNAMIC_EXPLORATION_RATIO", "0.2")
+    context = {
+        "trend_models": [
+            {
+                "model": "Soonjet MacBook Air A2337 A2179 A1932",
+                "category": "general_tech",
+                "trend_score": 140.0,
+                "positive_rate": 0.7,
+                "threshold_rate": 0.6,
+                "max_spread": 120.0,
+            },
+            {
+                "model": "Apple iPhone 14 Pro 256GB",
+                "category": "apple_phone",
+                "trend_score": 80.0,
+                "positive_rate": 0.5,
+                "threshold_rate": 0.2,
+                "max_spread": 60.0,
+            },
+        ],
+        "platform_health": {"rebuy": {"rate": 1.0, "samples": 10}, "trenddevice": {"rate": 0.8, "samples": 10}},
+    }
+    queries, _meta = _build_dynamic_warehouse_queries(scoring_context=context, target_count=4)
+    joined = " | ".join(queries).lower()
+    assert "soonjet" not in joined
+    assert "a2337" not in joined
+    assert "iphone 14 pro 256gb amazon warehouse" in joined
 
 
 @pytest.mark.asyncio
@@ -939,6 +993,47 @@ async def test_exclude_non_profitable_candidates_relaxes_to_min_keep(monkeypatch
     filtered = await _exclude_non_profitable_candidates(manager, [removed_a, removed_b])
     assert len(filtered) == 1
     assert filtered[0].title == "A"
+
+
+@pytest.mark.asyncio
+async def test_exclude_non_profitable_candidates_daily_reset_uses_since_iso(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured = {"since_iso": None, "lookback_days": None}
+
+    class DummyStorage:
+        async def get_excluded_source_urls(  # noqa: ANN201
+            self,
+            *,
+            max_spread_eur: float,
+            lookback_days: int,
+            limit: int,
+            since_iso: str | None = None,
+        ):
+            captured["since_iso"] = since_iso
+            captured["lookback_days"] = lookback_days
+            return set()
+
+    manager = type("M", (), {"storage": DummyStorage(), "min_spread_eur": 40.0})()
+    monkeypatch.setenv("EXCLUDE_NON_PROFITABLE", "true")
+    monkeypatch.setenv("EXCLUDE_DAILY_RESET", "true")
+    monkeypatch.setenv("EXCLUDE_RESET_TIMEZONE", "Europe/Rome")
+    monkeypatch.setenv("EXCLUDE_LOOKBACK_DAYS", "1")
+
+    keep = type(
+        "P1",
+        (),
+        {"title": "Keep", "price_eur": 100.0, "category": ProductCategory.GENERAL_TECH, "url": "https://www.amazon.it/dp/B0KEEP"},
+    )()
+    filtered = await _exclude_non_profitable_candidates(manager, [keep])
+    assert len(filtered) == 1
+    assert isinstance(captured["since_iso"], str) and "T" in str(captured["since_iso"])
+    assert captured["lookback_days"] == 1
+
+
+def test_daily_exclusion_since_iso_can_be_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("EXCLUDE_DAILY_RESET", "false")
+    since_iso, timezone_name = _daily_exclusion_since_iso()
+    assert since_iso is None
+    assert timezone_name is None
 
 
 @pytest.mark.asyncio

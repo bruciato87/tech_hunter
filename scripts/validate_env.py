@@ -4,6 +4,7 @@ import base64
 import json
 import os
 from urllib.parse import urlparse
+from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 
@@ -152,6 +153,23 @@ def main() -> int:
             errors.append("EXCLUDE_MIN_KEEP must be >= 0.")
     except ValueError:
         errors.append("EXCLUDE_MIN_KEEP must be integer.")
+
+    try:
+        exclude_lookback_days = int(_env_or_default("EXCLUDE_LOOKBACK_DAYS", "1"))
+        if exclude_lookback_days < 1:
+            errors.append("EXCLUDE_LOOKBACK_DAYS must be >= 1.")
+    except ValueError:
+        errors.append("EXCLUDE_LOOKBACK_DAYS must be integer.")
+
+    exclude_daily_reset = _env_or_default("EXCLUDE_DAILY_RESET", "true").lower() not in {"0", "false", "no", "off"}
+    exclude_reset_tz = _env_or_default("EXCLUDE_RESET_TIMEZONE", "Europe/Rome")
+    if exclude_daily_reset:
+        try:
+            ZoneInfo(exclude_reset_tz)
+        except Exception:
+            warnings.append(
+                "EXCLUDE_RESET_TIMEZONE is invalid; worker will fallback to UTC for daily reset window."
+            )
 
     try:
         scan_it_quota = int(_env_or_default("SCAN_IT_QUOTA", "6"))

@@ -66,10 +66,11 @@ class SupabaseStorage:
         max_spread_eur: float,
         lookback_days: int = 14,
         limit: int = 1000,
+        since_iso: str | None = None,
     ) -> set[str]:
         safe_limit = max(10, min(limit, 5000))
-        cutoff_iso: str | None = None
-        if lookback_days > 0:
+        cutoff_iso: str | None = (since_iso or "").strip() or None
+        if cutoff_iso is None and lookback_days > 0:
             cutoff = datetime.now(UTC) - timedelta(days=lookback_days)
             cutoff_iso = cutoff.isoformat()
 

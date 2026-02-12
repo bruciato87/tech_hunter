@@ -146,3 +146,18 @@ def test_validate_env_fails_on_invalid_dynamic_exploration_ratio(tmp_path: Path)
     )
     assert result.returncode == 1
     assert "SCAN_DYNAMIC_EXPLORATION_RATIO must be between 0 and 1." in result.stdout
+
+
+def test_validate_env_fails_on_invalid_exclude_lookback_days(tmp_path: Path) -> None:
+    result = _run_validate_env(
+        tmp_path,
+        {
+            "OPENROUTER_API_KEYS": "k1",
+            "MIN_SPREAD_EUR": "40",
+            "MAX_PARALLEL_PRODUCTS": "2",
+            "PLAYWRIGHT_NAV_TIMEOUT_MS": "45000",
+            "EXCLUDE_LOOKBACK_DAYS": "0",
+        },
+    )
+    assert result.returncode == 1
+    assert "EXCLUDE_LOOKBACK_DAYS must be >= 1." in result.stdout

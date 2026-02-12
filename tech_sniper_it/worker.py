@@ -9,6 +9,7 @@ import re
 from statistics import median
 from typing import Any
 from urllib.parse import quote_plus, urlparse
+from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 from telegram import Bot
@@ -436,6 +437,16 @@ def _trend_query_from_model_name(model_name: str) -> str | None:
     return f"{terms} amazon warehouse"
 
 
+def _is_low_quality_trend_model(model_name: str) -> bool:
+    lowered = (model_name or "").lower()
+    if not lowered.strip():
+        return True
+    accessory_hit = any(_contains_token(lowered, token) for token in ACCESSORY_KEYWORDS)
+    compatibility_hit = any(_contains_token(lowered, marker) for marker in COMPATIBILITY_MARKERS)
+    compatibility_codes = len(re.findall(r"\b[a-z]?\d{4}\b", lowered)) >= 2 and not _has_storage_token(lowered)
+    return (accessory_hit and compatibility_hit) or compatibility_codes
+
+
 def _rotating_pick(values: list[str], count: int, *, salt: str) -> list[str]:
     if count <= 0 or not values:
         return []
@@ -564,7 +575,15 @@ def _build_dynamic_warehouse_queries(
             model = str(row.get("model", "")).strip()
             if not model:
                 continue
+            if _is_low_quality_trend_model(model):
+                continue
             if score is None or score < trend_min_score:
+                continue
+            positive_rate = _to_float(row.get("positive_rate")) or 0.0
+            threshold_rate = _to_float(row.get("threshold_rate")) or 0.0
+            max_spread = _to_float(row.get("max_spread"))
+            has_profit_signal = bool(threshold_rate > 0.0 or positive_rate >= 0.25 or (max_spread is not None and max_spread > 0))
+            if not has_profit_signal:
                 continue
             trend_candidates.append(row)
 
@@ -1353,6 +1372,20 @@ def _region_counts(products: list[AmazonProduct]) -> dict[str, int]:
     return counts
 
 
+def _daily_exclusion_since_iso() -> tuple[str | None, str | None]:
+    if not _is_truthy_env("EXCLUDE_DAILY_RESET", "true"):
+        return None, None
+    timezone_name = _env_or_default("EXCLUDE_RESET_TIMEZONE", "Europe/Rome")
+    try:
+        tzinfo = ZoneInfo(timezone_name)
+    except Exception:
+        tzinfo = UTC
+        timezone_name = "UTC"
+    now_tz = datetime.now(tzinfo)
+    start_of_day_tz = now_tz.replace(hour=0, minute=0, second=0, microsecond=0)
+    return start_of_day_tz.astimezone(UTC).isoformat(), timezone_name
+
+
 def _select_balanced_candidates(products: list[AmazonProduct], target: int) -> list[AmazonProduct]:
     if len(products) <= target:
         return products
@@ -1402,13 +1435,22 @@ async def _exclude_non_profitable_candidates(manager, products: list[AmazonProdu
     if not storage or not _is_truthy_env("EXCLUDE_NON_PROFITABLE", "true"):
         return products
 
-    lookback_days = max(1, int(_env_or_default("EXCLUDE_LOOKBACK_DAYS", "14")))
+    lookback_days = max(1, int(_env_or_default("EXCLUDE_LOOKBACK_DAYS", "1")))
     max_rows = max(50, int(_env_or_default("EXCLUDE_MAX_ROWS", "1500")))
-    excluded_urls = await storage.get_excluded_source_urls(
-        max_spread_eur=manager.min_spread_eur,
-        lookback_days=lookback_days,
-        limit=max_rows,
-    )
+    since_iso, reset_timezone = _daily_exclusion_since_iso()
+    try:
+        excluded_urls = await storage.get_excluded_source_urls(
+            max_spread_eur=manager.min_spread_eur,
+            lookback_days=lookback_days,
+            limit=max_rows,
+            since_iso=since_iso,
+        )
+    except TypeError:
+        excluded_urls = await storage.get_excluded_source_urls(
+            max_spread_eur=manager.min_spread_eur,
+            lookback_days=lookback_days,
+            limit=max_rows,
+        )
     if not excluded_urls:
         print("[scan] Exclusion cache: no historical under-threshold urls.")
         return products
@@ -1423,9 +1465,10 @@ async def _exclude_non_profitable_candidates(manager, products: list[AmazonProdu
             removed_products.append(product)
             continue
         filtered.append(product)
+    window_label = f"daily({reset_timezone})" if since_iso else f"lookback_days={lookback_days}"
     print(
         "[scan] Exclusion cache applied | "
-        f"removed={removed} kept={len(filtered)} lookback_days={lookback_days} rows={len(excluded_urls)}"
+        f"removed={removed} kept={len(filtered)} window={window_label} rows={len(excluded_urls)}"
     )
     min_keep = max(0, int(_env_or_default("EXCLUDE_MIN_KEEP", "0")))
     if min_keep > 0 and len(filtered) < min_keep and removed_products:

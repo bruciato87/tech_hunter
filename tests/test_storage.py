@@ -14,6 +14,7 @@ class FakeTableQuery:
         self.limit_value = None
         self.selected_fields = None
         self.data = [{"normalized_name": "iPhone", "spread_eur": 120, "best_platform": "rebuy"}]
+        self.gte_calls: list[tuple[str, str]] = []
 
     def insert(self, payload):  # noqa: ANN001
         self.insert_payload = payload
@@ -30,7 +31,9 @@ class FakeTableQuery:
         self.limit_value = value
         return self
 
-    def gte(self, *_args, **_kwargs):
+    def gte(self, *args, **_kwargs):
+        if len(args) >= 2 and isinstance(args[0], str):
+            self.gte_calls.append((args[0], str(args[1])))
         return self
 
     def lte(self, *_args, **_kwargs):
@@ -119,3 +122,21 @@ async def test_get_recent_scoring_rows_selects_expected_fields(monkeypatch: pyte
     assert fake_client.table_query.limit_value == 250
     assert fake_client.table_query.selected_fields is not None
     assert rows and rows[0]["normalized_name"] == "Apple iPhone 15 Pro 128GB"
+
+
+@pytest.mark.asyncio
+async def test_get_excluded_source_urls_prefers_since_iso(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_client = FakeSupabaseClient()
+    monkeypatch.setattr("tech_sniper_it.storage.create_client", lambda _url, _key: fake_client)
+    fake_client.table_query.data = [{"source_url": "https://www.amazon.it/dp/B0TEST", "spread_eur": 10.0}]
+
+    storage = SupabaseStorage(url="https://supabase.local", key="service-role-key", table="arbitrage_opportunities")
+    rows = await storage.get_excluded_source_urls(
+        max_spread_eur=40.0,
+        lookback_days=14,
+        limit=100,
+        since_iso="2026-02-12T00:00:00+00:00",
+    )
+
+    assert "https://www.amazon.it/dp/B0TEST" in rows
+    assert ("created_at", "2026-02-12T00:00:00+00:00") in fake_client.table_query.gte_calls
