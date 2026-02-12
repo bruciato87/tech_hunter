@@ -110,7 +110,7 @@ def build_default_manager() -> ArbitrageManager:
 
     supabase_url = os.getenv("SUPABASE_URL")
     supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
-    supabase_table = os.getenv("SUPABASE_TABLE", "arbitrage_opportunities")
+    supabase_table = _env_or_default("SUPABASE_TABLE", "arbitrage_opportunities")
     if supabase_url and supabase_key:
         storage = SupabaseStorage(url=supabase_url, key=supabase_key, table=supabase_table)
 

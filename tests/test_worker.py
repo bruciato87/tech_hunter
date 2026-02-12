@@ -7,10 +7,13 @@ import pytest
 
 from tech_sniper_it.models import ProductCategory
 from tech_sniper_it.worker import (
+    _chunk_telegram_text,
     _coerce_product,
     _format_scan_summary,
     _parse_last_limit,
     _resolve_command,
+    _safe_error_details,
+    _send_telegram_message,
     load_products,
     run_worker,
 )
@@ -37,6 +40,22 @@ def test_parse_last_limit_bounds() -> None:
     assert _parse_last_limit({"limit": 0}) == 1
     assert _parse_last_limit({"limit": 999}) == 10
     assert _parse_last_limit({"limit": "x"}) == 5
+
+
+def test_chunk_telegram_text_splits_large_payload() -> None:
+    payload = "x" * 9001
+    chunks = _chunk_telegram_text(payload, limit=4000)
+    assert len(chunks) == 3
+    assert len(chunks[0]) == 4000
+    assert len(chunks[1]) == 4000
+    assert len(chunks[2]) == 1001
+
+
+def test_safe_error_details_truncates() -> None:
+    err = RuntimeError("boom " + ("x" * 500))
+    details = _safe_error_details(err, max_len=80)
+    assert len(details) == 80
+    assert details.endswith("...")
 
 
 def test_load_products_from_env_json(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -108,3 +127,25 @@ async def test_run_worker_defaults_to_scan(monkeypatch: pytest.MonkeyPatch) -> N
     exit_code = await run_worker()
     assert exit_code == 0
     assert called["scan"] is True
+
+
+@pytest.mark.asyncio
+async def test_send_telegram_message_splits_chunks(monkeypatch: pytest.MonkeyPatch) -> None:
+    sent = []
+
+    class FakeBot:
+        def __init__(self, token: str) -> None:
+            self.token = token
+
+        async def send_message(self, chat_id: str, text: str, disable_web_page_preview: bool) -> None:
+            sent.append((chat_id, text, disable_web_page_preview))
+
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "token")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "42")
+    monkeypatch.setattr("tech_sniper_it.worker.Bot", FakeBot)
+
+    await _send_telegram_message("z" * 9001, chat_id=None)
+
+    assert len(sent) == 3
+    assert all(item[0] == "42" for item in sent)
+    assert max(len(item[1]) for item in sent) <= 4000

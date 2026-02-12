@@ -14,6 +14,7 @@ from tech_sniper_it.models import AmazonProduct, ProductCategory
 
 
 MAX_LAST_LIMIT = 10
+TELEGRAM_TEXT_LIMIT = 4000
 
 
 def _env_or_default(name: str, default: str) -> str:
@@ -64,7 +65,54 @@ async def _send_telegram_message(text: str, chat_id: str | None) -> None:
         print("Telegram not configured for command response; skipping message.")
         return
     bot = Bot(token=token)
-    await bot.send_message(chat_id=target_chat, text=text, disable_web_page_preview=True)
+    chunks = _chunk_telegram_text(text)
+    for chunk in chunks:
+        await bot.send_message(chat_id=target_chat, text=chunk, disable_web_page_preview=True)
+
+
+def _chunk_telegram_text(text: str, limit: int = TELEGRAM_TEXT_LIMIT) -> list[str]:
+    if limit <= 0:
+        return [text]
+
+    payload = text or ""
+    if len(payload) <= limit:
+        return [payload]
+
+    lines = payload.splitlines(keepends=True)
+    chunks: list[str] = []
+    current: list[str] = []
+    current_len = 0
+
+    def flush_current() -> None:
+        nonlocal current, current_len
+        if not current:
+            return
+        chunks.append("".join(current).rstrip("\n"))
+        current = []
+        current_len = 0
+
+    for line in lines:
+        segments = [line]
+        if len(line) > limit:
+            segments = [line[i : i + limit] for i in range(0, len(line), limit)]
+
+        for segment in segments:
+            if current and current_len + len(segment) > limit:
+                flush_current()
+            current.append(segment)
+            current_len += len(segment)
+
+    flush_current()
+    return chunks if chunks else [payload[:limit]]
+
+
+def _safe_error_details(exc: Exception, max_len: int = 220) -> str:
+    raw = " ".join(str(exc).split())
+    if not raw:
+        return exc.__class__.__name__
+    if len(raw) <= max_len:
+        return raw
+    return raw[: max_len - 3] + "..."
 
 
 def _parse_last_limit(payload: dict[str, Any]) -> int:
@@ -225,7 +273,7 @@ async def _run_status_command(payload: dict[str, Any]) -> int:
             else:
                 lines.append("last opportunity: none")
         except Exception as exc:
-            lines.append(f"last opportunity: read error ({exc})")
+            lines.append(f"last opportunity: read error ({_safe_error_details(exc)})")
 
     message = "\n".join(lines)
     print(message)
@@ -246,7 +294,7 @@ async def _run_last_command(payload: dict[str, Any]) -> int:
     try:
         rows = await manager.storage.get_recent_opportunities(limit=limit)
     except Exception as exc:
-        message = f"Errore lettura Supabase: {exc}"
+        message = f"Errore lettura Supabase: {_safe_error_details(exc)}"
         print(message)
         await _send_telegram_message(message, chat_id)
         return 0

@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from tech_sniper_it.ai_balancer import SmartAIBalancer
-from tech_sniper_it.manager import ArbitrageManager
+from tech_sniper_it.manager import ArbitrageManager, build_default_manager
 from tech_sniper_it.models import AmazonProduct, ProductCategory, ValuationResult
 
 
@@ -118,3 +118,30 @@ async def test_manager_handles_all_invalid_offers() -> None:
     assert decision.best_offer is None
     assert decision.spread_eur is None
     assert decision.should_notify is False
+
+
+def test_build_default_manager_uses_fallback_supabase_table(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured = {}
+
+    class FakeStorage:
+        def __init__(self, url: str, key: str, table: str) -> None:
+            captured["url"] = url
+            captured["key"] = key
+            captured["table"] = table
+
+    monkeypatch.setattr("tech_sniper_it.manager.SupabaseStorage", FakeStorage)
+    monkeypatch.setenv("SUPABASE_URL", "https://example.supabase.co")
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "service-role-key")
+    monkeypatch.setenv("SUPABASE_TABLE", "")
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+    monkeypatch.delenv("TELEGRAM_CHAT_ID", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEYS", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEYS", raising=False)
+    monkeypatch.delenv("MIN_SPREAD_EUR", raising=False)
+    monkeypatch.delenv("HEADLESS", raising=False)
+    monkeypatch.delenv("PLAYWRIGHT_NAV_TIMEOUT_MS", raising=False)
+
+    manager = build_default_manager()
+
+    assert manager.storage is not None
+    assert captured["table"] == "arbitrage_opportunities"
