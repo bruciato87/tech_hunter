@@ -90,6 +90,50 @@ It creates `public.arbitrage_opportunities`, enables + forces RLS, and adds poli
 
 Store all production keys only in GitHub Secrets, never in tracked files.
 
+### Worker Configuration Model
+
+`worker.yml` now uses:
+
+- secure values from `GitHub Secrets` (tokens/keys/passwords)
+- non-sensitive knobs from `GitHub Repository Variables`
+- code defaults when variables are not set
+
+#### Minimal GitHub Secrets (Worker)
+
+- `SUPABASE_SERVICE_ROLE_KEY`
+- `TELEGRAM_BOT_TOKEN`
+- `GEMINI_API_KEYS` or `OPENROUTER_API_KEYS` (at least one provider)
+- `AMAZON_WAREHOUSE_PROXY_URLS` (required for real anti-bot resilient warehouse autoscan)
+
+Optional secrets:
+
+- `SUPABASE_URL` (can be moved to Variables)
+- `TELEGRAM_CHAT_ID` (can be moved to Variables)
+
+#### Recommended GitHub Variables (Worker, non-sensitive)
+
+- `SUPABASE_URL`
+- `SUPABASE_TABLE`
+- `TELEGRAM_CHAT_ID`
+- `MIN_SPREAD_EUR`
+- `MAX_PARALLEL_PRODUCTS`
+- `PLAYWRIGHT_NAV_TIMEOUT_MS`
+- `GEMINI_MODEL`
+- `OPENROUTER_MODEL`
+- `OPENROUTER_BASE_URL`
+- `AMAZON_WAREHOUSE_ENABLED`
+- `AMAZON_WAREHOUSE_MARKETPLACES`
+- `AMAZON_WAREHOUSE_MAX_PRODUCTS`
+- `AMAZON_WAREHOUSE_MAX_PRICE_EUR`
+- `AMAZON_WAREHOUSE_QUERIES`
+- `AMAZON_WAREHOUSE_ROTATE_PROXY`
+- `AMAZON_WAREHOUSE_ROTATE_USER_AGENT`
+- `AMAZON_WAREHOUSE_USER_AGENTS`
+- `AMAZON_WAREHOUSE_MAX_ATTEMPTS_PER_QUERY`
+- `AMAZON_WAREHOUSE_RETRY_DELAY_MS`
+- `AMAZON_WAREHOUSE_DEBUG_ON_EMPTY`
+- `AMAZON_WAREHOUSE_DEBUG_DIR`
+
 ## Testing
 
 Run the complete suite locally:
