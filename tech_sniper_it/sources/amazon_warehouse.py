@@ -89,21 +89,6 @@ BARRIER_HINTS: dict[str, tuple[str, ...]] = {
         "not a robot",
         "sei un robot",
     ),
-    "consent": (
-        "consenso",
-        "cookie",
-        "your choices regarding cookies",
-        "sp-cc-accept",
-        "accetta i cookie",
-        "accept all cookies",
-    ),
-    "signin": (
-        "signin",
-        "accedi",
-        "anmelden",
-        "se connecter",
-        "identificati",
-    ),
     "sorry-page": (
         "ci dispiace",
         "tut uns leid",
@@ -112,6 +97,24 @@ BARRIER_HINTS: dict[str, tuple[str, ...]] = {
         "sorry",
     ),
 }
+CONSENT_MARKERS: tuple[str, ...] = (
+    "sp-cc-accept",
+    "sp-cc-rejectall-link",
+    "sp-cc-banner",
+    "sp-cc",
+)
+SIGNIN_MARKERS: tuple[str, ...] = (
+    "id=\"ap_login_form\"",
+    "id='ap_login_form'",
+    "id=\"authportal-main-section\"",
+    "id='authportal-main-section'",
+    "name=\"ap_email\"",
+    "name='ap_email'",
+    "id=\"ap_email\"",
+    "id='ap_email'",
+    "id=\"ap_password\"",
+    "id='ap_password'",
+)
 
 
 def _split_csv(value: str | None) -> list[str]:
@@ -188,6 +191,7 @@ def _collect_search_rows(soup: BeautifulSoup) -> list[Any]:
 
 def _extract_title_from_row(row: Any) -> str | None:
     selectors = [
+        "h2 span",
         "h2 a span",
         "span.a-size-medium.a-color-base.a-text-normal",
         "span.a-size-base-plus.a-color-base.a-text-normal",
@@ -200,6 +204,16 @@ def _extract_title_from_row(row: Any) -> str | None:
         title = node.get_text(" ", strip=True)
         if title:
             return title
+    h2_node = row.select_one("h2[aria-label]")
+    if h2_node:
+        aria_label = (h2_node.get("aria-label") or "").strip()
+        if aria_label:
+            return aria_label
+    image_node = row.select_one("img.s-image[alt]")
+    if image_node:
+        alt = (image_node.get("alt") or "").strip()
+        if alt:
+            return alt
     return None
 
 
@@ -238,6 +252,10 @@ def _detect_page_barriers(html: str, title: str | None = None) -> list[str]:
     for label, hints in BARRIER_HINTS.items():
         if any(hint in lowered for hint in hints):
             barriers.append(label)
+    if any(marker in lowered for marker in CONSENT_MARKERS):
+        barriers.append("consent")
+    if any(marker in lowered for marker in SIGNIN_MARKERS):
+        barriers.append("signin")
     return barriers
 
 

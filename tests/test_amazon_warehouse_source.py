@@ -46,6 +46,31 @@ def test_extract_products_from_html_parses_title_price_and_url() -> None:
     assert item["url"] == "https://www.amazon.it/dp/B0ABCDE123"
 
 
+def test_extract_products_from_html_supports_h2_span_title_markup() -> None:
+    html = """
+    <html>
+      <body>
+        <div data-component-type="s-search-result" data-asin="B0ABCDE123">
+          <a class="a-link-normal s-no-outline" href="/Apple-iPhone-14-Pro-128GB/dp/B0ABCDE123/ref=sr_1_1">
+            <img class="s-image" alt="Apple iPhone 14 Pro 128GB - Space Black (Ricondizionato)" />
+          </a>
+          <h2 class="a-size-base-plus a-spacing-none a-color-base a-text-normal">
+            <span>Apple iPhone 14 Pro 128GB - Space Black (Ricondizionato)</span>
+          </h2>
+          <span class="a-price"><span class="a-offscreen">629,90 €</span></span>
+        </div>
+      </body>
+    </html>
+    """
+    items = _extract_products_from_html(html, "www.amazon.it")
+    assert len(items) == 1
+    item = items[0]
+    assert item["title"] == "Apple iPhone 14 Pro 128GB - Space Black (Ricondizionato)"
+    assert item["price_eur"] == 629.9
+    assert item["category"] == "apple_phone"
+    assert item["url"] == "https://www.amazon.it/dp/B0ABCDE123"
+
+
 def test_expand_marketplaces_handles_eu_alias() -> None:
     assert _expand_marketplaces(["it", "eu"]) == ["it", "de", "fr", "es"]
 
@@ -101,6 +126,25 @@ def test_detect_page_barriers_flags_captcha_and_consent() -> None:
     assert "robot-check" in captcha_barriers
     assert "consent" in consent_barriers
     assert "sorry-page" in sorry_barriers
+
+
+def test_detect_page_barriers_does_not_flag_header_signin_link() -> None:
+    html = """
+    <html>
+      <body>
+        <header>
+          <a href="/ap/signin">Ciao, accedi</a>
+        </header>
+        <div data-component-type="s-search-result">
+          <h2><span>Apple iPhone 14 Pro 128GB</span></h2>
+          <span class="a-price"><span class="a-offscreen">699,00 €</span></span>
+        </div>
+      </body>
+    </html>
+    """
+    barriers = _detect_page_barriers(html, "Amazon.it : iphone 14 pro 128gb amazon warehouse")
+    assert "signin" not in barriers
+    assert "consent" not in barriers
 
 
 def test_parse_proxy_entry_supports_auth_and_port() -> None:
