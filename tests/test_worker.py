@@ -7,6 +7,7 @@ import pytest
 
 from tech_sniper_it.models import AmazonProduct, ProductCategory
 from tech_sniper_it.worker import (
+    _apply_model_diversity,
     _ai_usage_label,
     _ai_usage_stats,
     _amazon_search_url,
@@ -518,11 +519,60 @@ def test_filter_predicted_candidates_respects_min_keep(monkeypatch: pytest.Monke
     assert len(kept) == 2
 
 
+def test_filter_predicted_candidates_soft_floor_prefers_less_negative_rows(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SCAN_MIN_EXPECTED_SPREAD_EUR", "80")
+    monkeypatch.setenv("SCAN_MIN_CANDIDATE_SCORE", "80")
+    monkeypatch.setenv("SCAN_MIN_EXPECTED_SPREAD_SOFT_FLOOR", "-60")
+    monkeypatch.setenv("SCAN_SOFT_SCORE_RELAX", "120")
+    context = {
+        "enabled": True,
+        "exact_offer_median": {
+            "apple iphone 14 128gb": 590.0,
+            "garmin forerunner 955": 120.0,
+        },
+        "exact_confidence": {
+            "apple iphone 14 128gb": 0.9,
+            "garmin forerunner 955": 0.9,
+        },
+        "category_offer_median": {},
+        "category_spread_median": {},
+        "platform_health": {"rebuy": {"rate": 0.8, "samples": 20}},
+    }
+    iphone = AmazonProduct(title="Apple iPhone 14 128GB", price_eur=620.0, category=ProductCategory.APPLE_PHONE)
+    garmin = AmazonProduct(title="Garmin Forerunner 955", price_eur=420.0, category=ProductCategory.SMARTWATCH)
+    kept, _dropped = _filter_predicted_candidates([garmin, iphone], scoring_context=context, min_keep=1)
+    assert len(kept) == 1
+    assert kept[0].title == "Apple iPhone 14 128GB"
+
+
+def test_apply_model_diversity_limits_duplicate_variants() -> None:
+    p1 = AmazonProduct(
+        title="Garmin Forerunner 955 Black",
+        price_eur=320.0,
+        category=ProductCategory.SMARTWATCH,
+    )
+    p2 = AmazonProduct(
+        title="Garmin Forerunner 955 Bianco",
+        price_eur=330.0,
+        category=ProductCategory.SMARTWATCH,
+    )
+    p3 = AmazonProduct(
+        title="Apple iPhone 14 Pro 128GB",
+        price_eur=600.0,
+        category=ProductCategory.APPLE_PHONE,
+    )
+    kept, dropped = _apply_model_diversity([p1, p2, p3], max_per_model=1)
+    assert len(kept) == 2
+    assert any(item.title == "Apple iPhone 14 Pro 128GB" for item in kept)
+    assert len(dropped) == 1
+
+
 def test_build_dynamic_warehouse_queries_prefers_trend_models(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SCAN_DYNAMIC_QUERIES_ENABLED", "true")
     monkeypatch.setenv("SCAN_DYNAMIC_QUERY_LIMIT", "8")
     monkeypatch.setenv("SCAN_DYNAMIC_EXPLORATION_RATIO", "0.25")
     monkeypatch.setenv("SCAN_DYNAMIC_TREND_MIN_SCORE", "0")
+    monkeypatch.setenv("SCAN_DYNAMIC_MAX_PER_FAMILY", "3")
     monkeypatch.delenv("AMAZON_WAREHOUSE_QUERIES", raising=False)
     context = {
         "category_spread_median": {
@@ -588,6 +638,7 @@ def test_build_dynamic_warehouse_queries_filters_accessory_like_trend_models(mon
     monkeypatch.setenv("SCAN_DYNAMIC_QUERIES_ENABLED", "true")
     monkeypatch.setenv("SCAN_DYNAMIC_QUERY_LIMIT", "6")
     monkeypatch.setenv("SCAN_DYNAMIC_EXPLORATION_RATIO", "0.2")
+    monkeypatch.setenv("SCAN_DYNAMIC_MAX_PER_FAMILY", "3")
     context = {
         "trend_models": [
             {
@@ -614,6 +665,51 @@ def test_build_dynamic_warehouse_queries_filters_accessory_like_trend_models(mon
     assert "soonjet" not in joined
     assert "a2337" not in joined
     assert "iphone 14 pro 256gb amazon warehouse" in joined
+
+
+def test_build_dynamic_warehouse_queries_limits_same_family(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SCAN_DYNAMIC_QUERIES_ENABLED", "true")
+    monkeypatch.setenv("SCAN_DYNAMIC_QUERY_LIMIT", "6")
+    monkeypatch.setenv("SCAN_DYNAMIC_EXPLORATION_RATIO", "0.2")
+    monkeypatch.setenv("SCAN_DYNAMIC_TREND_MIN_SCORE", "0")
+    monkeypatch.setenv("SCAN_DYNAMIC_MAX_PER_FAMILY", "1")
+    monkeypatch.setenv("SCAN_DYNAMIC_MAX_PER_CATEGORY", "4")
+    context = {
+        "category_spread_median": {ProductCategory.APPLE_PHONE.value: 60.0},
+        "platform_health": {"rebuy": {"rate": 1.0, "samples": 12}, "trenddevice": {"rate": 0.9, "samples": 12}},
+        "trend_models": [
+            {
+                "model": "Apple iPhone 16 Pro 256GB",
+                "category": "apple_phone",
+                "trend_score": 120.0,
+                "positive_rate": 0.8,
+                "threshold_rate": 0.5,
+                "max_spread": 110.0,
+            },
+            {
+                "model": "Apple iPhone 15 Pro 256GB",
+                "category": "apple_phone",
+                "trend_score": 118.0,
+                "positive_rate": 0.7,
+                "threshold_rate": 0.4,
+                "max_spread": 90.0,
+            },
+            {
+                "model": "Apple iPhone 14 Pro 256GB",
+                "category": "apple_phone",
+                "trend_score": 100.0,
+                "positive_rate": 0.6,
+                "threshold_rate": 0.3,
+                "max_spread": 70.0,
+            },
+        ],
+    }
+    queries, meta = _build_dynamic_warehouse_queries(scoring_context=context, target_count=6)
+    trend_queries = [item for item in queries if item.endswith("amazon warehouse")]
+    iphone_trend_queries = [item for item in trend_queries if "iphone" in item.lower()]
+    assert len(iphone_trend_queries) >= 1
+    assert all(count <= 1 for count in meta.get("family_breakdown", {}).values())
+    assert meta["max_per_family"] == 1
 
 
 @pytest.mark.asyncio

@@ -198,6 +198,46 @@ DYNAMIC_QUERY_STOPWORDS: tuple[str, ...] = (
     "nuovo",
 )
 
+QUERY_DIVERSITY_STOPWORDS: tuple[str, ...] = (
+    *DYNAMIC_QUERY_STOPWORDS,
+    "gb",
+    "tb",
+    "gps",
+    "cellular",
+    "wifi",
+    "pack",
+    "bundle",
+    "combo",
+    "rc",
+)
+
+MODEL_VARIANT_NOISE_TOKENS: tuple[str, ...] = (
+    "nero",
+    "black",
+    "blanco",
+    "white",
+    "blanc",
+    "bianco",
+    "argento",
+    "silver",
+    "grigio",
+    "gray",
+    "grey",
+    "siderale",
+    "starlight",
+    "midnight",
+    "cellular",
+    "wifi",
+    "gps",
+    "bundle",
+    "pack",
+    "combo",
+    "warehouse",
+    "amazon",
+)
+
+STORAGE_TOKEN_PATTERN = re.compile(r"^\d{2,4}(?:gb|tb)$", re.IGNORECASE)
+
 DYNAMIC_DISCOVERY_QUERY_CATALOG: dict[str, tuple[str, ...]] = {
     ProductCategory.APPLE_PHONE.value: (
         "iphone 16 pro 256gb amazon warehouse",
@@ -616,6 +656,47 @@ def _normalize_query_terms(value: str, max_tokens: int = 8) -> str | None:
     return compact or None
 
 
+def _query_family_key(value: str) -> str:
+    normalized = _normalize_query_terms(value, max_tokens=12)
+    if not normalized:
+        return ""
+    family_tokens: list[str] = []
+    for token in normalized.split():
+        if token in QUERY_DIVERSITY_STOPWORDS:
+            continue
+        if STORAGE_TOKEN_PATTERN.fullmatch(token):
+            continue
+        if token.isdigit():
+            continue
+        family_tokens.append(token)
+        if len(family_tokens) >= 4:
+            break
+    return " ".join(family_tokens).strip()
+
+
+def _query_category_hint(value: str) -> str:
+    return ProductCategory.from_raw(value).value
+
+
+def _coarse_model_signature(product: AmazonProduct) -> str:
+    normalized = _normalize_for_scoring(product.title)
+    if not normalized:
+        return f"{product.category.value}|n-a"
+    compact_tokens: list[str] = []
+    storage_tokens: list[str] = []
+    for token in normalized.split():
+        if token in MODEL_VARIANT_NOISE_TOKENS:
+            continue
+        if STORAGE_TOKEN_PATTERN.fullmatch(token):
+            if token not in storage_tokens:
+                storage_tokens.append(token.lower())
+            continue
+        compact_tokens.append(token)
+    body = " ".join(compact_tokens[:5]) if compact_tokens else normalized
+    storage = storage_tokens[0] if storage_tokens else ""
+    return f"{product.category.value}|{body}|{storage}"
+
+
 def _trend_query_from_model_name(model_name: str) -> str | None:
     terms = _normalize_query_terms(model_name, max_tokens=8)
     if not terms:
@@ -708,8 +789,11 @@ def _category_trend_weights(scoring_context: dict[str, Any]) -> dict[str, float]
             weights[category_value] += max(-80.0, min(140.0, spread)) / 160.0
 
         category = ProductCategory.from_raw(category_value)
-        _health_adjustment, health_rate = _valuator_health_adjustment(category, scoring_context)
-        weights[category_value] += max(0.0, health_rate - 0.35)
+        health_adjustment, health_rate = _valuator_health_adjustment(category, scoring_context)
+        # Apply both reliability reward and outage penalty so unhealthy reseller stacks
+        # receive fewer discovery slots in automatic scans.
+        weights[category_value] += max(-0.85, min(0.20, health_adjustment / 220.0))
+        weights[category_value] += (health_rate - 0.50) * 0.30
 
         if isinstance(trend_models, list):
             category_trends = [
@@ -722,7 +806,7 @@ def _category_trend_weights(scoring_context: dict[str, Any]) -> dict[str, float]
                 top_score = max(category_trends)
                 weights[category_value] += max(0.0, min(220.0, top_score)) / 260.0
 
-        weights[category_value] = max(0.10, round(weights[category_value], 3))
+        weights[category_value] = max(0.08, round(weights[category_value], 3))
 
     return weights
 
@@ -776,18 +860,41 @@ def _build_dynamic_warehouse_queries(
                 continue
             trend_candidates.append(row)
 
+    max_per_family = max(1, int(_env_or_default("SCAN_DYNAMIC_MAX_PER_FAMILY", "1")))
+    max_per_category_default = max(2, requested // 3)
+    max_per_category = max(1, int(_env_or_default("SCAN_DYNAMIC_MAX_PER_CATEGORY", str(max_per_category_default))))
+
     queries: list[str] = []
     query_sources: dict[str, str] = {}
+    family_counter: dict[str, int] = {}
+    category_counter: dict[str, int] = {}
+
+    def _try_add_query(query: str, *, source: str, category_hint: str | None = None) -> bool:
+        cleaned = query.strip()
+        if not cleaned or cleaned in query_sources:
+            return False
+        category = category_hint or _query_category_hint(cleaned)
+        if category_counter.get(category, 0) >= max_per_category:
+            return False
+        family_key = _query_family_key(cleaned)
+        if family_key and family_counter.get(family_key, 0) >= max_per_family:
+            return False
+        queries.append(cleaned)
+        query_sources[cleaned] = source
+        category_counter[category] = category_counter.get(category, 0) + 1
+        if family_key:
+            family_counter[family_key] = family_counter.get(family_key, 0) + 1
+        return True
 
     for row in trend_candidates:
         if len(queries) >= trend_slots:
             break
         model_name = str(row.get("model", "")).strip()
         query = _trend_query_from_model_name(model_name)
-        if not query or query in query_sources:
+        if not query:
             continue
-        queries.append(query)
-        query_sources[query] = "trend"
+        category_hint = ProductCategory.from_raw(str(row.get("category", "") or model_name)).value
+        _try_add_query(query, source="trend", category_hint=category_hint)
 
     timestamp_bucket = datetime.now(UTC).strftime("%Y%m%d%H")
     category_weights = _category_trend_weights(scoring_context)
@@ -797,10 +904,7 @@ def _build_dynamic_warehouse_queries(
             continue
         catalog = list(DYNAMIC_DISCOVERY_QUERY_CATALOG.get(category, ()))
         for query in _rotating_pick(catalog, slots, salt=f"{timestamp_bucket}:{category}"):
-            if query in query_sources:
-                continue
-            queries.append(query)
-            query_sources[query] = f"catalog:{category}"
+            _try_add_query(query, source=f"catalog:{category}", category_hint=category)
             if len(queries) >= requested:
                 break
         if len(queries) >= requested:
@@ -812,25 +916,42 @@ def _build_dynamic_warehouse_queries(
             combined_catalog.extend(items)
         needed = requested - len(queries)
         for query in _rotating_pick(combined_catalog, needed, salt=f"{timestamp_bucket}:all"):
-            if query in query_sources:
-                continue
-            queries.append(query)
-            query_sources[query] = "catalog:all"
+            _try_add_query(query, source="catalog:all")
             if len(queries) >= requested:
                 break
 
     if len(queries) < requested:
         for query in fallback_queries:
-            if query in query_sources:
+            _try_add_query(query, source="fallback")
+            if len(queries) >= requested:
+                break
+
+    if len(queries) < requested:
+        # Last-resort relaxation: keep category balance but drop family cap to avoid underfilling.
+        for query in fallback_queries:
+            cleaned = query.strip()
+            if not cleaned or cleaned in query_sources:
                 continue
-            queries.append(query)
-            query_sources[query] = "fallback"
+            category = _query_category_hint(cleaned)
+            if category_counter.get(category, 0) >= max_per_category:
+                continue
+            queries.append(cleaned)
+            query_sources[cleaned] = "fallback-relaxed"
+            category_counter[category] = category_counter.get(category, 0) + 1
             if len(queries) >= requested:
                 break
 
     if not queries:
         queries = fallback_queries[: max(1, target_count)]
         query_sources = {query: "fallback" for query in queries}
+        category_counter = {}
+        family_counter = {}
+        for query in queries:
+            category = _query_category_hint(query)
+            category_counter[category] = category_counter.get(category, 0) + 1
+            family_key = _query_family_key(query)
+            if family_key:
+                family_counter[family_key] = family_counter.get(family_key, 0) + 1
 
     meta = {
         "mode": "dynamic",
@@ -840,10 +961,14 @@ def _build_dynamic_warehouse_queries(
         "exploration_slots": exploration_slots,
         "trend_candidates": len(trend_candidates),
         "category_weights": category_weights,
+        "max_per_family": max_per_family,
+        "max_per_category": max_per_category,
+        "family_breakdown": family_counter,
+        "category_breakdown": category_counter,
         "source_breakdown": {
             "trend": sum(1 for source in query_sources.values() if source == "trend"),
             "catalog": sum(1 for source in query_sources.values() if source.startswith("catalog:")),
-            "fallback": sum(1 for source in query_sources.values() if source == "fallback"),
+            "fallback": sum(1 for source in query_sources.values() if source.startswith("fallback")),
         },
     }
     return queries, meta
@@ -1584,6 +1709,11 @@ def _filter_predicted_candidates(
     spread_floor = float(min_expected_spread) if min_expected_spread is not None else 15.0
     score_floor = float(min_candidate_score) if min_candidate_score is not None else 0.0
 
+    soft_floor_raw = _to_float(_env_or_default("SCAN_MIN_EXPECTED_SPREAD_SOFT_FLOOR", "-45"))
+    soft_score_relax_raw = _to_float(_env_or_default("SCAN_SOFT_SCORE_RELAX", "45"))
+    soft_spread_floor = float(soft_floor_raw) if soft_floor_raw is not None else -45.0
+    soft_score_floor = score_floor - (float(soft_score_relax_raw) if soft_score_relax_raw is not None else 45.0)
+
     scored: list[tuple[AmazonProduct, dict[str, Any]]] = [
         (item, _score_product_candidate(item, scoring_context))
         for item in products
@@ -1603,7 +1733,35 @@ def _filter_predicted_candidates(
             f"title='{_safe_text(item.title, max_len=90)}' score={score:.2f} spread_est={expected_spread:.2f}"
         )
 
-    if len(kept) < max(1, min_keep):
+    target_keep = max(1, min_keep)
+    if len(kept) < target_keep:
+        soft_ranked = sorted(
+            (
+                (item, row)
+                for item, row in scored
+                if (
+                    (_to_float(row.get("expected_spread")) is not None)
+                    and ((_to_float(row.get("expected_spread")) or -9999.0) >= soft_spread_floor)
+                    and ((_to_float(row.get("score")) or -9999.0) >= soft_score_floor)
+                )
+            ),
+            key=lambda pair: (
+                _to_float(pair[1].get("score")) or -9999.0,
+                _to_float(pair[1].get("expected_spread")) or -9999.0,
+            ),
+            reverse=True,
+        )
+        seen_ids = {id(item) for item, _ in kept}
+        for item, row in soft_ranked:
+            marker = id(item)
+            if marker in seen_ids:
+                continue
+            kept.append((item, row))
+            seen_ids.add(marker)
+            if len(kept) >= target_keep:
+                break
+
+    if len(kept) < target_keep:
         ranked = sorted(
             scored,
             key=lambda pair: (
@@ -1620,12 +1778,31 @@ def _filter_predicted_candidates(
                 continue
             refill.append((item, row))
             seen_ids.add(marker)
-            if len(kept) + len(refill) >= max(1, min_keep):
+            if len(kept) + len(refill) >= target_keep:
                 break
         kept.extend(refill)
 
     final_items = [item for item, _ in kept]
     return final_items, dropped_logs
+
+
+def _apply_model_diversity(products: list[AmazonProduct], *, max_per_model: int) -> tuple[list[AmazonProduct], list[str]]:
+    if max_per_model <= 0 or not products:
+        return products, []
+    counters: dict[str, int] = {}
+    kept: list[AmazonProduct] = []
+    dropped: list[str] = []
+    for item in products:
+        key = _coarse_model_signature(item)
+        seen = counters.get(key, 0)
+        if seen >= max_per_model:
+            dropped.append(
+                f"title='{_safe_text(item.title, max_len=90)}' model_key='{_safe_text(key, max_len=80)}'"
+            )
+            continue
+        counters[key] = seen + 1
+        kept.append(item)
+    return kept, dropped
 
 
 def _priority_preview(products: list[AmazonProduct], scoring_context: dict[str, Any], limit: int = 8) -> list[str]:
@@ -1992,7 +2169,9 @@ async def _run_scan_command(payload: dict[str, Any]) -> int:
                 f"mode={query_meta.get('mode')} selected={query_meta.get('selected')}/{query_meta.get('target')} "
                 f"trend_slots={query_meta.get('trend_slots')} exploration_slots={query_meta.get('exploration_slots')} "
                 f"trend_candidates={query_meta.get('trend_candidates', 0)} "
-                f"source_breakdown={json.dumps(query_meta.get('source_breakdown', {}), ensure_ascii=False)}"
+                f"source_breakdown={json.dumps(query_meta.get('source_breakdown', {}), ensure_ascii=False)} "
+                f"category_breakdown={json.dumps(query_meta.get('category_breakdown', {}), ensure_ascii=False)} "
+                f"family_breakdown={json.dumps(query_meta.get('family_breakdown', {}), ensure_ascii=False)}"
             )
             query_preview = dynamic_queries[: min(len(dynamic_queries), 12)]
             if query_preview:
@@ -2078,7 +2257,7 @@ async def _run_scan_command(payload: dict[str, Any]) -> int:
         print("[scan] Scoring context disabled; using legacy priority.")
 
     products = _prioritize_products(products, scoring_context=scoring_context)
-    predicted_min_keep_default = max(4, scan_target_products // 2)
+    predicted_min_keep_default = max(2, scan_target_products // 3)
     predicted_min_keep = max(2, int(_env_or_default("SCAN_PREDICTED_MIN_KEEP", str(predicted_min_keep_default))))
     products, predicted_drops = _filter_predicted_candidates(
         products,
@@ -2095,6 +2274,21 @@ async def _run_scan_command(payload: dict[str, Any]) -> int:
             print(f"[scan] Predicted drop -> {row}")
         if len(predicted_drops) > 5:
             print(f"[scan] Predicted drop -> ... and {len(predicted_drops) - 5} more.")
+
+    max_variants_per_model = max(1, int(_env_or_default("SCAN_MAX_VARIANTS_PER_MODEL", "1")))
+    products, diversity_drops = _apply_model_diversity(
+        products,
+        max_per_model=max_variants_per_model,
+    )
+    if diversity_drops:
+        print(
+            "[scan] Model diversity filter applied | "
+            f"max_per_model={max_variants_per_model} dropped={len(diversity_drops)} kept={len(products)}"
+        )
+        for row in diversity_drops[:5]:
+            print(f"[scan] Diversity drop -> {row}")
+        if len(diversity_drops) > 5:
+            print(f"[scan] Diversity drop -> ... and {len(diversity_drops) - 5} more.")
     preview_rows = _priority_preview(products, scoring_context, limit=min(len(products), 8))
     if preview_rows:
         print("[scan] Priority preview:")
