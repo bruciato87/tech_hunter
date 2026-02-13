@@ -12,3 +12,7 @@ __pycache__/
 .coverage
 htmlcov/
 coverage.xml
+.tmp/
+run_logs/
+*storage_state*.json
+*.log

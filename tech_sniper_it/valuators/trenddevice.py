@@ -257,7 +257,30 @@ def _detect_wizard_step(options: list[WizardOption]) -> str:
     if all(value in {"si", "no"} for value in values):
         return STEP_YES_NO
 
-    if any(value == "iphone" for value in values) and any(value in {"mac", "samsung", "google"} for value in values):
+    family_markers = {
+        "iphone",
+        "ipad",
+        "apple watch",
+        "watch",
+        "garmin",
+        "mac",
+        "macbook",
+        "samsung",
+        "google",
+    }
+    family_hits = [
+        value
+        for value in values
+        if value in family_markers or value.startswith("mac")
+    ]
+    # "Family" steps are typically short, brand-like options (iphone/ipad/watch/mac/samsung...),
+    # not model lists with numbers. We keep detection conservative to avoid misclassifying model steps.
+    if "iphone" in values and any(
+        value in {"ipad", "apple watch", "watch", "samsung", "google", "garmin"} or value.startswith("mac")
+        for value in values
+    ):
+        return STEP_DEVICE_FAMILY
+    if len(set(family_hits)) >= 2 and len(values) <= 15:
         return STEP_DEVICE_FAMILY
     if _is_capacity_step(values):
         return STEP_CAPACITY
@@ -617,7 +640,14 @@ def _pick_best_network_candidate(candidates: list[dict[str, Any]]) -> tuple[floa
     credible = [item for item in candidates if _is_credible_network_candidate(item)]
     if not credible:
         return None, ""
-    best = max(credible, key=lambda item: (int(item.get("score", 0)), float(item.get("value", 0.0))))
+    best = max(
+        credible,
+        key=lambda item: (
+            int(item.get("wizard_progress", 0) or 0),
+            int(item.get("score", 0)),
+            float(item.get("value", 0.0)),
+        ),
+    )
     value = _parse_plain_price(best.get("value"))
     if value is None:
         return None, ""
@@ -637,6 +667,25 @@ def _is_credible_network_candidate(candidate: dict[str, Any]) -> bool:
         return False
 
     if source == "json":
+        # JSON payloads can include entire catalog price lists. Require stronger quote context
+        # than just "price" to avoid overestimations.
+        strong_terms = (
+            "valuation",
+            "valutazione",
+            "quote",
+            "quotazione",
+            "offerta",
+            "offer",
+            "cash",
+            "payout",
+            "amount",
+            "totale",
+            "ti offriamo",
+            "ricevi",
+            "paghiamo",
+        )
+        if not any(term in snippet_norm for term in strong_terms):
+            return False
         return score >= 68
     if score < 62:
         return False
@@ -1162,6 +1211,7 @@ class TrendDeviceValuator(BaseValuator):
             page.set_default_timeout(self.nav_timeout_ms)
             network_price_candidates: list[dict[str, Any]] = []
             response_tasks: set[asyncio.Task[Any]] = set()
+            wizard_progress = 0
 
             async def _capture_response_body(response) -> None:  # noqa: ANN001
                 url = str(getattr(response, "url", "") or "")
@@ -1246,6 +1296,7 @@ class TrendDeviceValuator(BaseValuator):
                         "value": float(candidate["value"]),
                         "snippet": str(candidate["snippet"])[:260],
                         "source": candidate["source"],
+                        "wizard_progress": wizard_progress,
                     }
                     if not _is_credible_network_candidate(row):
                         continue
@@ -1424,6 +1475,10 @@ class TrendDeviceValuator(BaseValuator):
                         previous_step = payload["wizard"][-1]
                         if previous_step.get("step_type") == STEP_MODEL:
                             reset_after_model += 1
+                            failing_model = _normalize_wizard_text(str(previous_step.get("selected") or ""))
+                            if failing_model:
+                                excluded_models.add(failing_model)
+                                payload.setdefault("adaptive_fallbacks", {})["excluded_model_on_reset"] = failing_model
                             if reset_after_model >= 3:
                                 payload["wizard_end_reason"] = "model-selection-reset"
                                 await _drain_response_tasks()
@@ -1464,6 +1519,7 @@ class TrendDeviceValuator(BaseValuator):
                         payload["wizard_end_reason"] = f"no-choice-{step_name}"
                         break
 
+                    wizard_progress = step_index
                     await self._select_option(page, chosen)
                     confirmed = await self._click_confirm(page)
                     payload["wizard"].append(

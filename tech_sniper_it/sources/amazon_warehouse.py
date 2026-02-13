@@ -1203,6 +1203,72 @@ async def _remove_asin_from_cart(page, *, host: str, asin: str) -> bool:  # noqa
             pass
 
     if not clicked:
+        # Fallback: some cart UIs only support deletion via the quantity dropdown (0 / Delete).
+        quantity_selectors = (
+            "select[name='quantity']",
+            "select[name^='quantity']",
+            "select[name*='quantity' i]",
+            "select[id*='quantity' i]",
+        )
+
+        def _looks_like_delete_option(label: str) -> bool:
+            lowered = (label or "").strip().lower()
+            if not lowered:
+                return False
+            if re.search(r"\\b0\\b", lowered):
+                return True
+            return any(
+                token in lowered
+                for token in (
+                    "delete",
+                    "remove",
+                    "elimina",
+                    "rimuovi",
+                    "löschen",
+                    "supprimer",
+                    "eliminar",
+                )
+            )
+
+        for selector in quantity_selectors:
+            try:
+                qty = row_locator.locator(selector).first
+                if not await qty.count():
+                    continue
+                options = qty.locator("option")
+                try:
+                    option_count = min(await options.count(), 30)
+                except PlaywrightError:
+                    option_count = 0
+                picked_value = None
+                picked_label = None
+                for index in range(option_count):
+                    opt = options.nth(index)
+                    try:
+                        label = (await opt.inner_text(timeout=800) or "").strip()
+                        value = (await opt.get_attribute("value") or "").strip()
+                    except PlaywrightError:
+                        continue
+                    if value == "0":
+                        picked_value = "0"
+                        picked_label = label
+                        break
+                    if _looks_like_delete_option(label):
+                        picked_value = value or None
+                        picked_label = label
+                        break
+                if picked_value is not None:
+                    await qty.select_option(picked_value)
+                    clicked = True
+                    break
+                if picked_label:
+                    await qty.select_option(label=picked_label)
+                    clicked = True
+                    break
+            except PlaywrightError:
+                continue
+
+    if not clicked:
         return False
 
     await page.wait_for_timeout(600)

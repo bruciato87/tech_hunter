@@ -440,7 +440,22 @@ def _verify_real_resale_quote(result: ValuationResult) -> ValuationResult:
     elif platform == "trenddevice":
         checks["generic_url"] = _is_generic_trenddevice_offer_url(source_url)
         if checks["generic_url"]:
-            reasons.append("generic-source-url")
+            has_model_step = False
+            token_ratio = 0.0
+            if isinstance(match_quality, dict):
+                has_model_step = bool(match_quality.get("has_model_step"))
+                try:
+                    token_ratio = float(match_quality.get("token_ratio") or 0.0)
+                except (TypeError, ValueError):
+                    token_ratio = 0.0
+            checks["has_model_step"] = has_model_step
+            checks["token_ratio"] = round(token_ratio, 3)
+            # TrendDevice wizard often stays on /vendi/valutazione; allow generic URL if the wizard
+            # selection coverage is strong enough to prevent false positives.
+            if not has_model_step:
+                reasons.append("generic-url-no-model-step")
+            elif token_ratio < 0.55:
+                reasons.append("generic-url-low-coverage")
         if not price_text:
             reasons.append("missing-price-context")
     elif platform == "mpb":

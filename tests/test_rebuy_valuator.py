@@ -55,6 +55,16 @@ def test_rebuy_assess_match_rejects_generic_category_url() -> None:
     assert match["reason"] == "generic-category-url"
 
 
+def test_rebuy_assess_match_rejects_generic_category_url_for_any_category() -> None:
+    match = _assess_rebuy_match(
+        normalized_name="Apple Watch Series 9 GPS + Cellular 45mm",
+        candidate_text="Wearable",
+        source_url="https://www.rebuy.it/comprare/wearable",
+    )
+    assert match["ok"] is False
+    assert match["reason"] == "generic-category-url"
+
+
 def test_rebuy_load_storage_state_b64_valid(monkeypatch: pytest.MonkeyPatch) -> None:
     payload = {"cookies": [], "origins": []}
     encoded = base64.b64encode(json.dumps(payload).encode("utf-8")).decode("ascii")
@@ -95,6 +105,7 @@ def test_extract_rebuy_product_link_candidates_prefers_specific_product_urls() -
     <html><body>
       <a href="/comprare/search?q=Valve%20Steam%20Deck%20OLED%201TB">Search</a>
       <a href="/comprare/apple">Apple category</a>
+      <a href="/comprare/wearable">Wearable category</a>
       <a href="/comprare/valve-steam-deck-oled-1tb/123456">Valve Steam Deck OLED 1TB</a>
       <a href="/comprare/valve-steam-deck/999999">Valve Steam Deck</a>
     </body></html>

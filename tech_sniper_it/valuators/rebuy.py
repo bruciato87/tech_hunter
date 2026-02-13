@@ -74,6 +74,7 @@ GENERIC_REBUY_CATEGORIES: set[str] = {
     "console",
 }
 CAPACITY_TOKEN_PATTERN = re.compile(r"\b\d{2,4}\s*(?:gb|tb)\b", re.IGNORECASE)
+REBUY_PRODUCT_ID_PATTERN = re.compile(r"^\d{4,}$")
 _REBUY_STORAGE_STATE_ERROR = ""
 
 
@@ -168,19 +169,32 @@ def _extract_rebuy_product_link_candidates(
     limit: int = 10,
 ) -> list[dict[str, Any]]:
     soup = BeautifulSoup(html or "", "html.parser")
+    root = soup.select_one("main") or soup
     found: list[dict[str, Any]] = []
     seen_urls: set[str] = set()
 
-    for anchor in soup.select("a[href]"):
+    for anchor in root.select("a[href]"):
         href = (anchor.get("href") or "").strip()
         if not href:
             continue
+        if href.startswith(("javascript:", "mailto:")):
+            continue
         href_lower = href.lower()
-        if "/comprare/" not in href_lower and "/vendi" not in href_lower:
+        if "/comprare/" not in href_lower and "/vendi/" not in href_lower:
             continue
         if "/comprare/search" in href_lower:
             continue
         full_url = urljoin(base_url, href)
+        # Only keep product-like links. Header/category anchors are too noisy and cause false positives.
+        parsed = urlparse(full_url)
+        segments = [segment for segment in (parsed.path or "").strip("/").lower().split("/") if segment]
+        if not segments:
+            continue
+        if segments[0] == "comprare":
+            if len(segments) < 3 or not REBUY_PRODUCT_ID_PATTERN.fullmatch(segments[-1] or ""):
+                continue
+        if segments[0] == "vendi" and len(segments) <= 1:
+            continue
         marker = full_url.lower()
         if marker in seen_urls:
             continue
@@ -257,14 +271,54 @@ def _is_generic_rebuy_url(url: str | None) -> bool:
         return True
     if len(segments) == 1:
         return True
-    if len(segments) == 2 and segments[0] == "comprare" and segments[1] in GENERIC_REBUY_CATEGORIES:
-        return True
+    if segments[0] == "comprare":
+        # /comprare/<category> (and similar) are never product pages.
+        if len(segments) == 2:
+            return True
+        # Treat /comprare/* as product only if the last segment is a numeric id.
+        if len(segments) >= 3 and not REBUY_PRODUCT_ID_PATTERN.fullmatch(segments[-1] or ""):
+            return True
     return False
 
 
 def _is_search_rebuy_url(url: str | None) -> bool:
     path = (urlparse(url or "").path or "").lower()
     return "/comprare/search" in path or path.endswith("/search")
+
+
+def _absolutize_rebuy_url(url: str | None) -> str | None:
+    raw = (url or "").strip()
+    if not raw:
+        return None
+    if raw.startswith(("http://", "https://")):
+        return raw
+    return urljoin("https://www.rebuy.it", raw)
+
+
+def _resolve_rebuy_source_url(current_url: str | None, payload: dict[str, Any]) -> str | None:
+    """Rebuy is partially SPA-driven; page.url can remain /vendi even after selecting a product.
+
+    Prefer the clicked href (result_pick) or the deep-link URL (deep_link_pick) to keep verification strict.
+    """
+    current = (current_url or "").strip()
+    if current and not _is_generic_rebuy_url(current) and not _is_search_rebuy_url(current):
+        return current
+
+    deep_pick = payload.get("deep_link_pick")
+    if isinstance(deep_pick, dict):
+        picked = str(deep_pick.get("url") or "").strip()
+        if picked:
+            picked = _absolutize_rebuy_url(picked) or picked
+            if picked and not _is_generic_rebuy_url(picked) and not _is_search_rebuy_url(picked):
+                return picked
+
+    result_pick = payload.get("result_pick")
+    if isinstance(result_pick, dict):
+        picked = _absolutize_rebuy_url(result_pick.get("href"))
+        if picked and not _is_generic_rebuy_url(picked) and not _is_search_rebuy_url(picked):
+            return picked
+
+    return current or None
 
 
 def _assess_rebuy_match(
@@ -527,11 +581,14 @@ class RebuyValuator(BaseValuator):
                 payload["condition_selected"] = condition_selected
                 await page.wait_for_timeout(1600)
 
+                resolved_source_url = _resolve_rebuy_source_url(page.url, payload)
+                payload["resolved_source_url"] = resolved_source_url
+
                 match_text = await self._collect_match_text(page)
                 match = _assess_rebuy_match(
                     normalized_name=normalized_name,
                     candidate_text=match_text,
-                    source_url=page.url,
+                    source_url=resolved_source_url or page.url,
                 )
                 payload["match_quality"] = match
                 if not match.get("ok"):
@@ -562,7 +619,7 @@ class RebuyValuator(BaseValuator):
                     )
                     raise RuntimeError("Rebuy price not found after adaptive fallbacks.")
                 payload["price_source"] = str(payload.get("price_source") or "dom")
-                return price, page.url, payload
+                return price, resolved_source_url or page.url, payload
             finally:
                 await context.close()
                 await browser.close()
@@ -642,10 +699,12 @@ class RebuyValuator(BaseValuator):
         await page.wait_for_timeout(1400)
 
         match_text = await self._collect_match_text(page)
+        resolved_source_url = _resolve_rebuy_source_url(page.url, payload)
+        payload["resolved_source_url"] = resolved_source_url
         match = _assess_rebuy_match(
             normalized_name=normalized_name,
             candidate_text=match_text,
-            source_url=page.url,
+            source_url=resolved_source_url or page.url,
         )
         payload["match_quality"] = match
         if not match.get("ok"):
@@ -656,7 +715,7 @@ class RebuyValuator(BaseValuator):
         if price is None:
             return {"offer": None, "url": None}
         payload["price_source"] = "deep_link_rescue_dom"
-        return {"offer": price, "url": page.url}
+        return {"offer": price, "url": resolved_source_url or page.url}
 
     async def _open_best_result(
         self,
