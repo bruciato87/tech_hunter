@@ -86,6 +86,37 @@ SPONSORED_HINTS: tuple[str, ...] = (
     "gesponsert",
     "sponsorisé",
 )
+CURRENT_PRICE_SELECTORS: tuple[str, ...] = (
+    ".a-price:not(.a-text-price) .a-offscreen",
+    "span[data-a-price-type='price'] .a-offscreen",
+    "span.a-price .a-offscreen",
+)
+LIST_PRICE_SELECTORS: tuple[str, ...] = (
+    ".a-price.a-text-price .a-offscreen",
+    ".a-text-price .a-offscreen",
+    "span[data-a-strike='true'] .a-offscreen",
+)
+DISCOUNT_HINTS: tuple[str, ...] = (
+    "coupon",
+    "buono",
+    "sconto",
+    "risparmi",
+    "risparmia",
+    "save",
+    "saving",
+    "rabatt",
+    "gutschein",
+    "economisez",
+    "ahorra",
+    "checkout",
+    "cassa",
+    "al pagamento",
+    "au paiement",
+)
+EUR_AMOUNT_PATTERN = re.compile(
+    r"(?:€\s*\d{1,3}(?:[.\s]\d{3})*(?:,\d{2})?|\d{1,3}(?:[.\s]\d{3})*(?:,\d{2})?\s*€)"
+)
+PERCENT_AMOUNT_PATTERN = re.compile(r"(\d{1,2}(?:[.,]\d{1,2})?)\s*%")
 BARRIER_HINTS: dict[str, tuple[str, ...]] = {
     "captcha": (
         "captchacharacters",
@@ -242,11 +273,130 @@ def _extract_link_from_row(host: str, row: Any) -> str | None:
 
 
 def _extract_price_from_row(row: Any) -> float | None:
-    for node in row.select(".a-price .a-offscreen"):
-        price = parse_eur_price(node.get_text(" ", strip=True))
-        if price is not None:
-            return price
-    return parse_eur_price(row.get_text(" ", strip=True))
+    details = _extract_price_details_from_row(row)
+    price = details.get("net_price_eur")
+    if isinstance(price, (int, float)):
+        return float(price)
+    return None
+
+
+def _extract_prices_by_selectors(row: Any, selectors: tuple[str, ...]) -> list[float]:
+    values: list[float] = []
+    for selector in selectors:
+        for node in row.select(selector):
+            price = parse_eur_price(node.get_text(" ", strip=True))
+            if price is None:
+                continue
+            if price <= 0:
+                continue
+            values.append(float(price))
+    return values
+
+
+def _extract_discount_amounts_from_text(text: str) -> tuple[list[float], list[float]]:
+    if not text:
+        return [], []
+    lowered = text.lower()
+    eur_values: list[float] = []
+    pct_values: list[float] = []
+
+    for match in EUR_AMOUNT_PATTERN.finditer(text):
+        snippet = lowered[max(0, match.start() - 72) : min(len(lowered), match.end() + 72)]
+        if not any(hint in snippet for hint in DISCOUNT_HINTS):
+            continue
+        value = parse_eur_price(match.group(0))
+        if value is None or value <= 0:
+            continue
+        eur_values.append(float(value))
+
+    for match in PERCENT_AMOUNT_PATTERN.finditer(text):
+        snippet = lowered[max(0, match.start() - 72) : min(len(lowered), match.end() + 72)]
+        if not any(hint in snippet for hint in DISCOUNT_HINTS):
+            continue
+        raw = (match.group(1) or "").replace(",", ".").strip()
+        try:
+            value = float(raw)
+        except ValueError:
+            continue
+        if value <= 0 or value >= 100:
+            continue
+        pct_values.append(float(value))
+
+    return eur_values, pct_values
+
+
+def _extract_price_details_from_row(row: Any) -> dict[str, float]:
+    current_prices = _extract_prices_by_selectors(row, CURRENT_PRICE_SELECTORS)
+    list_prices = _extract_prices_by_selectors(row, LIST_PRICE_SELECTORS)
+    all_prices = _extract_prices_by_selectors(row, (".a-price .a-offscreen",))
+
+    displayed_price = current_prices[0] if current_prices else None
+    if displayed_price is None and all_prices:
+        displayed_price = min(all_prices)
+    if displayed_price is None:
+        displayed_price = parse_eur_price(row.get_text(" ", strip=True))
+    if displayed_price is None:
+        return {}
+
+    list_price: float | None = None
+    if list_prices:
+        candidate = max(list_prices)
+        if candidate > displayed_price:
+            list_price = candidate
+    elif len(all_prices) >= 2:
+        candidate = max(all_prices)
+        if candidate > displayed_price:
+            list_price = candidate
+
+    implied_discount_eur: float | None = None
+    implied_discount_pct: float | None = None
+    if list_price is not None and list_price > displayed_price:
+        implied_discount_eur = round(list_price - displayed_price, 2)
+        implied_discount_pct = round((implied_discount_eur / list_price) * 100, 2)
+
+    text = row.get_text(" ", strip=True)
+    eur_discounts, pct_discounts = _extract_discount_amounts_from_text(text)
+
+    extra_discount_eur = 0.0
+    for value in eur_discounts:
+        if value >= displayed_price:
+            continue
+        if implied_discount_eur is not None and abs(value - implied_discount_eur) <= 0.60:
+            continue
+        extra_discount_eur = max(extra_discount_eur, value)
+
+    extra_discount_pct = 0.0
+    for value in pct_discounts:
+        if implied_discount_pct is not None and abs(value - implied_discount_pct) <= 1.20:
+            continue
+        extra_discount_pct = max(extra_discount_pct, value)
+
+    net_price = float(displayed_price)
+    if extra_discount_pct > 0:
+        net_price *= 1 - (extra_discount_pct / 100)
+    if extra_discount_eur > 0:
+        net_price -= extra_discount_eur
+    if net_price <= 0:
+        net_price = float(displayed_price)
+        extra_discount_eur = 0.0
+        extra_discount_pct = 0.0
+    net_price = round(net_price, 2)
+
+    details: dict[str, float] = {
+        "displayed_price_eur": round(float(displayed_price), 2),
+        "net_price_eur": net_price,
+    }
+    if list_price is not None:
+        details["list_price_eur"] = round(float(list_price), 2)
+    if implied_discount_eur is not None:
+        details["implied_discount_eur"] = implied_discount_eur
+    if implied_discount_pct is not None:
+        details["implied_discount_pct"] = implied_discount_pct
+    if extra_discount_eur > 0:
+        details["extra_discount_eur"] = round(extra_discount_eur, 2)
+    if extra_discount_pct > 0:
+        details["extra_discount_pct"] = round(extra_discount_pct, 2)
+    return details
 
 
 def _is_sponsored(text: str) -> bool:
@@ -599,7 +749,8 @@ def _extract_products_from_html(html: str, host: str) -> list[dict[str, Any]]:
         if _is_sponsored(title):
             continue
 
-        price = _extract_price_from_row(row)
+        price_details = _extract_price_details_from_row(row)
+        price = price_details.get("net_price_eur")
         if price is None:
             continue
 
@@ -608,14 +759,25 @@ def _extract_products_from_html(html: str, host: str) -> list[dict[str, Any]]:
             continue
 
         category = ProductCategory.from_raw(title).value
-        results.append(
-            {
-                "title": title,
-                "price_eur": price,
-                "category": category,
-                "url": url,
-            }
-        )
+        item: dict[str, Any] = {
+            "title": title,
+            "price_eur": float(price),
+            "category": category,
+            "url": url,
+        }
+        displayed_price = price_details.get("displayed_price_eur")
+        if isinstance(displayed_price, (int, float)):
+            item["displayed_price_eur"] = float(displayed_price)
+        list_price = price_details.get("list_price_eur")
+        if isinstance(list_price, (int, float)):
+            item["list_price_eur"] = float(list_price)
+        extra_discount_eur = price_details.get("extra_discount_eur")
+        if isinstance(extra_discount_eur, (int, float)):
+            item["extra_discount_eur"] = float(extra_discount_eur)
+        extra_discount_pct = price_details.get("extra_discount_pct")
+        if isinstance(extra_discount_pct, (int, float)):
+            item["extra_discount_pct"] = float(extra_discount_pct)
+        results.append(item)
 
     return results
 
