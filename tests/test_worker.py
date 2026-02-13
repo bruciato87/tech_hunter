@@ -42,6 +42,18 @@ def test_coerce_product_valid() -> None:
     assert product.category == ProductCategory.APPLE_PHONE
 
 
+def test_coerce_product_detects_smartwatch_and_condition() -> None:
+    product = _coerce_product(
+        {
+            "title": "Garmin Fenix 7 Pro Usato - Condizioni accettabili",
+            "price_eur": 399.0,
+            "category": "",
+        }
+    )
+    assert product.category == ProductCategory.SMARTWATCH
+    assert product.amazon_condition == "acceptable"
+
+
 def test_coerce_product_keeps_source_marketplace() -> None:
     product = _coerce_product(
         {
@@ -613,7 +625,7 @@ async def test_run_status_command_includes_emojis(monkeypatch: pytest.MonkeyPatc
     text = sent_messages[0][1]
     assert "🤖 Tech_Sniper_IT status:" in text
     assert "⚙️ worker: online" in text
-    assert "🎯 threshold spread (offer-amazon): 40.00 EUR" in text
+    assert "🎯 threshold spread netto: 40.00 EUR" in text
     assert "🧠 ai: gemini=on, openrouter=off" in text
     assert "🗄️ supabase: on" in text
     assert "💬 telegram alerts default chat: on" in text
@@ -1049,6 +1061,56 @@ async def test_exclude_non_profitable_candidates_relaxes_to_min_keep(monkeypatch
     filtered = await _exclude_non_profitable_candidates(manager, [removed_a, removed_b])
     assert len(filtered) == 1
     assert filtered[0].title == "A"
+
+
+@pytest.mark.asyncio
+async def test_exclude_non_profitable_candidates_filters_by_signature(monkeypatch: pytest.MonkeyPatch) -> None:
+    class DummyStorage:
+        async def get_excluded_source_urls(self, *, max_spread_eur: float, lookback_days: int, limit: int):  # noqa: ANN201
+            return set()
+
+        async def get_recent_scoring_rows(self, *, lookback_days: int, limit: int):  # noqa: ANN201
+            return [
+                {
+                    "normalized_name": "Steam Deck OLED 512GB",
+                    "category": "general_tech",
+                    "amazon_price_eur": 420.0,
+                    "spread_eur": 10.0,
+                    "created_at": "2026-02-12T08:00:00Z",
+                }
+            ]
+
+    manager = type("M", (), {"storage": DummyStorage(), "min_spread_eur": 40.0})()
+    monkeypatch.setenv("EXCLUDE_NON_PROFITABLE", "true")
+
+    skip = type(
+        "P1",
+        (),
+        {
+            "title": "Steam Deck OLED 512GB",
+            "price_eur": 420.0,
+            "category": ProductCategory.HANDHELD_CONSOLE,
+            "url": "https://www.amazon.it/dp/B0SKIP",
+            "amazon_condition": None,
+            "amazon_packaging_only": False,
+        },
+    )()
+    keep = type(
+        "P2",
+        (),
+        {
+            "title": "ASUS ROG Ally Z1 Extreme",
+            "price_eur": 520.0,
+            "category": ProductCategory.HANDHELD_CONSOLE,
+            "url": "https://www.amazon.it/dp/B0KEEP",
+            "amazon_condition": None,
+            "amazon_packaging_only": False,
+        },
+    )()
+
+    filtered = await _exclude_non_profitable_candidates(manager, [skip, keep])
+    assert len(filtered) == 1
+    assert filtered[0].title == "ASUS ROG Ally Z1 Extreme"
 
 
 @pytest.mark.asyncio

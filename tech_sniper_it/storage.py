@@ -7,7 +7,7 @@ from typing import Any
 
 from supabase import Client, create_client
 
-from tech_sniper_it.models import ArbitrageDecision
+from tech_sniper_it.models import ArbitrageDecision, to_legacy_storage_category
 
 
 class SupabaseStorage:
@@ -83,7 +83,7 @@ class SupabaseStorage:
             "product_title": decision.product.title,
             "normalized_name": decision.normalized_name,
             "amazon_price_eur": decision.product.price_eur,
-            "category": decision.product.category.value,
+            "category": to_legacy_storage_category(decision.product.category),
             "best_platform": decision.best_offer.platform,
             "best_offer_eur": decision.best_offer.offer_eur,
             "spread_eur": decision.spread_eur,
@@ -164,7 +164,7 @@ class SupabaseStorage:
 
         def _select() -> list[dict[str, Any]]:
             query = self.client.table(self.table).select(
-                "normalized_name,category,best_offer_eur,spread_eur,offers_payload,source_url,created_at"
+                "normalized_name,category,best_offer_eur,spread_eur,amazon_price_eur,offers_payload,source_url,created_at"
             )
             if cutoff_iso:
                 query = query.gte("created_at", cutoff_iso)

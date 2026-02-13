@@ -1,4 +1,9 @@
-from tech_sniper_it.utils import detect_color_variants, extract_capacity_gb, parse_eur_price
+from tech_sniper_it.utils import (
+    detect_color_variants,
+    extract_capacity_gb,
+    infer_amazon_warehouse_condition,
+    parse_eur_price,
+)
 
 
 def test_parse_eur_price_suffix() -> None:
@@ -21,3 +26,19 @@ def test_extract_capacity_gb() -> None:
 def test_detect_color_variants() -> None:
     assert "nero" in detect_color_variants("iPhone nero 128gb")
     assert detect_color_variants("macbook edition unknown") == ()
+
+
+def test_infer_amazon_warehouse_condition_detects_acceptable_with_packaging_hint() -> None:
+    condition, confidence, packaging_only = infer_amazon_warehouse_condition(
+        "Usato - Condizioni accettabili. Confezione danneggiata."
+    )
+    assert condition == "acceptable"
+    assert confidence >= 0.9
+    assert packaging_only is True
+
+
+def test_infer_amazon_warehouse_condition_detects_like_new() -> None:
+    condition, confidence, packaging_only = infer_amazon_warehouse_condition("Used - Like new")
+    assert condition == "like_new"
+    assert confidence > 0.9
+    assert packaging_only is False

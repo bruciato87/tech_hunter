@@ -15,8 +15,9 @@ from dotenv import load_dotenv
 from telegram import Bot
 
 from tech_sniper_it.manager import build_default_manager
-from tech_sniper_it.models import AmazonProduct, ProductCategory
+from tech_sniper_it.models import AmazonProduct, ProductCategory, to_legacy_storage_category
 from tech_sniper_it.sources import apply_cart_net_pricing, fetch_amazon_warehouse_products
+from tech_sniper_it.utils import infer_amazon_warehouse_condition
 
 
 MAX_LAST_LIMIT = 10
@@ -26,12 +27,18 @@ SCORING_DEFAULT_HISTORY_LIMIT = 2000
 
 CATEGORY_REQUIRED_PLATFORMS: dict[ProductCategory, tuple[str, ...]] = {
     ProductCategory.APPLE_PHONE: ("trenddevice", "rebuy"),
+    ProductCategory.SMARTWATCH: ("trenddevice", "rebuy"),
+    ProductCategory.DRONE: ("mpb", "rebuy"),
+    ProductCategory.HANDHELD_CONSOLE: ("rebuy",),
     ProductCategory.PHOTOGRAPHY: ("mpb", "rebuy"),
     ProductCategory.GENERAL_TECH: ("rebuy",),
 }
 
 CATEGORY_FALLBACK_OFFER_RATIO: dict[ProductCategory, float] = {
     ProductCategory.APPLE_PHONE: 0.38,
+    ProductCategory.SMARTWATCH: 0.34,
+    ProductCategory.DRONE: 0.33,
+    ProductCategory.HANDHELD_CONSOLE: 0.35,
     ProductCategory.PHOTOGRAPHY: 0.30,
     ProductCategory.GENERAL_TECH: 0.22,
 }
@@ -40,6 +47,14 @@ LIQUIDITY_PATTERNS: tuple[tuple[str, float], ...] = (
     (r"\biphone\b", 65.0),
     (r"\biphone\s*(14|15|16)\b", 35.0),
     (r"\bpro\s*max\b", 25.0),
+    (r"\bapple watch ultra\b", 45.0),
+    (r"\bgarmin\s*(fenix|epix)\b", 45.0),
+    (r"\bforerunner\b", 28.0),
+    (r"\bdji\s*(mini|air|mavic|avata)\b", 42.0),
+    (r"\bdrone\b", 26.0),
+    (r"\bsteam deck\b", 44.0),
+    (r"\brog ally\b", 46.0),
+    (r"\blegion go\b", 44.0),
     (r"\bmacbook\s*(air|pro)\b", 48.0),
     (r"\bcanon\s*eos\b", 40.0),
     (r"\bsony\s*alpha\b", 40.0),
@@ -69,6 +84,13 @@ ACCESSORY_KEYWORDS: tuple[str, ...] = (
     "adattatore",
     "adapter",
     "alimentatore",
+    "cinturino",
+    "strap",
+    "band",
+    "elica",
+    "propeller",
+    "battery pack",
+    "batteria esterna",
     "mouse",
     "tastiera",
     "keyboard",
@@ -102,6 +124,14 @@ CORE_DEVICE_MARKERS: tuple[str, ...] = (
     "mirrorless",
     "dslr",
     "console",
+    "console portatile",
+    "smartwatch",
+    "watch ultra",
+    "garmin",
+    "drone",
+    "steam deck",
+    "rog ally",
+    "legion go",
     "ricondizionato",
     "refurbished",
     "renewed",
@@ -123,6 +153,17 @@ BUNDLE_INCLUDED_MARKERS: tuple[str, ...] = (
 
 DEVICE_ANCHOR_PRICE_FLOOR: tuple[tuple[str, float], ...] = (
     ("iphone", 120.0),
+    ("apple watch ultra", 280.0),
+    ("garmin fenix", 220.0),
+    ("garmin epix", 260.0),
+    ("forerunner", 140.0),
+    ("dji mini", 220.0),
+    ("dji air", 300.0),
+    ("dji mavic", 450.0),
+    ("drone", 200.0),
+    ("steam deck", 220.0),
+    ("rog ally", 300.0),
+    ("legion go", 340.0),
     ("macbook", 180.0),
     ("ipad", 100.0),
     ("canon eos", 180.0),
@@ -133,10 +174,12 @@ DEVICE_ANCHOR_PRICE_FLOOR: tuple[tuple[str, float], ...] = (
 )
 
 WAREHOUSE_QUERY_FALLBACKS: tuple[str, ...] = (
-    "iphone 14 pro 128gb amazon warehouse",
-    "macbook air m1 amazon warehouse",
-    "sony alpha amazon warehouse",
-    "canon eos amazon warehouse",
+    "apple watch ultra 2 amazon warehouse",
+    "garmin fenix 7x amazon warehouse",
+    "dji mini 4 pro amazon warehouse",
+    "steam deck oled 512gb amazon warehouse",
+    "iphone 15 pro 256gb amazon warehouse",
+    "canon eos r7 amazon warehouse",
 )
 
 DYNAMIC_QUERY_STOPWORDS: tuple[str, ...] = (
@@ -183,6 +226,34 @@ DYNAMIC_DISCOVERY_QUERY_CATALOG: dict[str, tuple[str, ...]] = {
         "fujifilm x t4 amazon warehouse",
         "lumix s5 amazon warehouse",
         "lumix g9 amazon warehouse",
+    ),
+    ProductCategory.SMARTWATCH.value: (
+        "apple watch ultra 2 amazon warehouse",
+        "apple watch ultra amazon warehouse",
+        "garmin fenix 7x pro sapphire amazon warehouse",
+        "garmin fenix 7 pro amazon warehouse",
+        "garmin epix pro gen 2 amazon warehouse",
+        "garmin forerunner 965 amazon warehouse",
+        "garmin forerunner 955 amazon warehouse",
+        "apple watch series 9 45mm amazon warehouse",
+        "apple watch series 10 46mm amazon warehouse",
+    ),
+    ProductCategory.DRONE.value: (
+        "dji mini 4 pro amazon warehouse",
+        "dji mini 3 pro amazon warehouse",
+        "dji air 3 amazon warehouse",
+        "dji mavic 3 classic amazon warehouse",
+        "dji avata 2 amazon warehouse",
+        "dji mini 3 amazon warehouse",
+        "dji air 2s amazon warehouse",
+    ),
+    ProductCategory.HANDHELD_CONSOLE.value: (
+        "steam deck oled 512gb amazon warehouse",
+        "steam deck 1tb amazon warehouse",
+        "asus rog ally z1 extreme amazon warehouse",
+        "rog ally x amazon warehouse",
+        "lenovo legion go amazon warehouse",
+        "msi claw a1m amazon warehouse",
     ),
     ProductCategory.GENERAL_TECH.value: (
         "macbook air m1 256gb amazon warehouse",
@@ -405,6 +476,40 @@ def _candidate_region(product: AmazonProduct) -> str:
     return "other"
 
 
+def _condition_bucket_from_product(product: AmazonProduct) -> str:
+    raw = str(getattr(product, "amazon_condition", "") or "").strip().lower()
+    if raw in {"like_new", "very_good", "good", "acceptable"}:
+        return raw
+    if "like" in raw or "nuovo" in raw:
+        return "like_new"
+    if "acceptable" in raw or "accett" in raw:
+        return "acceptable"
+    if "good" in raw or "buon" in raw:
+        return "good"
+    if "very" in raw or "ottim" in raw:
+        return "very_good"
+    return "unknown"
+
+
+def _price_bucket_eur(value: float) -> int:
+    step = 25.0
+    if value <= 0:
+        return 0
+    return int((value // step) * step)
+
+
+def _candidate_signature(
+    *,
+    normalized_name: str,
+    category: str,
+    price_eur: float,
+    condition: str,
+) -> str:
+    model = _normalize_for_scoring(normalized_name) or "n/a"
+    price_bucket = _price_bucket_eur(float(price_eur))
+    return f"{category}|{condition}|{price_bucket}|{model}"
+
+
 def _required_platforms_for_category(category: ProductCategory) -> tuple[str, ...]:
     return CATEGORY_REQUIRED_PLATFORMS.get(category, ("rebuy",))
 
@@ -506,9 +611,12 @@ def _weighted_slot_allocation(weights: dict[str, float], total_slots: int) -> di
 
 def _category_trend_weights(scoring_context: dict[str, Any]) -> dict[str, float]:
     weights: dict[str, float] = {
-        ProductCategory.APPLE_PHONE.value: 1.10,
-        ProductCategory.PHOTOGRAPHY.value: 0.95,
-        ProductCategory.GENERAL_TECH.value: 0.90,
+        ProductCategory.SMARTWATCH.value: 1.22,
+        ProductCategory.DRONE.value: 1.18,
+        ProductCategory.HANDHELD_CONSOLE.value: 1.12,
+        ProductCategory.APPLE_PHONE.value: 1.08,
+        ProductCategory.PHOTOGRAPHY.value: 0.88,
+        ProductCategory.GENERAL_TECH.value: 0.84,
     }
     category_spread = scoring_context.get("category_spread_median", {})
     trend_models = scoring_context.get("trend_models", [])
@@ -924,9 +1032,26 @@ def _coerce_product(raw: dict[str, Any]) -> AmazonProduct:
     if price_raw is None:
         raise ValueError(f"Product '{title}' missing price")
     price = float(price_raw)
-    category = ProductCategory.from_raw(str(raw.get("category", "")))
+    category_raw = str(raw.get("category", "")).strip()
+    category = ProductCategory.from_raw(category_raw if category_raw else title)
     source_marketplace_raw = raw.get("source_marketplace")
     source_marketplace = str(source_marketplace_raw).strip().lower() if source_marketplace_raw is not None else ""
+    amazon_condition_raw = raw.get("amazon_condition")
+    amazon_condition = str(amazon_condition_raw).strip().lower() if amazon_condition_raw is not None else ""
+    amazon_condition_conf_raw = raw.get("amazon_condition_confidence")
+    try:
+        amazon_condition_confidence = float(amazon_condition_conf_raw) if amazon_condition_conf_raw is not None else 0.0
+    except (TypeError, ValueError):
+        amazon_condition_confidence = 0.0
+    amazon_packaging_only = bool(raw.get("amazon_packaging_only", False))
+    if not amazon_condition:
+        inferred_condition, inferred_confidence, inferred_packaging = infer_amazon_warehouse_condition(title)
+        if inferred_condition:
+            amazon_condition = inferred_condition
+            amazon_condition_confidence = inferred_confidence
+        if inferred_packaging:
+            amazon_packaging_only = True
+
     return AmazonProduct(
         title=title,
         price_eur=price,
@@ -934,6 +1059,9 @@ def _coerce_product(raw: dict[str, Any]) -> AmazonProduct:
         ean=raw.get("ean"),
         url=raw.get("url"),
         source_marketplace=source_marketplace or None,
+        amazon_condition=amazon_condition or None,
+        amazon_condition_confidence=max(0.0, min(float(amazon_condition_confidence), 1.0)),
+        amazon_packaging_only=amazon_packaging_only,
     )
 
 
@@ -1013,9 +1141,12 @@ def _dedupe_products(products: list[AmazonProduct]) -> list[AmazonProduct]:
 
 def _legacy_priority_key(product: AmazonProduct) -> tuple[float, int, int]:
     category_weight = {
+        ProductCategory.SMARTWATCH: 0,
+        ProductCategory.DRONE: 1,
+        ProductCategory.HANDHELD_CONSOLE: 2,
         ProductCategory.APPLE_PHONE: 0,
-        ProductCategory.PHOTOGRAPHY: 1,
-        ProductCategory.GENERAL_TECH: 2,
+        ProductCategory.PHOTOGRAPHY: 3,
+        ProductCategory.GENERAL_TECH: 4,
     }
     return (
         float(product.price_eur),
@@ -1451,24 +1582,72 @@ async def _exclude_non_profitable_candidates(manager, products: list[AmazonProdu
             lookback_days=lookback_days,
             limit=max_rows,
         )
-    if not excluded_urls:
-        print("[scan] Exclusion cache: no historical under-threshold urls.")
+
+    excluded_signatures: set[str] = set()
+    get_rows = getattr(storage, "get_recent_scoring_rows", None)
+    if callable(get_rows):
+        try:
+            rows = await get_rows(lookback_days=lookback_days, limit=max_rows)
+        except Exception:
+            rows = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            spread = _to_float(row.get("spread_eur"))
+            if spread is None or spread > manager.min_spread_eur:
+                continue
+            normalized_name = str(row.get("normalized_name", "")).strip()
+            if not normalized_name:
+                continue
+            category = ProductCategory.from_raw(str(row.get("category", ""))).value
+            amazon_price = _to_float(row.get("amazon_price_eur"))
+            if amazon_price is None or amazon_price <= 0:
+                continue
+            raw_condition = str(row.get("amazon_condition", "") or "").strip().lower()
+            condition = raw_condition if raw_condition in {"like_new", "very_good", "good", "acceptable"} else "unknown"
+            excluded_signatures.add(
+                _candidate_signature(
+                    normalized_name=normalized_name,
+                    category=category,
+                    price_eur=amazon_price,
+                    condition=condition,
+                )
+            )
+
+    if not excluded_urls and not excluded_signatures:
+        print("[scan] Exclusion cache: no historical under-threshold urls/signatures.")
         return products
 
     filtered: list[AmazonProduct] = []
     removed_products: list[AmazonProduct] = []
     removed = 0
+    removed_url = 0
+    removed_signature = 0
     for product in products:
         normalized_url = _normalize_http_url(product.url)
         if normalized_url and normalized_url in excluded_urls:
             removed += 1
+            removed_url += 1
+            removed_products.append(product)
+            continue
+        signature = _candidate_signature(
+            normalized_name=product.title,
+            category=to_legacy_storage_category(product.category),
+            price_eur=float(product.price_eur),
+            condition=_condition_bucket_from_product(product),
+        )
+        if signature in excluded_signatures:
+            removed += 1
+            removed_signature += 1
             removed_products.append(product)
             continue
         filtered.append(product)
     window_label = f"daily({reset_timezone})" if since_iso else f"lookback_days={lookback_days}"
     print(
         "[scan] Exclusion cache applied | "
-        f"removed={removed} kept={len(filtered)} window={window_label} rows={len(excluded_urls)}"
+        f"removed={removed} kept={len(filtered)} window={window_label} "
+        f"url_rows={len(excluded_urls)} signature_rows={len(excluded_signatures)} "
+        f"removed_by_url={removed_url} removed_by_signature={removed_signature}"
     )
     min_keep = max(0, int(_env_or_default("EXCLUDE_MIN_KEEP", "0")))
     if min_keep > 0 and len(filtered) < min_keep and removed_products:
@@ -1531,7 +1710,7 @@ def _format_scan_summary(decisions: list, threshold: float) -> str:
         "🚀 Tech_Sniper_IT | Scan Report",
         "━━━━━━━━━━━━━━━━━━━━",
         "🔎 Scan completata",
-        "💡 Formula spread: offerta reseller - prezzo Amazon",
+        "💡 Formula spread netto: offerta reseller - prezzo Amazon - costi operativi - buffer rischio",
         f"📦 Prodotti analizzati: {len(decisions)}",
         f"🎯 Soglia spread: {threshold:.2f} EUR",
         f"✅ Opportunita sopra soglia: {len(profitable)}",
@@ -1560,15 +1739,21 @@ def _format_scan_summary(decisions: list, threshold: float) -> str:
         decision_label = "🔥 SI"
         display_name = decision.normalized_name or getattr(decision.product, "title", "n/d")
         category = getattr(getattr(decision.product, "category", None), "value", None) or "n/d"
+        amazon_condition = getattr(decision.product, "amazon_condition", None) or "n/d"
+        packaging_only = bool(getattr(decision.product, "amazon_packaging_only", False))
+        condition_tag = " 📦 solo packaging" if packaging_only else ""
         lines.extend(
             [
                 "",
                 f"{status_icon} Prodotto {index}: {display_name}",
                 f"🧾 Esito: {status_text}",
                 f"🏷️ Categoria: {category}",
+                f"🧪 Condizione Amazon: {amazon_condition}{condition_tag}",
                 f"💶 Amazon: {_format_eur(decision.product.price_eur)}",
                 f"🏆 Best offer: {_format_eur(best_offer.offer_eur if best_offer else None)} ({platform_name})",
                 f"{platform_icon} Reseller top: {platform_name}",
+                f"📉 Spread lordo: {_format_signed_eur(getattr(decision, 'spread_gross_eur', None))}",
+                f"🛡️ Buffer rischio: {_format_eur(getattr(decision, 'risk_buffer_eur', 0.0))} | costi: {_format_eur(getattr(decision, 'operating_cost_eur', 0.0))}",
                 f"📈 Spread netto: {spread}",
                 f"🚨 Opportunita: {decision_label}",
                 f"🧠 AI match: {_ai_usage_label(decision)}",
@@ -1751,8 +1936,13 @@ async def _run_scan_command(payload: dict[str, Any]) -> int:
                     "ai_mode": getattr(decision, "ai_mode", None),
                     "ai_used": getattr(decision, "ai_used", False),
                     "amazon_price": decision.product.price_eur,
+                    "amazon_condition": getattr(decision.product, "amazon_condition", None),
+                    "amazon_packaging_only": getattr(decision.product, "amazon_packaging_only", False),
                     "best_offer": best,
                     "best_platform": decision.best_offer.platform if decision.best_offer else None,
+                    "spread_gross_eur": getattr(decision, "spread_gross_eur", None),
+                    "risk_buffer_eur": getattr(decision, "risk_buffer_eur", 0.0),
+                    "operating_cost_eur": getattr(decision, "operating_cost_eur", 0.0),
                     "spread_eur": decision.spread_eur,
                     "should_notify": decision.should_notify,
                     "offers": [_offer_log_payload(item) for item in decision.offers],
@@ -1788,7 +1978,7 @@ async def _run_status_command(payload: dict[str, Any]) -> int:
     lines = [
         "🤖 Tech_Sniper_IT status:",
         "⚙️ worker: online",
-        f"🎯 threshold spread (offer-amazon): {manager.min_spread_eur:.2f} EUR",
+        f"🎯 threshold spread netto: {manager.min_spread_eur:.2f} EUR",
         f"🧠 ai: gemini={'on' if gemini_present else 'off'}, openrouter={'on' if openrouter_present else 'off'}",
         f"🗄️ supabase: {'on' if manager.storage else 'off'}",
         f"💬 telegram alerts default chat: {'on' if manager.notifier else 'off'}",

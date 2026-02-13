@@ -15,7 +15,7 @@ from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import async_playwright
 
 from tech_sniper_it.models import ProductCategory
-from tech_sniper_it.utils import parse_eur_price
+from tech_sniper_it.utils import infer_amazon_warehouse_condition, parse_eur_price
 
 
 MARKETPLACE_HOSTS: dict[str, str] = {
@@ -867,12 +867,20 @@ def _extract_products_from_html(html: str, host: str) -> list[dict[str, Any]]:
             continue
 
         category = ProductCategory.from_raw(title).value
+        condition_label, condition_confidence, packaging_only = infer_amazon_warehouse_condition(
+            f"{title} {row.get_text(' ', strip=True)}"
+        )
         item: dict[str, Any] = {
             "title": title,
             "price_eur": float(price),
             "category": category,
             "url": url,
         }
+        if condition_label:
+            item["amazon_condition"] = condition_label
+            item["amazon_condition_confidence"] = float(condition_confidence)
+        if packaging_only:
+            item["amazon_packaging_only"] = True
         displayed_price = price_details.get("displayed_price_eur")
         if isinstance(displayed_price, (int, float)):
             item["displayed_price_eur"] = float(displayed_price)

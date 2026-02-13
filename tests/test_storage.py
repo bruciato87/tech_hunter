@@ -90,6 +90,35 @@ async def test_save_opportunity_inserts_expected_payload(monkeypatch: pytest.Mon
 
 
 @pytest.mark.asyncio
+async def test_save_opportunity_maps_extended_category_to_legacy(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_client = FakeSupabaseClient()
+    monkeypatch.setattr("tech_sniper_it.storage.create_client", lambda _url, _key: fake_client)
+
+    storage = SupabaseStorage(url="https://supabase.local", key="service-role-key", table="arbitrage_opportunities")
+    decision = ArbitrageDecision(
+        product=AmazonProduct(
+            title="DJI Mini 4 Pro",
+            price_eur=640.0,
+            category=ProductCategory.DRONE,
+        ),
+        normalized_name="DJI Mini 4 Pro",
+        offers=[ValuationResult(platform="mpb", normalized_name="DJI Mini 4 Pro", offer_eur=690.0)],
+        best_offer=ValuationResult(
+            platform="mpb",
+            normalized_name="DJI Mini 4 Pro",
+            offer_eur=690.0,
+            condition="ottimo",
+        ),
+        spread_eur=50.0,
+        should_notify=True,
+    )
+
+    await storage.save_opportunity(decision)
+    payload = fake_client.table_query.insert_payload
+    assert payload["category"] == "general_tech"
+
+
+@pytest.mark.asyncio
 async def test_get_recent_opportunities_clamps_limit(monkeypatch: pytest.MonkeyPatch) -> None:
     fake_client = FakeSupabaseClient()
     monkeypatch.setattr("tech_sniper_it.storage.create_client", lambda _url, _key: fake_client)

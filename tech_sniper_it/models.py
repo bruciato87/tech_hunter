@@ -9,15 +9,24 @@ from typing import Any
 class ProductCategory(str, Enum):
     PHOTOGRAPHY = "photography"
     APPLE_PHONE = "apple_phone"
+    SMARTWATCH = "smartwatch"
+    DRONE = "drone"
+    HANDHELD_CONSOLE = "handheld_console"
     GENERAL_TECH = "general_tech"
 
     @classmethod
     def from_raw(cls, raw: str) -> "ProductCategory":
         value = (raw or "").strip().lower()
-        if cls._is_photography(value):
-            return cls.PHOTOGRAPHY
         if cls._is_apple_phone(value):
             return cls.APPLE_PHONE
+        if cls._is_smartwatch(value):
+            return cls.SMARTWATCH
+        if cls._is_drone(value):
+            return cls.DRONE
+        if cls._is_handheld_console(value):
+            return cls.HANDHELD_CONSOLE
+        if cls._is_photography(value):
+            return cls.PHOTOGRAPHY
         return cls.GENERAL_TECH
 
     @staticmethod
@@ -59,6 +68,53 @@ class ProductCategory(str, Enum):
             return True
         return False
 
+    @staticmethod
+    def _is_smartwatch(value: str) -> bool:
+        tokens = (
+            "smartwatch",
+            "apple watch",
+            "watch ultra",
+            "garmin fenix",
+            "garmin epix",
+            "garmin forerunner",
+            "galaxy watch",
+            "suunto",
+            "ticwatch",
+        )
+        return any(token in value for token in tokens)
+
+    @staticmethod
+    def _is_drone(value: str) -> bool:
+        tokens = (
+            "drone",
+            "dji mini",
+            "dji air",
+            "dji mavic",
+            "dji avata",
+            "mavic",
+            "quadcopter",
+        )
+        return any(token in value for token in tokens)
+
+    @staticmethod
+    def _is_handheld_console(value: str) -> bool:
+        tokens = (
+            "steam deck",
+            "rog ally",
+            "legion go",
+            "handheld console",
+            "console portatile",
+            "portable console",
+        )
+        return any(token in value for token in tokens)
+
+
+def to_legacy_storage_category(category: ProductCategory) -> str:
+    # Supabase check constraints may still accept only legacy categories.
+    if category in {ProductCategory.PHOTOGRAPHY, ProductCategory.APPLE_PHONE, ProductCategory.GENERAL_TECH}:
+        return category.value
+    return ProductCategory.GENERAL_TECH.value
+
 
 @dataclass(slots=True)
 class AmazonProduct:
@@ -68,6 +124,9 @@ class AmazonProduct:
     ean: str | None = None
     url: str | None = None
     source_marketplace: str | None = None
+    amazon_condition: str | None = None
+    amazon_condition_confidence: float = 0.0
+    amazon_packaging_only: bool = False
 
 
 @dataclass(slots=True)
@@ -94,6 +153,9 @@ class ArbitrageDecision:
     best_offer: ValuationResult | None
     spread_eur: float | None
     should_notify: bool
+    spread_gross_eur: float | None = None
+    operating_cost_eur: float = 0.0
+    risk_buffer_eur: float = 0.0
     ai_provider: str | None = None
     ai_model: str | None = None
     ai_mode: str | None = None

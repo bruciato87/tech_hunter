@@ -55,6 +55,55 @@ def _valuator_parallel_limit(platform: str) -> int:
     return max(1, min(value, 12))
 
 
+def _operating_cost_eur() -> float:
+    try:
+        value = float(_env_or_default("SPREAD_OPERATING_COST_EUR", "0"))
+    except ValueError:
+        value = 0.0
+    return max(0.0, min(value, 400.0))
+
+
+def _condition_risk_base(condition: str | None) -> float:
+    def _risk_env(name: str, default: str) -> float:
+        try:
+            parsed = float(_env_or_default(name, default))
+        except ValueError:
+            parsed = float(default)
+        return max(0.0, parsed)
+
+    value = (condition or "").strip().lower()
+    if not value:
+        return _risk_env("RISK_BUFFER_UNKNOWN_EUR", "0")
+    if value in {"acceptable", "accettabile"}:
+        return _risk_env("RISK_BUFFER_ACCEPTABLE_EUR", "26")
+    if value in {"good", "buono"}:
+        return _risk_env("RISK_BUFFER_GOOD_EUR", "14")
+    if value in {"very_good", "ottimo"}:
+        return _risk_env("RISK_BUFFER_VERY_GOOD_EUR", "9")
+    if value in {"like_new", "come_nuovo"}:
+        return _risk_env("RISK_BUFFER_LIKE_NEW_EUR", "5")
+    return _risk_env("RISK_BUFFER_UNKNOWN_EUR", "0")
+
+
+def _condition_risk_buffer(product: AmazonProduct) -> float:
+    base = _condition_risk_base(getattr(product, "amazon_condition", None))
+    if base <= 0:
+        return 0.0
+    if bool(getattr(product, "amazon_packaging_only", False)):
+        try:
+            multiplier = float(_env_or_default("RISK_BUFFER_PACKAGING_ONLY_FACTOR", "0.45"))
+        except ValueError:
+            multiplier = 0.45
+        base *= max(0.1, min(multiplier, 1.0))
+    confidence = float(getattr(product, "amazon_condition_confidence", 0.0) or 0.0)
+    confidence = max(0.0, min(confidence, 1.0))
+    if confidence <= 0:
+        return round(base, 2)
+    # Lower confidence means larger safety buffer.
+    uncertainty_bonus = max(0.0, (0.70 - confidence) * 12.0)
+    return round(base + uncertainty_bonus, 2)
+
+
 def _should_backoff_result(result: ValuationResult) -> bool:
     platform = (result.platform or "").strip().lower()
     if not platform:
@@ -213,6 +262,12 @@ class ArbitrageManager:
         common = {"headless": self.headless, "nav_timeout_ms": self.nav_timeout_ms}
         if category == ProductCategory.PHOTOGRAPHY:
             return [MPBValuator(**common), RebuyValuator(**common)]
+        if category == ProductCategory.SMARTWATCH:
+            return [TrendDeviceValuator(**common), RebuyValuator(**common)]
+        if category == ProductCategory.DRONE:
+            return [MPBValuator(**common), RebuyValuator(**common)]
+        if category == ProductCategory.HANDHELD_CONSOLE:
+            return [RebuyValuator(**common)]
         if category == ProductCategory.APPLE_PHONE:
             return [TrendDeviceValuator(**common), RebuyValuator(**common)]
         return [RebuyValuator(**common)]
@@ -236,13 +291,19 @@ class ArbitrageManager:
         cloned_offers = [self._clone_offer(item) for item in offers]
         valid_offers = [item for item in cloned_offers if item.is_valid and item.offer_eur is not None]
         best_offer = max(valid_offers, key=lambda item: item.offer_eur) if valid_offers else None
-        spread = round(best_offer.offer_eur - product.price_eur, 2) if best_offer and best_offer.offer_eur is not None else None
+        gross_spread = (
+            round(best_offer.offer_eur - product.price_eur, 2) if best_offer and best_offer.offer_eur is not None else None
+        )
+        operating_cost = _operating_cost_eur()
+        risk_buffer = _condition_risk_buffer(product)
+        spread = round(gross_spread - operating_cost - risk_buffer, 2) if gross_spread is not None else None
         should_notify = spread is not None and spread > self.min_spread_eur
         print(
             "[scan] Decision -> "
             f"best_platform={best_offer.platform if best_offer else None} | "
             f"best_offer={best_offer.offer_eur if best_offer else None} | "
-            f"spread={spread} | should_notify={should_notify}"
+            f"spread_gross={gross_spread} | operating_cost={operating_cost} | risk_buffer={risk_buffer} | "
+            f"spread_net={spread} | should_notify={should_notify}"
         )
         usage = ai_usage or {}
         return ArbitrageDecision(
@@ -252,6 +313,9 @@ class ArbitrageManager:
             best_offer=best_offer,
             spread_eur=spread,
             should_notify=should_notify,
+            spread_gross_eur=gross_spread,
+            operating_cost_eur=operating_cost,
+            risk_buffer_eur=risk_buffer,
             ai_provider=str(usage.get("provider") or "heuristic"),
             ai_model=str(usage.get("model")) if usage.get("model") else None,
             ai_mode=str(usage.get("mode") or "fallback"),

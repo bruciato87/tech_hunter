@@ -6,12 +6,17 @@ Serverless-friendly arbitrage worker for Amazon Warehouse IT -> recommerce valua
 
 - `photography` -> query `MPB + Rebuy`, keep max offer.
 - `apple_phone` -> query `TrendDevice + Rebuy`, keep max offer.
+- `smartwatch` -> query `TrendDevice + Rebuy`, keep max offer.
+- `drone` -> query `MPB + Rebuy`, keep max offer.
+- `handheld_console` -> query `Rebuy`.
 - `general_tech` -> query `Rebuy`.
 - Grade simulation for resale condition:
   - TrendDevice: `Grado A`
   - MPB: `Ottimo`
   - Rebuy: `Come nuovo`
-- If `spread_eur > MIN_SPREAD_EUR` (default `40`) -> save to Supabase + Telegram notification.
+- Net spread formula:
+  - `spread_net = best_offer - amazon_price - operating_cost - risk_buffer(condition)`
+- If `spread_net > MIN_SPREAD_EUR` (default `40`) -> save to Supabase + Telegram notification.
 
 ## Quick Start
 
@@ -60,6 +65,13 @@ python -m tech_sniper_it.worker
 - `OPENROUTER_MODEL_NOT_FOUND_COOLDOWN_SECONDS` (default: `86400`)
 - `OPENROUTER_MODEL_TRANSIENT_COOLDOWN_SECONDS` (default: `120`)
 - `MIN_SPREAD_EUR` (default: `40`)
+- `SPREAD_OPERATING_COST_EUR` (default: `0`, flat cost deducted from spread before threshold check)
+- `RISK_BUFFER_ACCEPTABLE_EUR` (default: `26`)
+- `RISK_BUFFER_GOOD_EUR` (default: `14`)
+- `RISK_BUFFER_VERY_GOOD_EUR` (default: `9`)
+- `RISK_BUFFER_LIKE_NEW_EUR` (default: `5`)
+- `RISK_BUFFER_UNKNOWN_EUR` (default: `0`)
+- `RISK_BUFFER_PACKAGING_ONLY_FACTOR` (default: `0.45`, reduces risk buffer when condition suggests packaging-only defects)
 - `MAX_PARALLEL_PRODUCTS` (default: `3`)
 - `SCAN_TARGET_PRODUCTS` (default: `12`)
 - `SCAN_CANDIDATE_MULTIPLIER` (default: `4`)

@@ -125,6 +125,43 @@ async def test_manager_handles_all_invalid_offers() -> None:
     assert decision.should_notify is False
 
 
+@pytest.mark.asyncio
+async def test_manager_applies_condition_risk_and_operating_cost(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("RISK_BUFFER_ACCEPTABLE_EUR", "20")
+    monkeypatch.setenv("SPREAD_OPERATING_COST_EUR", "5")
+    manager = ManagerUnderTest(
+        valuators=[StaticValuator("rebuy", 640.0)],
+        ai_balancer=FakeBalancer(gemini_keys=[], openrouter_keys=[]),
+        min_spread_eur=100.0,
+    )
+    product = AmazonProduct(
+        title="Apple iPhone 14 Pro 128GB",
+        price_eur=500.0,
+        category=ProductCategory.APPLE_PHONE,
+        amazon_condition="acceptable",
+        amazon_condition_confidence=1.0,
+    )
+
+    decision = await manager.evaluate_product(product)
+
+    assert decision.spread_gross_eur == 140.0
+    assert decision.operating_cost_eur == 5.0
+    assert decision.risk_buffer_eur == 20.0
+    assert decision.spread_eur == 115.0
+    assert decision.should_notify is True
+
+
+def test_manager_build_valuators_routes_new_categories() -> None:
+    manager = ArbitrageManager(
+        ai_balancer=FakeBalancer(gemini_keys=[], openrouter_keys=[]),
+        min_spread_eur=40.0,
+    )
+
+    assert [v.platform_name for v in manager._build_valuators(ProductCategory.SMARTWATCH)] == ["trenddevice", "rebuy"]
+    assert [v.platform_name for v in manager._build_valuators(ProductCategory.DRONE)] == ["mpb", "rebuy"]
+    assert [v.platform_name for v in manager._build_valuators(ProductCategory.HANDHELD_CONSOLE)] == ["rebuy"]
+
+
 def test_build_default_manager_uses_fallback_supabase_table(monkeypatch: pytest.MonkeyPatch) -> None:
     captured = {}
 

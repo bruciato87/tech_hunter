@@ -35,10 +35,11 @@ def test_extract_products_from_html_parses_title_price_and_url() -> None:
         <div data-component-type="s-search-result">
           <h2>
             <a href="/Apple-iPhone-14-Pro-128GB/dp/B0ABCDE123/ref=sr_1_1">
-              <span>Apple iPhone 14 Pro 128GB Ricondizionato</span>
+              <span>Apple iPhone 14 Pro 128GB Usato - Condizioni accettabili</span>
             </a>
           </h2>
           <span class="a-price"><span class="a-offscreen">679,00 €</span></span>
+          <span>Confezione danneggiata</span>
         </div>
       </body>
     </html>
@@ -46,10 +47,12 @@ def test_extract_products_from_html_parses_title_price_and_url() -> None:
     items = _extract_products_from_html(html, "www.amazon.it")
     assert len(items) == 1
     item = items[0]
-    assert item["title"] == "Apple iPhone 14 Pro 128GB Ricondizionato"
+    assert item["title"] == "Apple iPhone 14 Pro 128GB Usato - Condizioni accettabili"
     assert item["price_eur"] == 679.0
     assert item["displayed_price_eur"] == 679.0
     assert item["category"] == "apple_phone"
+    assert item["amazon_condition"] == "acceptable"
+    assert item["amazon_packaging_only"] is True
     assert item["url"] == "https://www.amazon.it/dp/B0ABCDE123"
 
 
