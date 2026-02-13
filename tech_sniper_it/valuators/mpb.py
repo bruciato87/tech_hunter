@@ -16,7 +16,7 @@ from playwright.async_api import async_playwright
 
 from tech_sniper_it.models import AmazonProduct
 from tech_sniper_it.utils import decode_json_dict_maybe_base64, parse_eur_price
-from tech_sniper_it.valuators.base import BaseValuator
+from tech_sniper_it.valuators.base import BaseValuator, ValuatorRuntimeError
 
 
 DEFAULT_USER_AGENTS: tuple[str, ...] = (
@@ -502,16 +502,18 @@ class MPBValuator(BaseValuator):
         blocked_remaining = _mpb_block_remaining_seconds()
         if blocked_remaining > 0:
             reason = _MPB_BLOCK_REASON or "anti-bot challenge"
-            raise RuntimeError(
-                f"MPB temporarily paused after anti-bot challenge ({reason}); retry in ~{blocked_remaining}s."
+            raise ValuatorRuntimeError(
+                f"MPB temporarily paused after anti-bot challenge ({reason}); retry in ~{blocked_remaining}s.",
+                payload={"block_reason": reason},
             )
         max_attempts = max(1, int(_env_or_default("MPB_MAX_ATTEMPTS", "3")))
         query_candidates = _build_query_variants(product, normalized_name)
         storage_state_path = _load_storage_state_b64()
         if _mpb_require_storage_state() and storage_state_path is None:
             reason = _MPB_STORAGE_STATE_ERROR or "missing"
-            raise RuntimeError(
-                f"MPB storage_state missing/invalid ({reason}); set MPB_STORAGE_STATE_B64 or disable MPB_REQUIRE_STORAGE_STATE."
+            raise ValuatorRuntimeError(
+                f"MPB storage_state missing/invalid ({reason}); set MPB_STORAGE_STATE_B64 or disable MPB_REQUIRE_STORAGE_STATE.",
+                payload={"storage_state": False, "storage_state_error": reason},
             )
         payload: dict[str, Any] = {
             "query": query_candidates[0] if query_candidates else normalized_name,
@@ -768,8 +770,17 @@ class MPBValuator(BaseValuator):
 
         if blocker_hits:
             _mark_mpb_temporarily_blocked("turnstile/cloudflare")
-            raise RuntimeError("MPB blocked by anti-bot challenge (turnstile/cloudflare).")
-        raise RuntimeError("MPB price not found after retries.")
+            payload["blocker_hits"] = blocker_hits[:40]
+            raise ValuatorRuntimeError(
+                "MPB blocked by anti-bot challenge (turnstile/cloudflare).",
+                payload=payload,
+                source_url=self.base_url,
+            )
+        raise ValuatorRuntimeError(
+            "MPB price not found after retries.",
+            payload=payload,
+            source_url=self.base_url,
+        )
 
     async def _detect_page_blockers(self, page: Page) -> list[str]:
         try:

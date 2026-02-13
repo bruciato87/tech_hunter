@@ -13,6 +13,13 @@ from tech_sniper_it.models import AmazonProduct, ValuationResult
 from tech_sniper_it.valuators.ui_resilience import keyword_presence, selector_candidates, ui_signature
 
 
+class ValuatorRuntimeError(RuntimeError):
+    def __init__(self, message: str, *, payload: dict[str, Any] | None = None, source_url: str | None = None) -> None:
+        super().__init__(message)
+        self.payload = payload if isinstance(payload, dict) else {}
+        self.source_url = source_url
+
+
 class BaseValuator(ABC):
     platform_name: str = "base"
     condition_label: str = "grade_a"
@@ -33,13 +40,19 @@ class BaseValuator(ABC):
                 raw_payload=payload,
             )
         except Exception as exc:
+            payload = {"error_type": type(exc).__name__}
+            source_url = None
+            if isinstance(exc, ValuatorRuntimeError):
+                payload.update(exc.payload)
+                source_url = exc.source_url
             return ValuationResult(
                 platform=self.platform_name,
                 normalized_name=normalized_name,
                 offer_eur=None,
                 condition=self.condition_label,
                 error=str(exc),
-                raw_payload={"error_type": type(exc).__name__},
+                source_url=source_url,
+                raw_payload=payload,
             )
 
     @abstractmethod

@@ -16,7 +16,7 @@ from playwright.async_api import async_playwright
 
 from tech_sniper_it.models import AmazonProduct
 from tech_sniper_it.utils import decode_json_dict_maybe_base64, parse_eur_price
-from tech_sniper_it.valuators.base import BaseValuator
+from tech_sniper_it.valuators.base import BaseValuator, ValuatorRuntimeError
 
 PRICE_HINTS: tuple[str, ...] = (
     "ti paghiamo",
@@ -717,6 +717,16 @@ class RebuyValuator(BaseValuator):
                         source = "network-context"
                     if price is None:
                         return
+                    snippet_norm = re.sub(r"\s+", " ", (snippet or "")).strip().lower()
+                    if source == "network-context":
+                        # Contextual prices are noisy; accept only if they look like explicit buyback cash-out.
+                        if not any(
+                            term in snippet_norm
+                            for term in ("pagamento diretto", "offerta preliminare", "ti paghiamo", "ricevi")
+                        ):
+                            return
+                    if any(blocker in snippet_norm for blocker in ("fino a", "a partire da", "promo", "buono")):
+                        return
                     network_price_candidates.append(
                         {
                             "price": float(price),
@@ -858,8 +868,10 @@ class RebuyValuator(BaseValuator):
                         if rescue["offer"] is not None:
                             payload["price_source"] = "deep_link_rescue"
                             return rescue["offer"], rescue["url"], payload
-                    raise RuntimeError(
-                        f"Rebuy low-confidence match ({detail}); discarded to prevent false-positive."
+                    raise ValuatorRuntimeError(
+                        f"Rebuy low-confidence match ({detail}); discarded to prevent false-positive.",
+                        payload=payload,
+                        source_url=resolved_source_url or page.url,
                     )
 
                 # Complete remaining wizard steps (e.g. accessories) until we see an offer.
@@ -971,7 +983,11 @@ class RebuyValuator(BaseValuator):
                         expected_keywords=["rebuy", "vendere", "offerta", "pagamento", "€"],
                     )
                     last_state = payload.get("wizard_states", [])[-1]["state"] if payload.get("wizard_states") else "unknown"
-                    raise RuntimeError(f"Rebuy price not found after adaptive fallbacks (wizard_state={last_state}).")
+                    raise ValuatorRuntimeError(
+                        f"Rebuy price not found after adaptive fallbacks (wizard_state={last_state}).",
+                        payload=payload,
+                        source_url=resolved_source_url or page.url,
+                    )
                 payload["price_source"] = str(payload.get("price_source") or "dom")
                 return price, resolved_source_url or page.url, payload
             finally:

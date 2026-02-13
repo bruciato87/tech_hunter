@@ -17,7 +17,7 @@ from playwright.async_api import async_playwright
 
 from tech_sniper_it.models import AmazonProduct, ProductCategory
 from tech_sniper_it.utils import decode_json_dict_maybe_base64, detect_color_variants, extract_capacity_gb, parse_eur_price
-from tech_sniper_it.valuators.base import BaseValuator
+from tech_sniper_it.valuators.base import BaseValuator, ValuatorRuntimeError
 
 
 STEP_DEVICE_FAMILY = "device_family"
@@ -1181,8 +1181,10 @@ class TrendDeviceValuator(BaseValuator):
         payload["match_quality"] = match
         if not match.get("ok"):
             reason = str(match.get("reason", "low-confidence"))
-            raise RuntimeError(
-                f"TrendDevice low-confidence match ({reason}); discarded to prevent false-positive."
+            raise ValuatorRuntimeError(
+                f"TrendDevice low-confidence match ({reason}); discarded to prevent false-positive.",
+                payload=payload,
+                source_url=source_url,
             )
 
     async def _fetch_offer(
@@ -1325,7 +1327,11 @@ class TrendDeviceValuator(BaseValuator):
                 await page.goto(self.base_url, wait_until="domcontentloaded")
                 hostname = (urlparse(page.url).hostname or "").lower()
                 if "trendevice.com" not in hostname:
-                    raise RuntimeError(f"Unexpected TrendDevice hostname: {hostname or 'n/a'}")
+                    raise ValuatorRuntimeError(
+                        f"Unexpected TrendDevice hostname: {hostname or 'n/a'}",
+                        payload=payload,
+                        source_url=page.url,
+                    )
 
                 await self._accept_cookie_if_present(page)
                 await self._click_first(
@@ -1512,7 +1518,11 @@ class TrendDeviceValuator(BaseValuator):
                                         payload=payload,
                                     )
                                     return network_price, page.url, payload
-                                raise RuntimeError("TrendDevice wizard reset after model selection (catalog route unavailable).")
+                                raise ValuatorRuntimeError(
+                                    "TrendDevice wizard reset after model selection (catalog route unavailable).",
+                                    payload=payload,
+                                    source_url=page.url,
+                                )
 
                     chosen = _pick_wizard_option(
                         step=step_name,
@@ -1571,7 +1581,11 @@ class TrendDeviceValuator(BaseValuator):
                         stage="price_missing",
                         expected_keywords=["offerta", "valutazione", "ricevi", "€"],
                     )
-                    raise RuntimeError(f"TrendDevice price not found after wizard ({reason})")
+                    raise ValuatorRuntimeError(
+                        f"TrendDevice price not found after wizard ({reason})",
+                        payload=payload,
+                        source_url=page.url,
+                    )
                 payload["price_source"] = str(payload.get("price_source") or "dom")
                 self._validate_match_or_raise(
                     product=product,

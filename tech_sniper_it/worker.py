@@ -954,6 +954,16 @@ def _offer_log_payload(offer) -> dict[str, Any]:  # noqa: ANN001
     ui_drift = any(isinstance(item, dict) and bool(item.get("drift_suspected")) for item in probe_rows)
     adaptive_fallbacks = raw_payload.get("adaptive_fallbacks", {})
     network_candidates = raw_payload.get("network_price_candidates")
+    network_top = None
+    if isinstance(network_candidates, list) and network_candidates:
+        first = network_candidates[-1]
+        if isinstance(first, dict):
+            network_top = {
+                "price": first.get("price") or first.get("value"),
+                "source": first.get("source"),
+                "url": _safe_text(first.get("url"), max_len=160),
+                "snippet": _safe_text(first.get("snippet"), max_len=160),
+            }
     return {
         "platform": getattr(offer, "platform", "unknown"),
         "offer_eur": getattr(offer, "offer_eur", None),
@@ -967,6 +977,7 @@ def _offer_log_payload(offer) -> dict[str, Any]:  # noqa: ANN001
         "adaptive_fallbacks": adaptive_fallbacks if isinstance(adaptive_fallbacks, dict) else {},
         "price_source": raw_payload.get("price_source"),
         "network_candidates_count": len(network_candidates) if isinstance(network_candidates, list) else 0,
+        "network_top_candidate": network_top,
         "storage_state_used": bool(raw_payload.get("storage_state", False)),
     }
 
