@@ -802,6 +802,15 @@ def _cart_pricing_force_empty_after_host() -> bool:
     return _is_truthy_env("AMAZON_WAREHOUSE_CART_PRICING_FORCE_EMPTY_AFTER_HOST", "true")
 
 
+def _cart_pricing_min_add_delta_eur() -> float:
+    raw = _env_or_default("AMAZON_WAREHOUSE_CART_PRICING_MIN_ADD_DELTA_EUR", "25")
+    try:
+        value = float(raw)
+    except ValueError:
+        value = 25.0
+    return max(0.0, min(value, 500.0))
+
+
 def _retry_delay_for_attempt(base_ms: int, attempt: int) -> int:
     multiplier = max(1, 2 ** max(0, attempt - 1))
     jitter = random.randint(0, 250)
@@ -1271,15 +1280,16 @@ def _infer_cart_addition(before: dict[str, Any], after: dict[str, Any], target_a
     delta_total = _positive_delta(after.get("total_price"), before.get("total_price"))
     delta_subtotal = _positive_delta(after.get("subtotal_price"), before.get("subtotal_price"))
     target_in_cart = bool(after.get("target_in_cart"))
-    inferred = bool(
-        target_in_cart
-        or new_asins
-        or row_gain > 0
-        or (isinstance(delta_total, (int, float)) and delta_total > 0)
-        or (isinstance(delta_subtotal, (int, float)) and delta_subtotal > 0)
+    min_delta = _cart_pricing_min_add_delta_eur()
+    strong_signal = bool(target_in_cart or new_asins or row_gain > 0)
+    delta_signal = bool(
+        (isinstance(delta_total, (int, float)) and float(delta_total) >= min_delta)
+        or (isinstance(delta_subtotal, (int, float)) and float(delta_subtotal) >= min_delta)
     )
+    inferred = bool(strong_signal or delta_signal)
     return {
         "added": inferred,
+        "strong": strong_signal,
         "target_asin": target,
         "target_in_cart": target_in_cart,
         "new_asins": new_asins,
@@ -1665,6 +1675,7 @@ async def _resolve_cart_net_price(
         addition = _infer_cart_addition(before, after, asin)
         result["cart_addition"] = {
             "added": bool(addition.get("added")),
+            "strong": bool(addition.get("strong")),
             "target_in_cart": bool(addition.get("target_in_cart")),
             "asin_mismatch": bool(addition.get("asin_mismatch")),
             "new_asins": list(addition.get("new_asins") or []),
@@ -1675,6 +1686,7 @@ async def _resolve_cart_net_price(
         if not addition.get("added"):
             result["reason"] = "not-found-in-cart-after-add"
             return result
+        strong_addition = bool(addition.get("strong"))
         if addition.get("asin_mismatch"):
             result["reason_hint"] = "target-asin-mismatch"
         subtotal = after.get("subtotal_price")
@@ -1702,11 +1714,18 @@ async def _resolve_cart_net_price(
                 else:
                     net_price = float(delta_subtotal)
                     result["net_price_source"] = "delta_subtotal"
-        if net_price is None and isinstance(total_price, (int, float)) and total_price > 0 and before.get("is_empty"):
+        if (
+            net_price is None
+            and strong_addition
+            and isinstance(total_price, (int, float))
+            and total_price > 0
+            and before.get("is_empty")
+        ):
             net_price = float(total_price)
             result["net_price_source"] = "cart_total"
         elif (
             net_price is None
+            and strong_addition
             and isinstance(subtotal, (int, float))
             and isinstance(promo_discount, (int, float))
             and subtotal > promo_discount
@@ -1715,6 +1734,7 @@ async def _resolve_cart_net_price(
             result["net_price_source"] = "subtotal_minus_promo"
         elif (
             net_price is None
+            and strong_addition
             and require_empty_cart
             and before.get("is_empty")
             and isinstance(subtotal, (int, float))
@@ -1722,10 +1742,21 @@ async def _resolve_cart_net_price(
         ):
             net_price = float(subtotal)
             result["net_price_source"] = "subtotal_empty_cart"
-        elif net_price is None and isinstance(row_price, (int, float)) and row_price > 0:
+        elif (
+            net_price is None
+            and strong_addition
+            and isinstance(row_price, (int, float))
+            and row_price > 0
+        ):
             net_price = float(row_price)
             result["net_price_source"] = "row_price"
-        elif net_price is None and isinstance(subtotal, (int, float)) and subtotal > 0 and before.get("is_empty"):
+        elif (
+            net_price is None
+            and strong_addition
+            and isinstance(subtotal, (int, float))
+            and subtotal > 0
+            and before.get("is_empty")
+        ):
             net_price = float(subtotal)
             result["net_price_source"] = "subtotal_fallback"
         if net_price is None:

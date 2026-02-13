@@ -384,6 +384,50 @@ def test_infer_cart_addition_rejects_when_no_cart_change_detected() -> None:
     assert result["new_asins"] == []
 
 
+def test_infer_cart_addition_rejects_small_delta_without_row_or_asin_signal(monkeypatch) -> None:  # noqa: ANN001
+    monkeypatch.setenv("AMAZON_WAREHOUSE_CART_PRICING_MIN_ADD_DELTA_EUR", "25")
+    before = {
+        "row_count": 0,
+        "cart_asins": [],
+        "subtotal_price": None,
+        "total_price": 10.0,
+        "target_in_cart": False,
+    }
+    after = {
+        "row_count": 0,
+        "cart_asins": [],
+        "subtotal_price": None,
+        "total_price": 17.96,
+        "target_in_cart": False,
+    }
+    result = _infer_cart_addition(before, after, "B0ABCDE123")
+    assert result["added"] is False
+    assert result["strong"] is False
+    assert result["delta_total"] == 7.96
+
+
+def test_infer_cart_addition_accepts_large_delta_signal(monkeypatch) -> None:  # noqa: ANN001
+    monkeypatch.setenv("AMAZON_WAREHOUSE_CART_PRICING_MIN_ADD_DELTA_EUR", "25")
+    before = {
+        "row_count": 0,
+        "cart_asins": [],
+        "subtotal_price": None,
+        "total_price": 0.0,
+        "target_in_cart": False,
+    }
+    after = {
+        "row_count": 0,
+        "cart_asins": [],
+        "subtotal_price": None,
+        "total_price": 129.9,
+        "target_in_cart": False,
+    }
+    result = _infer_cart_addition(before, after, "B0ABCDE123")
+    assert result["added"] is True
+    assert result["strong"] is False
+    assert result["delta_total"] == 129.9
+
+
 def test_parse_cart_summary_falls_back_to_subtotal_minus_promo_when_total_missing() -> None:
     html = """
     <html>
