@@ -312,6 +312,40 @@ def test_manager_build_valuators_routes_new_categories() -> None:
     assert [v.platform_name for v in manager._build_valuators(ProductCategory.HANDHELD_CONSOLE)] == ["rebuy"]
 
 
+@pytest.mark.asyncio
+async def test_manager_runtime_filter_skips_trenddevice_for_non_apple_smartwatch() -> None:
+    trend = CaptureQueryValuator("trenddevice")
+    manager = ManagerUnderTest(
+        valuators=[
+            trend,
+            StaticValuator(
+                "rebuy",
+                126.92,
+                source_url="https://www.rebuy.it/vendere/smartwatch/garmin-forerunner-955-schwarz-am-silikonarmband-schwarz_13303170",
+                raw_payload={
+                    "price_text": "Pagamento Diretto 126,92 €",
+                    "price_source": "ry-inject",
+                    "match_quality": {"ok": True, "reason": "ok", "token_ratio": 0.9},
+                },
+            ),
+        ],
+        ai_balancer=TitleBalancer(gemini_keys=[], openrouter_keys=[]),
+        min_spread_eur=40.0,
+    )
+    product = AmazonProduct(
+        title="Garmin Forerunner 955 Solar WH",
+        price_eur=100.0,
+        category=ProductCategory.SMARTWATCH,
+    )
+
+    decision = await manager.evaluate_product(product)
+
+    assert trend.queries == []
+    assert decision.best_offer is not None
+    assert decision.best_offer.platform == "rebuy"
+    assert [offer.platform for offer in decision.offers] == ["rebuy"]
+
+
 def test_build_default_manager_uses_fallback_supabase_table(monkeypatch: pytest.MonkeyPatch) -> None:
     captured = {}
 

@@ -77,6 +77,7 @@ _WATCH_ANCHORS = ("watch", "smartwatch", "garmin", "fenix", "epix", "forerunner"
 _PHONE_ANCHORS = ("iphone",)
 _DRONE_ANCHORS = ("drone", "dji", "mavic", "avata", "quadcopter")
 _HANDHELD_ANCHORS = ("steam deck", "rog ally", "legion go", "nintendo switch", "playstation portal")
+_APPLE_WATCH_ANCHORS = ("apple watch", "applewatch")
 
 
 def _compact_text(value: str | None) -> str:
@@ -86,6 +87,13 @@ def _compact_text(value: str | None) -> str:
 def _contains_any(value: str, anchors: tuple[str, ...]) -> bool:
     lowered = value.casefold()
     return any(anchor in lowered for anchor in anchors)
+
+
+def _is_apple_watch_context(product: AmazonProduct, normalized_name: str) -> bool:
+    merged = _compact_text(f"{product.title} {normalized_name}").casefold()
+    if _contains_any(merged, _APPLE_WATCH_ANCHORS):
+        return True
+    return "apple" in merged and "watch" in merged
 
 
 def _heuristic_title_normalize(title: str) -> str:
@@ -847,7 +855,12 @@ class ArbitrageManager:
             category_value, normalized_name = key
             category = ProductCategory(category_value)
             sample = group_items[0]
-            all_valuators = self._build_valuators(category)
+            all_valuators = self._runtime_filter_valuators(
+                self._build_valuators(category),
+                category=category,
+                product=sample,
+                normalized_name=normalized_name,
+            )
 
             async with semaphore:
                 # Filter valuators only when the task actually starts to run, so queued tasks
@@ -915,6 +928,35 @@ class ArbitrageManager:
                 f"before='{normalized_name}' after='{sanitized}'"
             )
         return sanitized, ai_usage
+
+    def _runtime_filter_valuators(
+        self,
+        valuators: list[Any],
+        *,
+        category: ProductCategory,
+        product: AmazonProduct,
+        normalized_name: str,
+    ) -> list[Any]:
+        if not valuators:
+            return []
+        filtered: list[Any] = []
+        dropped: list[str] = []
+        for valuator in valuators:
+            platform = _valuator_platform_name(valuator)
+            if (
+                platform == "trenddevice"
+                and category == ProductCategory.SMARTWATCH
+                and not _is_apple_watch_context(product, normalized_name)
+            ):
+                dropped.append(f"{platform}:non-apple-smartwatch")
+                continue
+            filtered.append(valuator)
+        if dropped:
+            print(
+                "[scan] Valuator runtime filter | "
+                f"category={category.value} normalized='{normalized_name}' dropped={dropped}"
+            )
+        return filtered
 
     def _build_valuators(self, category: ProductCategory) -> list:
         common = {"headless": self.headless, "nav_timeout_ms": self.nav_timeout_ms}
@@ -989,7 +1031,12 @@ class ArbitrageManager:
         product: AmazonProduct,
         normalized_name: str,
     ) -> list[ValuationResult]:
-        valuators = self._build_valuators(category)
+        valuators = self._runtime_filter_valuators(
+            self._build_valuators(category),
+            category=category,
+            product=product,
+            normalized_name=normalized_name,
+        )
         return await self._evaluate_with_valuators(valuators, product, normalized_name)
 
     async def _evaluate_with_valuators(
