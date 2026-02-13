@@ -113,6 +113,16 @@ DISCOUNT_HINTS: tuple[str, ...] = (
     "al pagamento",
     "au paiement",
 )
+INSTALLMENT_HINTS: tuple[str, ...] = (
+    "al mese",
+    "a mese",
+    "/mese",
+    "mensil",
+    "month",
+    "monat",
+    "mois",
+    "al mes",
+)
 EUR_AMOUNT_PATTERN = re.compile(
     r"(?:€\s*\d{1,3}(?:[.\s]\d{3})*(?:,\d{2})?|\d{1,3}(?:[.\s]\d{3})*(?:,\d{2})?\s*€)"
 )
@@ -368,6 +378,16 @@ def _extract_prices_by_selectors(row: Any, selectors: tuple[str, ...]) -> list[f
     values: list[float] = []
     for selector in selectors:
         for node in row.select(selector):
+            context_chunks = [node.get_text(" ", strip=True)]
+            parent = getattr(node, "parent", None)
+            if parent is not None:
+                context_chunks.append(parent.get_text(" ", strip=True))
+                grandparent = getattr(parent, "parent", None)
+                if grandparent is not None:
+                    context_chunks.append(grandparent.get_text(" ", strip=True))
+            context_text = " ".join(chunk for chunk in context_chunks if chunk).lower()
+            if any(hint in context_text for hint in INSTALLMENT_HINTS):
+                continue
             price = parse_eur_price(node.get_text(" ", strip=True))
             if price is None:
                 continue
@@ -413,12 +433,21 @@ def _extract_price_details_from_row(row: Any) -> dict[str, float]:
     current_prices = _extract_prices_by_selectors(row, CURRENT_PRICE_SELECTORS)
     list_prices = _extract_prices_by_selectors(row, LIST_PRICE_SELECTORS)
     all_prices = _extract_prices_by_selectors(row, (".a-price .a-offscreen",))
+    row_text = row.get_text(" ", strip=True).lower()
+    has_installment_hints = any(hint in row_text for hint in INSTALLMENT_HINTS)
+    if has_installment_hints:
+        if len(current_prices) >= 2:
+            top = max(current_prices)
+            current_prices = [value for value in current_prices if value >= (top * 0.55)]
+        if len(all_prices) >= 2:
+            top = max(all_prices)
+            all_prices = [value for value in all_prices if value >= (top * 0.55)]
 
     displayed_price = current_prices[0] if current_prices else None
     if displayed_price is None and all_prices:
         displayed_price = min(all_prices)
     if displayed_price is None:
-        displayed_price = parse_eur_price(row.get_text(" ", strip=True))
+        displayed_price = None if has_installment_hints else parse_eur_price(row.get_text(" ", strip=True))
     if displayed_price is None:
         return {}
 

@@ -61,6 +61,8 @@ _STRATEGY_PROFILES: dict[str, dict[str, Any]] = {
     },
 }
 
+_CAPACITY_TOKEN_PATTERN = re.compile(r"\b\d{1,4}\s*(?:gb|tb)\b", re.IGNORECASE)
+
 
 def _env_or_default(name: str, default: str) -> str:
     value = os.getenv(name)
@@ -108,6 +110,33 @@ def _condition_key(condition: str | None) -> str:
     if "like" in value or "nuovo" in value:
         return "like_new"
     return "unknown"
+
+
+def _capacity_tokens(value: str | None) -> set[str]:
+    raw = (value or "").lower()
+    tokens: set[str] = set()
+    for match in _CAPACITY_TOKEN_PATTERN.finditer(raw):
+        token = match.group(0).replace(" ", "").strip()
+        if token:
+            tokens.add(token)
+    return tokens
+
+
+def _build_rebuy_candidate_context(*, payload: dict[str, Any], source_url: str) -> str:
+    parts: list[str] = [source_url]
+    for key in ("resolved_source_url", "price_text", "query"):
+        value = str(payload.get(key) or "").strip()
+        if value:
+            parts.append(value)
+    for key in ("result_pick", "deep_link_pick"):
+        row = payload.get(key)
+        if not isinstance(row, dict):
+            continue
+        for field in ("text", "href", "url"):
+            value = str(row.get(field) or "").strip()
+            if value:
+                parts.append(value)
+    return " ".join(parts)
 
 
 def _valuator_platform_name(valuator: Any) -> str:
@@ -484,6 +513,15 @@ def _verify_real_resale_quote(result: ValuationResult) -> ValuationResult:
             checks["has_offer_state"] = has_offer_state
             if not generic_override and not (price_source == "dom-cash" and has_offer_state):
                 reasons.append("generic-source-url")
+        query_storage_tokens = _capacity_tokens(result.normalized_name)
+        if not query_storage_tokens:
+            query_storage_tokens = _capacity_tokens(str(payload.get("query") or ""))
+        candidate_context = _build_rebuy_candidate_context(payload=payload, source_url=source_url)
+        candidate_storage_tokens = _capacity_tokens(candidate_context)
+        checks["query_storage_tokens"] = sorted(query_storage_tokens)
+        checks["candidate_storage_tokens"] = sorted(candidate_storage_tokens)
+        if query_storage_tokens and candidate_storage_tokens and not query_storage_tokens.intersection(candidate_storage_tokens):
+            reasons.append("variant-storage-mismatch")
         if not price_text:
             reasons.append("missing-price-context")
     elif platform == "trenddevice":

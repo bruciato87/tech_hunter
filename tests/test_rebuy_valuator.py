@@ -66,6 +66,16 @@ def test_rebuy_assess_match_accepts_specific_sell_flow_url_without_capacity_toke
     assert match["ok"] is True
 
 
+def test_rebuy_assess_match_rejects_explicit_capacity_conflict() -> None:
+    match = _assess_rebuy_match(
+        normalized_name='Apple iPad Air 13" M3 256GB',
+        candidate_text="Apple iPad Air 6 13 1TB Wi-Fi + Cellulare Blu",
+        source_url="https://www.rebuy.it/vendere/tablet-e-ebook-reader/apple-ipad-air-6-13-1tb-wifi-plus-cellulare-blu_15426786",
+    )
+    assert match["ok"] is False
+    assert match["reason"] == "capacity-mismatch"
+
+
 def test_rebuy_assess_match_rejects_generic_category_url() -> None:
     match = _assess_rebuy_match(
         normalized_name='Apple iPad Air 13" M3 256GB Wi-Fi + 5G',

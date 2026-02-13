@@ -96,7 +96,7 @@ GENERIC_REBUY_CATEGORIES: set[str] = {
     "fotocamera",
     "console",
 }
-CAPACITY_TOKEN_PATTERN = re.compile(r"\b\d{2,4}\s*(?:gb|tb)\b", re.IGNORECASE)
+CAPACITY_TOKEN_PATTERN = re.compile(r"\b\d{1,4}\s*(?:gb|tb)\b", re.IGNORECASE)
 REBUY_PRODUCT_ID_PATTERN = re.compile(r"^\d{4,}$")
 REBUY_SELL_ID_SUFFIX_PATTERN = re.compile(r"_\d{4,}$")
 REBUY_SELL_PRODUCT_ID_PATTERN = re.compile(r"^\d{4,}$")
@@ -570,7 +570,7 @@ def _query_tokens(value: str) -> list[str]:
 
 
 def _capacity_tokens(value: str) -> list[str]:
-    normalized = _normalize_match_text(value).replace(" ", "")
+    normalized = _normalize_match_text(value)
     return sorted(set(match.group(0).replace(" ", "").lower() for match in CAPACITY_TOKEN_PATTERN.finditer(normalized)))
 
 
@@ -669,6 +669,7 @@ def _assess_rebuy_match(
     tokens = _query_tokens(normalized_name)
     query_anchors = [token for token in tokens if token in ANCHOR_TOKENS]
     capacities = _capacity_tokens(normalized_name)
+    candidate_capacities = _capacity_tokens(candidate_norm)
 
     required_tokens: list[str] = []
     for item in capacities:
@@ -732,9 +733,30 @@ def _assess_rebuy_match(
             "required_tokens": required_tokens,
         }
 
+    explicit_capacity_conflict = bool(
+        capacities
+        and candidate_capacities
+        and not set(capacities).intersection(candidate_capacities)
+    )
+    if explicit_capacity_conflict:
+        return {
+            "ok": False,
+            "reason": "capacity-mismatch",
+            "score": score,
+            "ratio": round(ratio, 3),
+            "token_ratio": round(token_ratio, 3),
+            "generic_url": generic_url,
+            "generic_override": strong_generic_match,
+            "hit_tokens": hit_tokens,
+            "required_tokens": required_tokens,
+            "query_capacities": capacities,
+            "candidate_capacities": candidate_capacities,
+        }
+
     allow_missing_capacity = (
         capacities
         and len(capacity_hits) < len(capacities)
+        and not candidate_capacities
         and path.startswith("vendere/p/")
         and bool(anchor_hits)
         and (token_ratio >= 0.62 or len(hit_tokens) >= 2)
@@ -750,6 +772,8 @@ def _assess_rebuy_match(
             "generic_override": strong_generic_match,
             "hit_tokens": hit_tokens,
             "required_tokens": required_tokens,
+            "query_capacities": capacities,
+            "candidate_capacities": candidate_capacities,
         }
     if query_anchors and not anchor_hits:
         return {

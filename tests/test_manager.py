@@ -374,6 +374,35 @@ async def test_manager_quote_verification_accepts_rebuy_specific_product_url() -
 
 
 @pytest.mark.asyncio
+async def test_manager_quote_verification_rejects_rebuy_variant_storage_mismatch() -> None:
+    manager = ManagerUnderTest(
+        valuators=[
+            StaticValuator(
+                "rebuy",
+                618.9,
+                source_url="https://www.rebuy.it/vendere/tablet-e-ebook-reader/apple-ipad-air-6-13-1tb-wifi-plus-cellulare-blu_15426786",
+                raw_payload={
+                    "price_text": "Pagamento Diretto 618,90 €",
+                    "price_source": "ry-inject",
+                    "match_quality": {"ok": True, "reason": "ok", "token_ratio": 0.78},
+                },
+            )
+        ],
+        ai_balancer=TitleBalancer(gemini_keys=[], openrouter_keys=[]),
+        min_spread_eur=40.0,
+    )
+    product = AmazonProduct(title='Apple iPad Air 13" M3 256GB', price_eur=121.8, category=ProductCategory.GENERAL_TECH)
+
+    decision = await manager.evaluate_product(product)
+
+    assert decision.best_offer is None
+    assert decision.should_notify is False
+    assert decision.offers[0].error is not None
+    assert "quote verification failed" in str(decision.offers[0].error)
+    assert "variant-storage-mismatch" in str(decision.offers[0].error)
+
+
+@pytest.mark.asyncio
 async def test_manager_quote_verification_accepts_rebuy_generic_url_with_strong_override() -> None:
     manager = ManagerUnderTest(
         valuators=[
