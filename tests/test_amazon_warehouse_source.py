@@ -20,6 +20,8 @@ from tech_sniper_it.sources.amazon_warehouse import (
     _parse_proxy_entry,
     _parse_user_agent_list,
     _per_marketplace_limit,
+    _query_variants_for_host,
+    _rotate_values,
     _remove_file_if_exists,
     _storage_state_for_host,
     _should_fail_fast,
@@ -98,6 +100,19 @@ def test_candidate_product_urls_for_cart_prioritizes_canonical_dp() -> None:
 
 def test_expand_marketplaces_handles_eu_alias() -> None:
     assert _expand_marketplaces(["it", "eu"]) == ["it", "de", "fr", "es"]
+
+
+def test_rotate_values_offsets_order() -> None:
+    assert _rotate_values(["it", "de", "fr", "es"], 1) == ["de", "fr", "es", "it"]
+    assert _rotate_values(["it", "de", "fr", "es"], 5) == ["de", "fr", "es", "it"]
+
+
+def test_query_variants_for_host_builds_localized_fallback(monkeypatch) -> None:  # noqa: ANN001
+    monkeypatch.setenv("AMAZON_WAREHOUSE_QUERY_VARIANTS_PER_HOST", "3")
+    variants = _query_variants_for_host("www.amazon.de", "apple watch ultra 2 amazon warehouse")
+    assert variants[0] == "apple watch ultra 2 amazon warehouse"
+    assert "apple watch ultra 2" in variants
+    assert "apple watch ultra 2 warehouse deals" in variants
 
 
 def test_extract_products_from_html_supports_fallback_card_markup() -> None:
