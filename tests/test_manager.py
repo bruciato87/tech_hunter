@@ -18,10 +18,20 @@ class TitleBalancer(SmartAIBalancer):
 
 
 class StaticValuator:
-    def __init__(self, platform: str, offer: float | None, error: str | None = None) -> None:
+    def __init__(
+        self,
+        platform: str,
+        offer: float | None,
+        error: str | None = None,
+        *,
+        source_url: str | None = None,
+        raw_payload: dict | None = None,
+    ) -> None:
         self.platform = platform
         self.offer = offer
         self.error = error
+        self.source_url = source_url
+        self.raw_payload = raw_payload or {}
 
     async def valuate(self, product: AmazonProduct, normalized_name: str) -> ValuationResult:
         return ValuationResult(
@@ -29,6 +39,8 @@ class StaticValuator:
             normalized_name=normalized_name,
             offer_eur=self.offer,
             error=self.error,
+            source_url=self.source_url,
+            raw_payload=dict(self.raw_payload),
         )
 
 
@@ -238,3 +250,60 @@ async def test_manager_circuit_breaker_skips_mpb_for_queued_groups(monkeypatch: 
     second_platforms = [offer.platform for offer in decisions[1].offers]
     assert "mpb" in first_platforms
     assert second_platforms == ["rebuy"]
+
+
+@pytest.mark.asyncio
+async def test_manager_quote_verification_rejects_rebuy_generic_category_url() -> None:
+    manager = ManagerUnderTest(
+        valuators=[
+            StaticValuator(
+                "rebuy",
+                220.0,
+                source_url="https://www.rebuy.it/comprare/apple",
+                raw_payload={
+                    "price_text": "Ti paghiamo 220,00 €",
+                    "match_quality": {"ok": True, "reason": "ok"},
+                    "price_source": "dom",
+                },
+            )
+        ],
+        ai_balancer=FakeBalancer(gemini_keys=[], openrouter_keys=[]),
+        min_spread_eur=40.0,
+    )
+    product = AmazonProduct(title="Apple iPad Air 13 M3 256GB", price_eur=120.0, category=ProductCategory.GENERAL_TECH)
+
+    decision = await manager.evaluate_product(product)
+
+    assert decision.best_offer is None
+    assert decision.should_notify is False
+    assert decision.offers[0].error is not None
+    assert "quote verification failed" in str(decision.offers[0].error)
+    assert "generic-source-url" in str(decision.offers[0].error)
+
+
+@pytest.mark.asyncio
+async def test_manager_quote_verification_accepts_rebuy_specific_product_url() -> None:
+    manager = ManagerUnderTest(
+        valuators=[
+            StaticValuator(
+                "rebuy",
+                220.0,
+                source_url="https://www.rebuy.it/comprare/apple-iphone-14-pro-128gb-nero/123456",
+                raw_payload={
+                    "price_text": "Ti paghiamo 220,00 €",
+                    "match_quality": {"ok": True, "reason": "ok"},
+                    "price_source": "dom",
+                },
+            )
+        ],
+        ai_balancer=FakeBalancer(gemini_keys=[], openrouter_keys=[]),
+        min_spread_eur=40.0,
+    )
+    product = AmazonProduct(title="Apple iPhone 14 Pro 128GB", price_eur=100.0, category=ProductCategory.APPLE_PHONE)
+
+    decision = await manager.evaluate_product(product)
+
+    assert decision.best_offer is not None
+    assert decision.best_offer.platform == "rebuy"
+    assert decision.best_offer.offer_eur == 220.0
+    assert decision.should_notify is True

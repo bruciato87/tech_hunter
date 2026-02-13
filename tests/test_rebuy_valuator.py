@@ -44,6 +44,16 @@ def test_rebuy_assess_match_accepts_specific_product_url() -> None:
     assert match["ok"] is True
 
 
+def test_rebuy_assess_match_rejects_generic_category_url() -> None:
+    match = _assess_rebuy_match(
+        normalized_name='Apple iPad Air 13" M3 256GB Wi-Fi + 5G',
+        candidate_text="Apple iPad Air 13 M3",
+        source_url="https://www.rebuy.it/comprare/apple",
+    )
+    assert match["ok"] is False
+    assert match["reason"] == "generic-category-url"
+
+
 def test_rebuy_load_storage_state_b64_valid(monkeypatch: pytest.MonkeyPatch) -> None:
     payload = {"cookies": [], "origins": []}
     encoded = base64.b64encode(json.dumps(payload).encode("utf-8")).decode("ascii")

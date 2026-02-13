@@ -251,6 +251,17 @@ def _assess_rebuy_match(
             "hit_tokens": hit_tokens,
             "required_tokens": required_tokens,
         }
+    if generic_url:
+        return {
+            "ok": False,
+            "reason": "generic-category-url",
+            "score": score,
+            "ratio": round(ratio, 3),
+            "token_ratio": round(token_ratio, 3),
+            "generic_url": generic_url,
+            "hit_tokens": hit_tokens,
+            "required_tokens": required_tokens,
+        }
 
     if capacities and len(capacity_hits) < len(capacities):
         return {
@@ -267,17 +278,6 @@ def _assess_rebuy_match(
         return {
             "ok": False,
             "reason": "anchor-mismatch",
-            "score": score,
-            "ratio": round(ratio, 3),
-            "token_ratio": round(token_ratio, 3),
-            "generic_url": generic_url,
-            "hit_tokens": hit_tokens,
-            "required_tokens": required_tokens,
-        }
-    if generic_url and token_ratio < 0.85:
-        return {
-            "ok": False,
-            "reason": "generic-url-low-coverage",
             "score": score,
             "ratio": round(ratio, 3),
             "token_ratio": round(token_ratio, 3),

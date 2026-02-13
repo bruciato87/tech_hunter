@@ -1071,6 +1071,28 @@ def _parse_cart_summary(html: str, asin: str | None) -> dict[str, Any]:
     }
 
 
+def _build_cart_cleanup_asins(
+    *,
+    before_cart_asins: list[str] | None,
+    after_cart_asins: list[str] | None,
+    target_asin: str | None,
+) -> list[str]:
+    before = {(asin or "").strip().upper() for asin in (before_cart_asins or []) if (asin or "").strip()}
+    cleanup: list[str] = []
+    for raw in (after_cart_asins or []):
+        asin = (raw or "").strip().upper()
+        if not asin:
+            continue
+        if asin in before:
+            continue
+        if asin not in cleanup:
+            cleanup.append(asin)
+    target = (target_asin or "").strip().upper()
+    if target and target not in cleanup:
+        cleanup.append(target)
+    return cleanup
+
+
 async def _read_cart_summary(page, *, host: str, asin: str | None) -> dict[str, Any]:  # noqa: ANN001
     cart_url = _cart_url_for_host(host)
     await page.goto(cart_url, wait_until="domcontentloaded")
@@ -1181,6 +1203,34 @@ async def _remove_asin_from_cart(page, *, host: str, asin: str) -> bool:  # noqa
         return False
 
 
+async def _cleanup_cart_asins(page, *, host: str, asins: list[str]) -> dict[str, Any]:  # noqa: ANN001
+    removed_asins: list[str] = []
+    failed_asins: list[str] = []
+    deduped: list[str] = []
+    for asin in asins:
+        normalized = (asin or "").strip().upper()
+        if not normalized:
+            continue
+        if normalized not in deduped:
+            deduped.append(normalized)
+
+    for asin in deduped:
+        try:
+            ok = await _remove_asin_from_cart(page, host=host, asin=asin)
+        except Exception:
+            ok = False
+        if ok:
+            removed_asins.append(asin)
+        else:
+            failed_asins.append(asin)
+
+    return {
+        "removed": len(failed_asins) == 0,
+        "removed_asins": removed_asins,
+        "failed_asins": failed_asins,
+    }
+
+
 async def _resolve_cart_net_price(
     page,
     *,
@@ -1218,6 +1268,9 @@ async def _resolve_cart_net_price(
         return result
 
     added = False
+    after_summary: dict[str, Any] | None = None
+    before_cart_asins = list(before.get("cart_asins") or [])
+    before_cart_empty = bool(before.get("is_empty"))
     try:
         await page.goto(product_url, wait_until="domcontentloaded")
         await _accept_cookie_if_present(page)
@@ -1237,6 +1290,7 @@ async def _resolve_cart_net_price(
         await page.wait_for_timeout(1700)
 
         after = await _read_cart_summary(page, host=host, asin=asin)
+        after_summary = after
         if not after.get("target_in_cart"):
             result["reason"] = "not-found-in-cart-after-add"
             return result
@@ -1299,8 +1353,27 @@ async def _resolve_cart_net_price(
         return result
     finally:
         if added:
-            removed = await _remove_asin_from_cart(page, host=host, asin=asin)
+            cleanup_asins = _build_cart_cleanup_asins(
+                before_cart_asins=before_cart_asins,
+                after_cart_asins=list((after_summary or {}).get("cart_asins") or []),
+                target_asin=asin,
+            )
+            cleanup = await _cleanup_cart_asins(page, host=host, asins=cleanup_asins)
+            removed = bool(cleanup.get("removed"))
+            result["cleanup_asins"] = cleanup_asins
+            result["removed_asins"] = list(cleanup.get("removed_asins") or [])
+            result["failed_remove_asins"] = list(cleanup.get("failed_asins") or [])
             result["removed"] = removed
+            if before_cart_empty:
+                try:
+                    final_summary = await _read_cart_summary(page, host=host, asin=None)
+                    cart_empty_after = bool(final_summary.get("is_empty"))
+                    result["cart_empty_after_cleanup"] = cart_empty_after
+                    if not cart_empty_after:
+                        removed = False
+                        result["removed"] = False
+                except Exception:
+                    result["cart_empty_after_cleanup"] = None
             if not removed and result.get("reason") == "ok":
                 result["net_price_eur"] = None
                 result["reason"] = "remove-failed"
@@ -1407,7 +1480,10 @@ async def apply_cart_net_pricing(
                                 f"promo_discount={_format_money(pricing.get('promo_discount_eur'))} "
                                 f"total={_format_money(pricing.get('total_price'))} "
                                 f"source={pricing.get('net_price_source') or 'n/d'} "
-                                f"removed={pricing.get('removed')}"
+                                f"removed={pricing.get('removed')} "
+                                f"cleanup_asins={pricing.get('cleanup_asins') or []} "
+                                f"failed_remove_asins={pricing.get('failed_remove_asins') or []} "
+                                f"cart_empty_after_cleanup={pricing.get('cart_empty_after_cleanup')}"
                             )
                         else:
                             skipped += 1
@@ -1418,7 +1494,10 @@ async def apply_cart_net_pricing(
                                 f"promo_discount={_format_money(pricing.get('promo_discount_eur'))} "
                                 f"total={_format_money(pricing.get('total_price'))} "
                                 f"source={pricing.get('net_price_source') or 'n/d'} "
-                                f"removed={pricing.get('removed')}"
+                                f"removed={pricing.get('removed')} "
+                                f"cleanup_asins={pricing.get('cleanup_asins') or []} "
+                                f"failed_remove_asins={pricing.get('failed_remove_asins') or []} "
+                                f"cart_empty_after_cleanup={pricing.get('cart_empty_after_cleanup')}"
                             )
                 finally:
                     if context is not None:

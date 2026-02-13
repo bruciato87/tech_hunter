@@ -5,6 +5,7 @@ import json
 import os
 
 from tech_sniper_it.sources.amazon_warehouse import (
+    _build_cart_cleanup_asins,
     _canonical_amazon_url,
     _decode_storage_state_b64,
     _decode_storage_state_env,
@@ -233,6 +234,24 @@ def test_parse_cart_summary_falls_back_to_subtotal_minus_promo_when_total_missin
     assert summary["subtotal_price"] == 499.0
     assert summary["promo_discount_eur"] == 30.0
     assert summary["total_price"] == 469.0
+
+
+def test_build_cart_cleanup_asins_removes_only_new_items_and_target() -> None:
+    cleanup = _build_cart_cleanup_asins(
+        before_cart_asins=["B0AAA11111", "B0BBB22222"],
+        after_cart_asins=["B0AAA11111", "B0BBB22222", "B0CCC33333"],
+        target_asin="B0DDD44444",
+    )
+    assert cleanup == ["B0CCC33333", "B0DDD44444"]
+
+
+def test_build_cart_cleanup_asins_keeps_target_once() -> None:
+    cleanup = _build_cart_cleanup_asins(
+        before_cart_asins=[],
+        after_cart_asins=["B0ABCDEF12"],
+        target_asin="B0ABCDEF12",
+    )
+    assert cleanup == ["B0ABCDEF12"]
 
 
 def test_extract_asin_from_url_supports_aw_path_and_query_fallback() -> None:

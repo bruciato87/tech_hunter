@@ -6,6 +6,7 @@ from collections import defaultdict
 from collections.abc import Iterable
 from copy import deepcopy
 from typing import Any
+from urllib.parse import urlparse
 
 from tech_sniper_it.ai_balancer import SmartAIBalancer
 from tech_sniper_it.models import AmazonProduct, ArbitrageDecision, ProductCategory, ValuationResult
@@ -215,6 +216,143 @@ def _should_backoff_result(result: ValuationResult) -> bool:
     if platform == "trenddevice":
         return "email-gate" in error_text
     return False
+
+
+def _is_live_quote_payload(payload: dict[str, Any] | None) -> bool:
+    if not isinstance(payload, dict) or not payload:
+        return False
+    return any(
+        key in payload
+        for key in (
+            "price_text",
+            "price_source",
+            "match_quality",
+            "attempts",
+            "adaptive_fallbacks",
+            "storage_state",
+        )
+    )
+
+
+def _is_generic_rebuy_offer_url(url: str | None) -> bool:
+    parsed = urlparse(url or "")
+    path = (parsed.path or "").strip("/").lower()
+    if not path:
+        return True
+    if path.startswith("comprare/search") or path == "vendi":
+        return True
+    segments = [segment for segment in path.split("/") if segment]
+    if len(segments) <= 1:
+        return True
+    if len(segments) == 2 and segments[0] == "comprare":
+        return True
+    return False
+
+
+def _is_generic_trenddevice_offer_url(url: str | None) -> bool:
+    parsed = urlparse(url or "")
+    path = (parsed.path or "").strip("/").lower()
+    if not path:
+        return True
+    return path in {"vendi", "vendi/valutazione"}
+
+
+def _is_generic_mpb_offer_url(url: str | None) -> bool:
+    parsed = urlparse(url or "")
+    path = (parsed.path or "").strip("/").lower()
+    if not path:
+        return True
+    if path.startswith("it-it/cerca"):
+        return True
+    return path in {"it-it/sell", "sell"}
+
+
+def _verified_offer(result: ValuationResult, *, payload: dict[str, Any], checks: dict[str, Any]) -> ValuationResult:
+    payload_copy = deepcopy(payload)
+    payload_copy["quote_verification"] = {"ok": True, "checks": checks}
+    return ValuationResult(
+        platform=result.platform,
+        normalized_name=result.normalized_name,
+        offer_eur=result.offer_eur,
+        condition=result.condition,
+        currency=result.currency,
+        source_url=result.source_url,
+        raw_payload=payload_copy,
+        error=None,
+    )
+
+
+def _rejected_offer(result: ValuationResult, *, payload: dict[str, Any], checks: dict[str, Any], reason: str) -> ValuationResult:
+    payload_copy = deepcopy(payload)
+    payload_copy["quote_verification"] = {"ok": False, "checks": checks, "reason": reason}
+    platform = (result.platform or "valuator").strip().lower()
+    return ValuationResult(
+        platform=result.platform,
+        normalized_name=result.normalized_name,
+        offer_eur=None,
+        condition=result.condition,
+        currency=result.currency,
+        source_url=result.source_url,
+        raw_payload=payload_copy,
+        error=f"{platform} quote verification failed ({reason}); discarded to prevent false-positive.",
+    )
+
+
+def _verify_real_resale_quote(result: ValuationResult) -> ValuationResult:
+    if not result.is_valid or result.offer_eur is None:
+        return result
+    platform = (result.platform or "").strip().lower()
+    if platform not in {"rebuy", "trenddevice", "mpb"}:
+        return result
+
+    payload = result.raw_payload if isinstance(result.raw_payload, dict) else {}
+    if not _is_live_quote_payload(payload):
+        return result
+
+    source_url = (result.source_url or "").strip()
+    reasons: list[str] = []
+    checks: dict[str, Any] = {
+        "platform": platform,
+        "offer_eur": result.offer_eur,
+        "source_url": source_url or None,
+    }
+    if result.offer_eur <= 0 or result.offer_eur > 10000:
+        reasons.append("offer-out-of-range")
+
+    match_quality = payload.get("match_quality")
+    if isinstance(match_quality, dict):
+        checks["match_ok"] = bool(match_quality.get("ok"))
+        checks["match_reason"] = match_quality.get("reason")
+        if not checks["match_ok"]:
+            reasons.append("match-quality")
+
+    price_text = str(payload.get("price_text") or "").strip()
+    checks["price_text_present"] = bool(price_text)
+    checks["price_source"] = str(payload.get("price_source") or "").strip() or None
+
+    if platform == "rebuy":
+        checks["generic_url"] = _is_generic_rebuy_offer_url(source_url)
+        if checks["generic_url"]:
+            reasons.append("generic-source-url")
+        if not price_text:
+            reasons.append("missing-price-context")
+    elif platform == "trenddevice":
+        checks["generic_url"] = _is_generic_trenddevice_offer_url(source_url)
+        if checks["generic_url"]:
+            reasons.append("generic-source-url")
+        if not price_text:
+            reasons.append("missing-price-context")
+    elif platform == "mpb":
+        checks["generic_url"] = _is_generic_mpb_offer_url(source_url)
+        if checks["generic_url"]:
+            reasons.append("generic-source-url")
+        if not checks["price_source"] and not price_text:
+            reasons.append("missing-price-context")
+
+    if reasons:
+        unique_reasons = ",".join(sorted(set(reasons)))
+        return _rejected_offer(result, payload=payload, checks=checks, reason=unique_reasons)
+    return _verified_offer(result, payload=payload, checks=checks)
 
 
 class ArbitrageManager:
@@ -463,10 +601,11 @@ class ArbitrageManager:
                     )
                 )
                 continue
-            offers.append(raw)
+            verified = _verify_real_resale_quote(raw)
+            offers.append(verified)
             print(
                 "[scan] Offer result -> "
-                f"platform={raw.platform} | offer={raw.offer_eur} | valid={raw.is_valid} | error={raw.error}"
+                f"platform={verified.platform} | offer={verified.offer_eur} | valid={verified.is_valid} | error={verified.error}"
             )
         return offers
 
