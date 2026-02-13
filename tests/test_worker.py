@@ -14,6 +14,7 @@ from tech_sniper_it.worker import (
     _build_dynamic_warehouse_queries,
     _build_prioritization_context,
     _chunk_telegram_text,
+    _compute_effective_scan_target,
     _coerce_product,
     _daily_exclusion_since_iso,
     _dedupe_products,
@@ -45,6 +46,23 @@ def test_coerce_product_valid() -> None:
     product = _coerce_product({"title": "iPhone", "price_eur": 100, "category": "apple iphone"})
     assert product.title == "iPhone"
     assert product.category == ProductCategory.APPLE_PHONE
+
+
+def test_compute_effective_scan_target_boosts_when_pool_is_large(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SCAN_TARGET_PRODUCTS_AUTO_BOOST", "true")
+    monkeypatch.setenv("SCAN_TARGET_PRODUCTS_MAX", "20")
+    monkeypatch.setenv("SCAN_TARGET_PRODUCTS_BOOST_TRIGGER_MULTIPLIER", "2")
+    monkeypatch.setenv("SCAN_TARGET_PRODUCTS_BOOST_STEP", "4")
+    target, meta = _compute_effective_scan_target(12, candidate_count=48, scan_mode="full")
+    assert target == 16
+    assert meta["reason"] == "boosted"
+
+
+def test_compute_effective_scan_target_does_not_boost_in_smoke(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SCAN_TARGET_PRODUCTS_AUTO_BOOST", "true")
+    target, meta = _compute_effective_scan_target(12, candidate_count=99, scan_mode="smoke")
+    assert target == 12
+    assert meta["reason"] == "smoke-mode"
 
 
 def test_coerce_product_detects_smartwatch_and_condition() -> None:

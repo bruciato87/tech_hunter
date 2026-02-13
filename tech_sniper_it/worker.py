@@ -327,6 +327,64 @@ def _is_truthy_env(name: str, default: str) -> bool:
     return _env_or_default(name, default).lower() not in {"0", "false", "no", "off"}
 
 
+def _compute_effective_scan_target(
+    base_target: int,
+    *,
+    candidate_count: int,
+    scan_mode: str,
+) -> tuple[int, dict[str, Any]]:
+    base = max(1, int(base_target))
+    mode = (scan_mode or "").strip().lower()
+    if mode == "smoke":
+        return base, {"enabled": False, "reason": "smoke-mode"}
+
+    enabled = _is_truthy_env("SCAN_TARGET_PRODUCTS_AUTO_BOOST", "true")
+    raw_max = _env_or_default("SCAN_TARGET_PRODUCTS_MAX", str(max(base, 20)))
+    try:
+        max_target = int(raw_max)
+    except ValueError:
+        max_target = max(base, 20)
+    max_target = max(base, min(max_target, 80))
+
+    trigger_multiplier_raw = _to_float(_env_or_default("SCAN_TARGET_PRODUCTS_BOOST_TRIGGER_MULTIPLIER", "2.5"))
+    trigger_multiplier = trigger_multiplier_raw if trigger_multiplier_raw is not None else 2.5
+    trigger_multiplier = max(1.2, min(trigger_multiplier, 6.0))
+
+    boost_step_raw = _env_or_default("SCAN_TARGET_PRODUCTS_BOOST_STEP", "4")
+    try:
+        boost_step = int(boost_step_raw)
+    except ValueError:
+        boost_step = 4
+    boost_step = max(1, min(boost_step, 24))
+
+    meta: dict[str, Any] = {
+        "enabled": enabled,
+        "base_target": base,
+        "candidate_count": max(0, int(candidate_count)),
+        "max_target": max_target,
+        "trigger_multiplier": round(trigger_multiplier, 2),
+        "boost_step": boost_step,
+    }
+    if not enabled:
+        meta["reason"] = "disabled"
+        return base, meta
+    if candidate_count <= base:
+        meta["reason"] = "insufficient-candidates"
+        return base, meta
+
+    trigger_count = max(base + 1, int(round(base * trigger_multiplier)))
+    meta["trigger_count"] = trigger_count
+    if candidate_count < trigger_count:
+        meta["reason"] = "below-trigger"
+        return base, meta
+
+    boosted = min(max_target, base + boost_step)
+    effective = max(base, min(int(candidate_count), boosted))
+    meta["reason"] = "boosted"
+    meta["effective_target"] = effective
+    return effective, meta
+
+
 def _load_github_event_data() -> dict[str, Any]:
     event_path = os.getenv("GITHUB_EVENT_PATH")
     if not event_path or not Path(event_path).exists():
@@ -2157,7 +2215,10 @@ async def _run_scan_command(payload: dict[str, Any]) -> int:
     nav_timeout_ms = int(_env_or_default("PLAYWRIGHT_NAV_TIMEOUT_MS", "45000"))
     if scan_mode == "smoke":
         nav_timeout_ms = min(nav_timeout_ms, int(_env_or_default("SCAN_SMOKE_NAV_TIMEOUT_MS", "20000")))
-    scan_target_products = max(1, int(_env_or_default("SCAN_TARGET_PRODUCTS", _env_or_default("AMAZON_WAREHOUSE_MAX_PRODUCTS", "8"))))
+    scan_target_products = max(
+        1,
+        int(_env_or_default("SCAN_TARGET_PRODUCTS", _env_or_default("AMAZON_WAREHOUSE_MAX_PRODUCTS", "12"))),
+    )
     if scan_mode == "smoke":
         scan_target_products = min(scan_target_products, max(1, int(_env_or_default("SCAN_SMOKE_TARGET_PRODUCTS", "3"))))
     candidate_multiplier = max(1, int(_env_or_default("SCAN_CANDIDATE_MULTIPLIER", "4")))
@@ -2165,7 +2226,8 @@ async def _run_scan_command(payload: dict[str, Any]) -> int:
     if not products:
         print("[scan] No explicit products provided. Trying Amazon Warehouse automatic source (IT+EU).")
         try:
-            query_target = max(4, int(_env_or_default("SCAN_DYNAMIC_QUERY_LIMIT", "12")))
+            query_target_default = str(max(12, scan_target_products))
+            query_target = max(4, int(_env_or_default("SCAN_DYNAMIC_QUERY_LIMIT", query_target_default)))
             dynamic_queries, query_meta = _build_dynamic_warehouse_queries(
                 scoring_context=scoring_context,
                 target_count=min(query_target, candidate_budget),
@@ -2272,10 +2334,22 @@ async def _run_scan_command(payload: dict[str, Any]) -> int:
         print("[scan] Scoring context disabled; using legacy priority.")
 
     products = _prioritize_products(products, scoring_context=scoring_context)
-    predicted_min_keep_default = max(2, scan_target_products)
+    effective_scan_target, target_meta = _compute_effective_scan_target(
+        scan_target_products,
+        candidate_count=len(products),
+        scan_mode=scan_mode,
+    )
+    if effective_scan_target != scan_target_products:
+        print(
+            "[scan] Target auto-boost applied | "
+            f"base={scan_target_products} effective={effective_scan_target} "
+            f"candidate_count={target_meta.get('candidate_count')} "
+            f"trigger={target_meta.get('trigger_count')} max={target_meta.get('max_target')}"
+        )
+    predicted_min_keep_default = max(2, effective_scan_target)
     predicted_min_keep = max(2, int(_env_or_default("SCAN_PREDICTED_MIN_KEEP", str(predicted_min_keep_default))))
     if _is_truthy_env("SCAN_PREDICTED_MIN_KEEP_AUTO_TARGET", "true"):
-        predicted_min_keep = max(predicted_min_keep, scan_target_products)
+        predicted_min_keep = max(predicted_min_keep, effective_scan_target)
     products, predicted_drops = _filter_predicted_candidates(
         products,
         scoring_context=scoring_context,
@@ -2299,7 +2373,7 @@ async def _run_scan_command(payload: dict[str, Any]) -> int:
         max_per_model=max_variants_per_model,
     )
     adaptive_diversity_enabled = _is_truthy_env("SCAN_ADAPTIVE_DIVERSITY_RELAX", "true")
-    diversity_target = min(scan_target_products, len(pre_diversity_products))
+    diversity_target = min(effective_scan_target, len(pre_diversity_products))
     if adaptive_diversity_enabled and diversity_target > 0 and len(products) < diversity_target:
         relaxed_limit = max_variants_per_model
         relaxed_products = products
@@ -2344,15 +2418,15 @@ async def _run_scan_command(payload: dict[str, Any]) -> int:
 
     evaluation_products = products
     overflow_products: list[AmazonProduct] = []
-    if len(products) > scan_target_products:
-        selected = _select_balanced_candidates(products, scan_target_products)
+    if len(products) > effective_scan_target:
+        selected = _select_balanced_candidates(products, effective_scan_target)
         selected_markers = {id(item) for item in selected}
         overflow_products = [item for item in products if id(item) not in selected_markers]
         selected_region_counts = _region_counts(selected)
         total_region_counts = _region_counts(products)
         print(
             "[scan] Candidate selection | "
-            f"target={scan_target_products} budget={candidate_budget} selected={len(selected)} "
+            f"target={effective_scan_target} budget={candidate_budget} selected={len(selected)} "
             f"total_after_filter={len(products)} total_regions={total_region_counts} selected_regions={selected_region_counts}"
         )
         evaluation_products = selected

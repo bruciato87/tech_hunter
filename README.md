@@ -70,10 +70,14 @@ python -m tech_sniper_it.worker
 - `STRATEGY_PROFILE` (default: `balanced`, one of `conservative|balanced|aggressive`; sets operating cost + risk buffers internally)
 - `MAX_PARALLEL_PRODUCTS` (default: `3`)
 - `SCAN_TELEGRAM_INDIVIDUAL_ALERTS` (default: `false`, send one message per opportunity in addition to consolidated scan report)
-- `SCAN_TARGET_PRODUCTS` (default: `8`)
+- `SCAN_TARGET_PRODUCTS` (default: `16`)
 - `SCAN_CANDIDATE_MULTIPLIER` (default: `4`)
 - `SCAN_DYNAMIC_QUERIES_ENABLED` (default: `true`, enables trend-driven query planning at scan start)
-- `SCAN_DYNAMIC_QUERY_LIMIT` (default: `12`, max auto-generated Amazon Warehouse queries per scan)
+- `SCAN_DYNAMIC_QUERY_LIMIT` (default: `16`, max auto-generated Amazon Warehouse queries per scan)
+- `SCAN_TARGET_PRODUCTS_AUTO_BOOST` (default: `true`, auto-increase evaluated products when candidate pool is rich)
+- `SCAN_TARGET_PRODUCTS_MAX` (default: `20`, hard ceiling for auto-boosted evaluation target)
+- `SCAN_TARGET_PRODUCTS_BOOST_TRIGGER_MULTIPLIER` (default: `2.5`, minimum pool/base ratio required before boost)
+- `SCAN_TARGET_PRODUCTS_BOOST_STEP` (default: `4`, extra products evaluated when boost triggers)
 - `SCAN_DYNAMIC_EXPLORATION_RATIO` (default: `0.35`, share of rotating exploration queries vs historical trend queries)
 - `SCAN_DYNAMIC_TREND_MIN_SCORE` (default: `-35`, minimum trend score required for history-driven query inclusion)
 - `SCAN_REQUIRE_COMPLETE_RESELLER_QUOTES` (default: `true`, keeps only decisions with real quotes from all required reseller strategies for that category)
@@ -398,6 +402,10 @@ Optional secrets:
 - `SCAN_CANDIDATE_MULTIPLIER`
 - `SCAN_DYNAMIC_QUERIES_ENABLED`
 - `SCAN_DYNAMIC_QUERY_LIMIT`
+- `SCAN_TARGET_PRODUCTS_AUTO_BOOST`
+- `SCAN_TARGET_PRODUCTS_MAX`
+- `SCAN_TARGET_PRODUCTS_BOOST_TRIGGER_MULTIPLIER`
+- `SCAN_TARGET_PRODUCTS_BOOST_STEP`
 - `SCAN_DYNAMIC_EXPLORATION_RATIO`
 - `SCAN_DYNAMIC_TREND_MIN_SCORE`
 - `SCAN_REQUIRE_COMPLETE_RESELLER_QUOTES`
