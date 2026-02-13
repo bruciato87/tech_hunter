@@ -48,6 +48,8 @@ class BaseValuator(ABC):
 
     async def _accept_cookie_if_present(self, page: Page) -> None:
         selectors = [
+            "#cookiescript_accept",
+            "#cookiescript_save",
             "button:has-text('Accetta')",
             "button:has-text('Accetto')",
             "button:has-text('Accept all')",

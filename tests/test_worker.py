@@ -16,9 +16,11 @@ from tech_sniper_it.worker import (
     _coerce_product,
     _daily_exclusion_since_iso,
     _dedupe_products,
+    _detect_outage_optional_platforms,
     _exclude_non_profitable_candidates,
     _filter_non_core_device_candidates,
     _format_scan_summary,
+    _format_smoke_summary,
     _is_truthy_env,
     _normalize_http_url,
     _offer_log_payload,
@@ -247,6 +249,68 @@ def test_split_complete_quote_decisions_rejects_missing_required_platform_quotes
     assert rejected[0][1] == ["trenddevice"]
 
 
+def test_split_complete_quote_decisions_respects_optional_platforms() -> None:
+    product = AmazonProduct(
+        title="Apple iPhone 14 128GB",
+        price_eur=500.0,
+        category=ProductCategory.APPLE_PHONE,
+    )
+    decision = type(
+        "Decision",
+        (),
+        {
+            "product": product,
+            "offers": [
+                type(
+                    "Offer",
+                    (),
+                    {
+                        "platform": "rebuy",
+                        "offer_eur": 590.0,
+                        "error": None,
+                        "source_url": "https://www.rebuy.it/vendere/p/apple-iphone-14/1234",
+                        "raw_payload": {"price_source": "dom", "quote_verification": {"ok": True}},
+                    },
+                )()
+            ],
+        },
+    )()
+    accepted, rejected = _split_complete_quote_decisions([decision], optional_platforms={"trenddevice"})
+    assert len(accepted) == 1
+    assert not rejected
+
+
+def test_detect_outage_optional_platforms_marks_required_platform_without_quotes() -> None:
+    product = AmazonProduct(
+        title="Apple iPhone 14 128GB",
+        price_eur=500.0,
+        category=ProductCategory.APPLE_PHONE,
+    )
+    decision = type(
+        "Decision",
+        (),
+        {
+            "product": product,
+            "offers": [
+                type(
+                    "Offer",
+                    (),
+                    {
+                        "platform": "rebuy",
+                        "offer_eur": 590.0,
+                        "error": None,
+                        "source_url": "https://www.rebuy.it/vendere/p/apple-iphone-14/1234",
+                        "raw_payload": {"price_source": "dom", "quote_verification": {"ok": True}},
+                    },
+                )()
+            ],
+        },
+    )()
+    optional = _detect_outage_optional_platforms([decision])
+    assert "trenddevice" in optional
+    assert "rebuy" not in optional
+
+
 def test_format_scan_summary_includes_ui_drift_counter() -> None:
     class DummyDecision:
         def __init__(self) -> None:
@@ -273,6 +337,29 @@ def test_format_scan_summary_includes_ui_drift_counter() -> None:
 
     summary = _format_scan_summary([DummyDecision()], threshold=40.0)
     assert "🧩 UI drift rilevati: 1/1" in summary
+
+
+def test_format_smoke_summary_includes_ai_and_platform_rows() -> None:
+    class DummyDecision:
+        def __init__(self) -> None:
+            self.normalized_name = "Apple iPhone 14 128GB"
+            self.ai_provider = "openrouter"
+            self.ai_model = "perplexity/sonar"
+            self.ai_mode = "live"
+            self.product = type(
+                "Product",
+                (),
+                {"price_eur": 620.0, "url": "https://www.amazon.it/dp/B0ABC123", "title": "Apple iPhone 14 128GB", "category": ProductCategory.APPLE_PHONE},
+            )()
+            self.offers = [
+                type("Offer", (), {"platform": "rebuy", "offer_eur": 720.0, "error": None})(),
+                type("Offer", (), {"platform": "trenddevice", "offer_eur": None, "error": "timeout"})(),
+            ]
+
+    summary = _format_smoke_summary([DummyDecision()])
+    assert "🧪 Tech_Sniper_IT | Smoke Report" in summary
+    assert "♻️ rebuy: 720.00 EUR" in summary
+    assert "trenddevice: n/d" in summary.lower()
 
 
 def test_normalize_http_url_adds_scheme() -> None:

@@ -88,6 +88,12 @@ PRICE_CONTEXT_BLOCKERS: tuple[str, ...] = (
     "cookie",
     "p.iva",
     "rea",
+    # Lead pages often contain "fino a XXX€" which is not a real buyback quote.
+    "fino a",
+    "fino al",
+    "fino ad",
+    "massimo",
+    "max",
 )
 NETWORK_PRICE_KEYS: tuple[str, ...] = (
     "price",

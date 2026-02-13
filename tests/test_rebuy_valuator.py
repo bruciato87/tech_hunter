@@ -8,6 +8,7 @@ import pytest
 
 from tech_sniper_it.valuators.rebuy import (
     _assess_rebuy_match,
+    _extract_embedded_rebuy_urls,
     _extract_contextual_price,
     _extract_rebuy_product_link_candidates,
     _load_storage_state_b64,
@@ -45,6 +46,15 @@ def test_rebuy_assess_match_accepts_specific_product_url() -> None:
     assert match["ok"] is True
 
 
+def test_rebuy_assess_match_accepts_specific_sell_flow_url() -> None:
+    match = _assess_rebuy_match(
+        normalized_name="Apple iPhone 14 128GB",
+        candidate_text="Apple iPhone 14 128GB mezzanotte",
+        source_url="https://www.rebuy.it/vendere/p/apple-iphone-14/12684558",
+    )
+    assert match["ok"] is True
+
+
 def test_rebuy_assess_match_rejects_generic_category_url() -> None:
     match = _assess_rebuy_match(
         normalized_name='Apple iPad Air 13" M3 256GB Wi-Fi + 5G',
@@ -53,6 +63,16 @@ def test_rebuy_assess_match_rejects_generic_category_url() -> None:
     )
     assert match["ok"] is False
     assert match["reason"] == "generic-category-url"
+
+
+def test_rebuy_assess_match_allows_generic_when_match_is_strong() -> None:
+    match = _assess_rebuy_match(
+        normalized_name="Apple Watch Series 9 GPS + Cellular 45mm",
+        candidate_text="Apple Watch Series 9 GPS + Cellular 45mm Midnight",
+        source_url="https://www.rebuy.it/vendere/wearables",
+    )
+    assert match["ok"] is True
+    assert match["generic_override"] is True
 
 
 def test_rebuy_assess_match_rejects_generic_category_url_for_any_category() -> None:
@@ -117,3 +137,36 @@ def test_extract_rebuy_product_link_candidates_prefers_specific_product_urls() -
     )
     assert candidates
     assert "steam-deck-oled-1tb" in candidates[0]["url"]
+
+
+def test_extract_rebuy_product_link_candidates_accepts_sell_flow_links() -> None:
+    html = """
+    <html><body>
+      <main>
+        <a href="/vendere/cerca?query=iphone+14">Search</a>
+        <a href="/vendere/p/apple-iphone-14/12684558?from=rom">Apple iPhone 14</a>
+        <a href="/vendere/apple">Apple category</a>
+      </main>
+    </body></html>
+    """
+    candidates = _extract_rebuy_product_link_candidates(
+        html=html,
+        base_url="https://www.rebuy.it/vendere/cerca?query=iphone+14",
+        normalized_name="Apple iPhone 14 128GB",
+    )
+    assert candidates
+    assert "/vendere/p/apple-iphone-14/12684558" in candidates[0]["url"]
+
+
+def test_extract_embedded_rebuy_urls_supports_escaped_script_payload() -> None:
+    html = r"""
+    <script>
+      window.__NUXT__ = {"items":[
+        {"url":"\/vendere\/p\/apple-watch-series-9\/12684558"},
+        {"url":"\/vendere\/smartwatch\/apple-watch-series-9_12684558"}
+      ]};
+    </script>
+    """
+    urls = _extract_embedded_rebuy_urls(html, base_url="https://www.rebuy.it/vendere/cerca?query=apple+watch")
+    assert len(urls) == 2
+    assert urls[0].startswith("https://www.rebuy.it/vendere/")

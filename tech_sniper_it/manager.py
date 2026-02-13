@@ -340,10 +340,19 @@ def _is_generic_rebuy_offer_url(url: str | None) -> bool:
     path = (parsed.path or "").strip("/").lower()
     if not path:
         return True
-    if path.startswith("comprare/search") or path == "vendi":
+    if path.startswith("comprare/search") or path.startswith("vendere/cerca") or path in {"vendi", "vendere"}:
         return True
     segments = [segment for segment in path.split("/") if segment]
     if len(segments) <= 1:
+        return True
+    if segments[0] == "vendere":
+        # Accept both:
+        # - /vendere/<category>/<slug>_<id>
+        # - /vendere/p/<slug>/<id>
+        if len(segments) >= 4 and segments[1] == "p" and segments[-1].isdigit():
+            return False
+        if "_" in segments[-1] and segments[-1].split("_")[-1].isdigit():
+            return False
         return True
     if len(segments) == 2 and segments[0] == "comprare":
         return True
@@ -434,7 +443,30 @@ def _verify_real_resale_quote(result: ValuationResult) -> ValuationResult:
     if platform == "rebuy":
         checks["generic_url"] = _is_generic_rebuy_offer_url(source_url)
         if checks["generic_url"]:
-            reasons.append("generic-source-url")
+            generic_override = False
+            token_ratio = 0.0
+            if isinstance(match_quality, dict):
+                try:
+                    token_ratio = float(match_quality.get("token_ratio") or 0.0)
+                except (TypeError, ValueError):
+                    token_ratio = 0.0
+                generic_override = bool(match_quality.get("generic_override")) or (
+                    bool(match_quality.get("ok")) and token_ratio >= 0.72
+                )
+            wizard_states = payload.get("wizard_states")
+            has_offer_state = False
+            if isinstance(wizard_states, list):
+                has_offer_state = any(
+                    isinstance(item, dict) and str(item.get("state", "")).lower() == "offer"
+                    for item in wizard_states[-4:]
+                )
+            price_source = str(payload.get("price_source") or "").strip().lower()
+            checks["token_ratio"] = round(token_ratio, 3)
+            checks["generic_override"] = generic_override
+            checks["price_source"] = price_source or checks["price_source"]
+            checks["has_offer_state"] = has_offer_state
+            if not generic_override and not (price_source == "dom-cash" and has_offer_state):
+                reasons.append("generic-source-url")
         if not price_text:
             reasons.append("missing-price-context")
     elif platform == "trenddevice":

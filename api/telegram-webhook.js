@@ -87,6 +87,7 @@ function commandHelpText() {
     "/id - Mostra chat_id corrente",
     "/rules - Mostra regole arbitraggio",
     "/scan [json_prodotto|json_array] - Avvia scan su GitHub Actions",
+    "/smoke - Test veloce (pochi prodotti) su GitHub Actions",
     "/status - Stato runtime (via GitHub Actions)",
     "/last [n] - Ultime opportunita da Supabase (via GitHub Actions)",
   ].join("\n");
@@ -209,6 +210,40 @@ module.exports = async function handler(req, res) {
           "Scan accodato su GitHub Actions (modalita default: sorgenti prodotto configurate nel worker)."
         );
       }
+      return res.status(200).json({ ok: true });
+    }
+
+    if (command === "smoke") {
+      if (!githubReady) {
+        await sendTelegramMessage(
+          botToken,
+          chatId,
+          "Config mancante su Vercel: GITHUB_TOKEN/GITHUB_OWNER/GITHUB_REPO."
+        );
+        return res.status(200).json({ ok: true });
+      }
+
+      const products = [
+        { title: "Apple iPhone 14 128GB", price_eur: 650, category: "apple_phone" },
+        { title: "Apple Watch Ultra 2 GPS + Cellular 49mm", price_eur: 750, category: "smartwatch" },
+        { title: "Valve Steam Deck OLED 1TB", price_eur: 420, category: "handheld_console" },
+      ];
+
+      await dispatchToGitHub({
+        githubToken,
+        owner: githubOwner,
+        repo: githubRepo,
+        eventType,
+        payload: {
+          source: "telegram",
+          command: "scan",
+          mode: "smoke",
+          chat_id: String(chatId),
+          user_id: String(userId || ""),
+          products,
+        },
+      });
+      await sendTelegramMessage(botToken, chatId, `Smoke test accodato su GitHub Actions (${products.length} prodotti).`);
       return res.status(200).json({ ok: true });
     }
 

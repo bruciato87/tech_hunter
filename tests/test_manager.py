@@ -356,6 +356,39 @@ async def test_manager_quote_verification_accepts_rebuy_specific_product_url() -
 
 
 @pytest.mark.asyncio
+async def test_manager_quote_verification_accepts_rebuy_generic_url_with_strong_override() -> None:
+    manager = ManagerUnderTest(
+        valuators=[
+            StaticValuator(
+                "rebuy",
+                520.0,
+                source_url="https://www.rebuy.it/vendere/smartwatch",
+                raw_payload={
+                    "price_text": "Pagamento Diretto 520,00 €",
+                    "price_source": "dom-cash",
+                    "wizard_states": [{"attempt": 1, "state": "step1"}, {"attempt": 2, "state": "offer"}],
+                    "match_quality": {"ok": True, "reason": "ok", "token_ratio": 0.81, "generic_override": True},
+                },
+            )
+        ],
+        ai_balancer=FakeBalancer(gemini_keys=[], openrouter_keys=[]),
+        min_spread_eur=40.0,
+    )
+    product = AmazonProduct(
+        title="Apple Watch Series 9 GPS + Cellular 45mm",
+        price_eur=240.0,
+        category=ProductCategory.SMARTWATCH,
+    )
+
+    decision = await manager.evaluate_product(product)
+
+    assert decision.best_offer is not None
+    assert decision.best_offer.platform == "rebuy"
+    assert decision.best_offer.offer_eur == 520.0
+    assert decision.should_notify is True
+
+
+@pytest.mark.asyncio
 async def test_manager_quote_verification_rejects_mpb_generic_search_url() -> None:
     manager = ManagerUnderTest(
         valuators=[

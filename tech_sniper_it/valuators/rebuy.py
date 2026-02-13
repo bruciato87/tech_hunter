@@ -6,7 +6,7 @@ import re
 import tempfile
 from difflib import SequenceMatcher
 from typing import Any
-from urllib.parse import unquote, urljoin, urlparse
+from urllib.parse import quote_plus, unquote, urljoin, urlparse
 
 from bs4 import BeautifulSoup
 from playwright.async_api import Error as PlaywrightError
@@ -17,8 +17,30 @@ from tech_sniper_it.models import AmazonProduct
 from tech_sniper_it.utils import decode_json_dict_maybe_base64, parse_eur_price
 from tech_sniper_it.valuators.base import BaseValuator
 
-PRICE_HINTS: tuple[str, ...] = ("ti paghiamo", "valutazione", "offerta", "ricevi", "vendi")
-PRICE_BLOCKERS: tuple[str, ...] = ("ordine min", "spedizione", "cookie", "prezzo di vendita")
+PRICE_HINTS: tuple[str, ...] = (
+    "ti paghiamo",
+    "valutazione",
+    "offerta",
+    "ricevi",
+    "vendi",
+    # Cash-out hints (prefer these over promo/store credit).
+    "pagamento diretto",
+    "bonifico",
+    "paypal",
+    "conto corrente",
+)
+PRICE_BLOCKERS: tuple[str, ...] = (
+    "ordine min",
+    "spedizione",
+    "cookie",
+    "prezzo di vendita",
+    # Avoid overestimations: promo/store credit are not immediate cash-out.
+    "codice promozionale",
+    "buono rebuy",
+    "buono",
+    "gift card",
+    "promo",
+)
 MATCH_STOPWORDS: set[str] = {
     "apple",
     "amazon",
@@ -75,6 +97,12 @@ GENERIC_REBUY_CATEGORIES: set[str] = {
 }
 CAPACITY_TOKEN_PATTERN = re.compile(r"\b\d{2,4}\s*(?:gb|tb)\b", re.IGNORECASE)
 REBUY_PRODUCT_ID_PATTERN = re.compile(r"^\d{4,}$")
+REBUY_SELL_ID_SUFFIX_PATTERN = re.compile(r"_\d{4,}$")
+REBUY_SELL_PRODUCT_ID_PATTERN = re.compile(r"^\d{4,}$")
+REBUY_EMBEDDED_URL_PATTERN = re.compile(
+    r"(?:https?://www\.rebuy\.it)?/(?:vendere/p/[a-z0-9\-_%]+/\d{4,}|vendere/[a-z0-9\-_%]+/[a-z0-9\-_%]*_\d{4,})",
+    flags=re.IGNORECASE,
+)
 _REBUY_STORAGE_STATE_ERROR = ""
 
 
@@ -97,6 +125,15 @@ def _rebuy_deep_link_limit() -> int:
     except ValueError:
         value = 4
     return max(1, min(value, 10))
+
+
+def _rebuy_wizard_max_steps() -> int:
+    raw = (_env_or_default("REBUY_WIZARD_MAX_STEPS", "4") or "").strip()
+    try:
+        value = int(raw) if raw else 4
+    except ValueError:
+        value = 4
+    return max(2, min(value, 8))
 
 
 def _load_storage_state_b64() -> str | None:
@@ -161,6 +198,73 @@ def _extract_contextual_price(text: str) -> tuple[float | None, str]:
     return value, snippet
 
 
+def _extract_rebuy_cash_payout(text: str) -> tuple[float | None, str]:
+    """Extract the immediate cash-out offer (Pagamento Diretto / bank transfer).
+
+    Rebuy often shows multiple amounts (cash, promo, store credit). We want the *cash* figure.
+    """
+
+    if not text:
+        return None, ""
+    money = r"\\d{1,3}(?:[.\\s]\\d{3})*(?:,\\d{2})?\\s*€"
+    patterns = [
+        rf"Pagamento\\s*Diretto[^\\d]{{0,120}}({money})",
+        rf"Pagamento\\s*immediato[^\\d]{{0,120}}({money})",
+        rf"Bonifico[^\\d]{{0,120}}({money})",
+        rf"PayPal[^\\d]{{0,120}}({money})",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE | re.DOTALL)
+        if not match:
+            continue
+        snippet = match.group(0).strip()
+        value = parse_eur_price(match.group(1))
+        if value is None or value <= 0 or value > 10000:
+            continue
+        # Ignore promo/store-credit snippets even if they match.
+        lowered = snippet.lower()
+        if any(blocker in lowered for blocker in ("codice promozionale", "buono", "gift", "promo")):
+            continue
+        return value, snippet[:240]
+    return None, ""
+
+
+def _rebuy_wizard_state(text: str) -> str:
+    normalized = re.sub(r"\s+", " ", (text or "")).strip().lower()
+    if not normalized:
+        return "empty"
+    if "pagamento diretto" in normalized or "offerta preliminare" in normalized:
+        return "offer"
+    if "3 di 3" in normalized:
+        return "step3"
+    if "2 di 3" in normalized:
+        return "step2"
+    if "1 di 3" in normalized:
+        return "step1"
+    if "che aspetto ha il dispositivo" in normalized:
+        return "condition"
+    return "unknown"
+
+
+def _extract_embedded_rebuy_urls(html: str, *, base_url: str) -> list[str]:
+    if not html:
+        return []
+    raw = html.replace("\\/", "/")
+    urls: list[str] = []
+    seen: set[str] = set()
+    for match in REBUY_EMBEDDED_URL_PATTERN.finditer(raw):
+        candidate = str(match.group(0) or "").strip().strip("\"'")
+        if not candidate:
+            continue
+        absolute = urljoin(base_url, candidate)
+        marker = absolute.casefold()
+        if marker in seen:
+            continue
+        seen.add(marker)
+        urls.append(absolute)
+    return urls
+
+
 def _extract_rebuy_product_link_candidates(
     *,
     html: str,
@@ -180,9 +284,11 @@ def _extract_rebuy_product_link_candidates(
         if href.startswith(("javascript:", "mailto:")):
             continue
         href_lower = href.lower()
-        if "/comprare/" not in href_lower and "/vendi/" not in href_lower:
+        if "/comprare/" not in href_lower and "/vendere/" not in href_lower and "/vendi/" not in href_lower:
             continue
         if "/comprare/search" in href_lower:
+            continue
+        if "/vendere/cerca" in href_lower:
             continue
         full_url = urljoin(base_url, href)
         # Only keep product-like links. Header/category anchors are too noisy and cause false positives.
@@ -192,6 +298,18 @@ def _extract_rebuy_product_link_candidates(
             continue
         if segments[0] == "comprare":
             if len(segments) < 3 or not REBUY_PRODUCT_ID_PATTERN.fullmatch(segments[-1] or ""):
+                continue
+        if segments[0] == "vendere":
+            # Rebuy's sell flow has at least two URL shapes:
+            # - Legacy: /vendere/<category>/<slug>_<id>
+            # - Current (Angular): /vendere/p/<slug>/<id>[?from=...]
+            is_legacy = bool(REBUY_SELL_ID_SUFFIX_PATTERN.search(segments[-1] or ""))
+            is_modern = (
+                len(segments) >= 4
+                and segments[1] == "p"
+                and bool(REBUY_SELL_PRODUCT_ID_PATTERN.fullmatch(segments[-1] or ""))
+            )
+            if not (is_legacy or is_modern):
                 continue
         if segments[0] == "vendi" and len(segments) <= 1:
             continue
@@ -219,6 +337,30 @@ def _extract_rebuy_product_link_candidates(
                 "ranking": ranking,
             }
         )
+
+    # SPA pages sometimes render results without clickable anchors in static HTML;
+    # fallback to product URLs embedded in script payloads.
+    if len(found) < max(2, limit // 2):
+        for url in _extract_embedded_rebuy_urls(html, base_url=base_url):
+            marker = url.casefold()
+            if marker in seen_urls:
+                continue
+            seen_urls.add(marker)
+            assessment = _assess_rebuy_match(
+                normalized_name=normalized_name,
+                candidate_text=unquote(urlparse(url).path or ""),
+                source_url=url,
+            )
+            ranking = int(assessment.get("score", 0)) + (20 if assessment.get("ok") else -20)
+            found.append(
+                {
+                    "url": url,
+                    "text": unquote(urlparse(url).path or "")[:220],
+                    "href": url,
+                    "assessment": assessment,
+                    "ranking": ranking,
+                }
+            )
 
     ranked = sorted(
         found,
@@ -264,12 +406,22 @@ def _is_generic_rebuy_url(url: str | None) -> bool:
     path = (parsed.path or "").strip("/").lower()
     if not path:
         return True
-    if path.startswith("comprare/search") or path == "vendi":
+    if path.startswith("comprare/search") or path.startswith("vendere/cerca") or path in {"vendi", "vendere"}:
         return True
     segments = [segment for segment in path.split("/") if segment]
     if not segments:
         return True
     if len(segments) == 1:
+        return True
+    if segments[0] == "vendere":
+        # /vendere/<category> and other non-product pages are generic.
+        # Accept both:
+        # - /vendere/<category>/<slug>_<id>
+        # - /vendere/p/<slug>/<id>
+        if REBUY_SELL_ID_SUFFIX_PATTERN.search(segments[-1] or ""):
+            return False
+        if len(segments) >= 4 and segments[1] == "p" and REBUY_SELL_PRODUCT_ID_PATTERN.fullmatch(segments[-1] or ""):
+            return False
         return True
     if segments[0] == "comprare":
         # /comprare/<category> (and similar) are never product pages.
@@ -283,7 +435,7 @@ def _is_generic_rebuy_url(url: str | None) -> bool:
 
 def _is_search_rebuy_url(url: str | None) -> bool:
     path = (urlparse(url or "").path or "").lower()
-    return "/comprare/search" in path or path.endswith("/search")
+    return "/comprare/search" in path or path.startswith("/vendere/cerca") or path.endswith("/search")
 
 
 def _absolutize_rebuy_url(url: str | None) -> str | None:
@@ -296,7 +448,7 @@ def _absolutize_rebuy_url(url: str | None) -> str | None:
 
 
 def _resolve_rebuy_source_url(current_url: str | None, payload: dict[str, Any]) -> str | None:
-    """Rebuy is partially SPA-driven; page.url can remain /vendi even after selecting a product.
+    """Rebuy is partially SPA-driven; page.url can remain /vendere even after selecting a product.
 
     Prefer the clicked href (result_pick) or the deep-link URL (deep_link_pick) to keep verification strict.
     """
@@ -366,7 +518,16 @@ def _assess_rebuy_match(
     capacity_hits = [token for token in capacities if token in candidate_norm.replace(" ", "")]
     token_ratio = (len(hit_tokens) / len(required_tokens)) if required_tokens else 0.0
     generic_url = _is_generic_rebuy_url(source_url)
+    strong_generic_match = (
+        generic_url
+        and token_ratio >= 0.72
+        and (ratio >= 0.60 or len(hit_tokens) >= 3)
+        and (not capacities or len(capacity_hits) >= len(capacities))
+        and (not query_anchors or bool(anchor_hits))
+    )
     score = int((ratio * 100) + (len(hit_tokens) * 14) + (len(anchor_hits) * 8) - (40 if generic_url else 0))
+    if strong_generic_match:
+        score += 18
 
     if _is_search_rebuy_url(source_url):
         return {
@@ -376,10 +537,11 @@ def _assess_rebuy_match(
             "ratio": round(ratio, 3),
             "token_ratio": round(token_ratio, 3),
             "generic_url": generic_url,
+            "generic_override": False,
             "hit_tokens": hit_tokens,
             "required_tokens": required_tokens,
         }
-    if generic_url:
+    if generic_url and not strong_generic_match:
         return {
             "ok": False,
             "reason": "generic-category-url",
@@ -387,6 +549,7 @@ def _assess_rebuy_match(
             "ratio": round(ratio, 3),
             "token_ratio": round(token_ratio, 3),
             "generic_url": generic_url,
+            "generic_override": strong_generic_match,
             "hit_tokens": hit_tokens,
             "required_tokens": required_tokens,
         }
@@ -399,6 +562,7 @@ def _assess_rebuy_match(
             "ratio": round(ratio, 3),
             "token_ratio": round(token_ratio, 3),
             "generic_url": generic_url,
+            "generic_override": strong_generic_match,
             "hit_tokens": hit_tokens,
             "required_tokens": required_tokens,
         }
@@ -410,6 +574,7 @@ def _assess_rebuy_match(
             "ratio": round(ratio, 3),
             "token_ratio": round(token_ratio, 3),
             "generic_url": generic_url,
+            "generic_override": strong_generic_match,
             "hit_tokens": hit_tokens,
             "required_tokens": required_tokens,
         }
@@ -421,6 +586,7 @@ def _assess_rebuy_match(
             "ratio": round(ratio, 3),
             "token_ratio": round(token_ratio, 3),
             "generic_url": generic_url,
+            "generic_override": strong_generic_match,
             "hit_tokens": hit_tokens,
             "required_tokens": required_tokens,
         }
@@ -432,6 +598,7 @@ def _assess_rebuy_match(
             "ratio": round(ratio, 3),
             "token_ratio": round(token_ratio, 3),
             "generic_url": generic_url,
+            "generic_override": strong_generic_match,
             "hit_tokens": hit_tokens,
             "required_tokens": required_tokens,
         }
@@ -442,6 +609,7 @@ def _assess_rebuy_match(
         "ratio": round(ratio, 3),
         "token_ratio": round(token_ratio, 3),
         "generic_url": generic_url,
+        "generic_override": strong_generic_match,
         "hit_tokens": hit_tokens,
         "required_tokens": required_tokens,
     }
@@ -450,7 +618,7 @@ def _assess_rebuy_match(
 class RebuyValuator(BaseValuator):
     platform_name = "rebuy"
     condition_label = "come_nuovo"
-    base_url = "https://www.rebuy.it/vendi"
+    base_url = "https://www.rebuy.it/vendere"
 
     async def _fetch_offer(
         self,
@@ -481,51 +649,15 @@ class RebuyValuator(BaseValuator):
             page = await context.new_page()
             page.set_default_timeout(self.nav_timeout_ms)
             try:
-                await page.goto(self.base_url, wait_until="domcontentloaded")
+                search_url = f"{self.base_url}/cerca?query={quote_plus(str(query))}"
+                await page.goto(search_url, wait_until="domcontentloaded")
                 await self._accept_cookie_if_present(page)
-
-                search_selectors = self._selector_candidates(
-                    site=self.platform_name,
-                    slot="search_input",
-                    defaults=[
-                        "input[type='search']",
-                        "input[name*='search' i]",
-                        "input[placeholder*='Cerca' i]",
-                        "[data-testid*='search'] input",
-                    ],
-                    payload=payload,
-                )
-                filled = await self._fill_first(
-                    page,
-                    search_selectors,
-                    value=query,
-                    timeout_ms=10000,
-                )
-                if not filled:
-                    filled = await self._fill_first_semantic(
-                        page,
-                        value=query,
-                        keywords=["cerca", "search", "ean", "modello", "prodotto"],
-                        timeout_ms=4500,
-                    )
-                    payload["adaptive_fallbacks"]["search_semantic"] = filled
-                else:
-                    payload["adaptive_fallbacks"]["search_semantic"] = False
-
-                if not filled:
-                    probe = await self._attach_ui_probe(
-                        payload=payload,
-                        page=page,
-                        site=self.platform_name,
-                        stage="search_input_missing",
-                        expected_keywords=["rebuy", "vendi", "cerca", "usato"],
-                    )
-                    raise RuntimeError(f"Rebuy search input not found (ui_drift={probe.get('drift_suspected')})")
-
-                await page.keyboard.press("Enter")
-                await page.wait_for_timeout(2200)
+                await page.wait_for_timeout(1200)
 
                 deep_opened = await self._open_best_result_deep_link(page, normalized_name, payload=payload)
+                if not deep_opened:
+                    await page.wait_for_timeout(1500)
+                    deep_opened = await self._open_best_result_deep_link(page, normalized_name, payload=payload)
                 payload["adaptive_fallbacks"]["deep_link_opened"] = deep_opened
 
                 result_selectors = self._selector_candidates(
@@ -533,7 +665,8 @@ class RebuyValuator(BaseValuator):
                     slot="result_open",
                     defaults=[
                         "[data-testid*='product-card'] a",
-                        "a[href*='/vendi/']",
+                        "a[href*='/vendere/p/']",
+                        "a[href*='/vendere/']",
                         "a[href*='/offer']",
                         ".product-card a",
                         "li a:has-text('GB')",
@@ -556,6 +689,24 @@ class RebuyValuator(BaseValuator):
                 payload["result_opened"] = opened
                 await page.wait_for_load_state("domcontentloaded")
                 await page.wait_for_timeout(1200)
+                await self._accept_cookie_if_present(page)
+
+                # Rebuy sell flow is a multi-step wizard. Some products start with a yes/no
+                # functionality check before the condition step appears.
+                try:
+                    has_condition = await page.locator("text=/Come nuovo/i").first.is_visible(timeout=1200)
+                except PlaywrightError:
+                    has_condition = False
+                if not has_condition:
+                    progressed = await self._click_first_semantic(
+                        page,
+                        keywords=["sì", "si", "yes"],
+                        selectors=["button", "[role='button']", "a", "label", "li", "div[role='option']"],
+                        timeout_ms=2800,
+                    )
+                    if progressed:
+                        payload.setdefault("wizard", []).append({"step": "yes_no", "selected": "si"})
+                        await page.wait_for_timeout(1600)
 
                 condition_selectors = self._selector_candidates(
                     site=self.platform_name,
@@ -585,6 +736,11 @@ class RebuyValuator(BaseValuator):
                 payload["resolved_source_url"] = resolved_source_url
 
                 match_text = await self._collect_match_text(page)
+                try:
+                    body_text = await page.inner_text("body", timeout=1800)
+                except PlaywrightError:
+                    body_text = ""
+                payload["wizard_state_before_match"] = _rebuy_wizard_state(body_text)
                 match = _assess_rebuy_match(
                     normalized_name=normalized_name,
                     candidate_text=match_text,
@@ -607,7 +763,63 @@ class RebuyValuator(BaseValuator):
                         f"Rebuy low-confidence match ({reason}); discarded to prevent false-positive."
                     )
 
-                price, price_text = await self._extract_price(page, payload=payload)
+                # Complete remaining wizard steps (e.g. accessories) until we see an offer.
+                price = None
+                price_text = ""
+                wizard_max_steps = _rebuy_wizard_max_steps()
+                for step_attempt in range(1, wizard_max_steps + 1):
+                    try:
+                        step_body = await page.inner_text("body", timeout=1600)
+                    except PlaywrightError:
+                        step_body = ""
+                    payload.setdefault("wizard_states", []).append(
+                        {"attempt": step_attempt, "state": _rebuy_wizard_state(step_body)}
+                    )
+                    price, price_text = await self._extract_price(page, payload=payload)
+                    if price is not None:
+                        break
+
+                    await self._accept_cookie_if_present(page)
+
+                    # If we are on the condition step, pick "Come nuovo" before trying to advance with yes/no.
+                    condition_progress = await self._click_first_semantic(
+                        page,
+                        keywords=["come nuovo"],
+                        timeout_ms=2000,
+                    )
+                    if condition_progress:
+                        payload["condition_selected"] = True
+                        payload.setdefault("wizard", []).append({"step": "condition", "attempt": step_attempt, "selected": "come_nuovo"})
+                        await page.wait_for_timeout(1600)
+                        continue
+
+                    progressed = await self._click_first_semantic(
+                        page,
+                        keywords=["sì", "si", "yes"],
+                        selectors=["button", "[role='button']", "a", "label", "li", "div[role='option']"],
+                        timeout_ms=2600,
+                    )
+                    if not progressed:
+                        progressed = await self._click_first(
+                            page,
+                            selectors=[
+                                "button:has-text('Continua')",
+                                "button:has-text('Avanti')",
+                                "button:has-text('Weiter')",
+                            ],
+                            timeout_ms=2600,
+                        )
+                    if progressed:
+                        payload.setdefault("wizard", []).append({"step": "auto", "attempt": step_attempt, "action": "progress"})
+                        await page.wait_for_timeout(1600)
+                    else:
+                        # Give the UI one last chance to render the offer (SPA updates can lag behind clicks).
+                        await page.wait_for_timeout(1800)
+                        price, price_text = await self._extract_price(page, payload=payload)
+                        if price is not None:
+                            break
+                        break
+
                 payload["price_text"] = price_text
                 if price is None:
                     await self._attach_ui_probe(
@@ -615,9 +827,10 @@ class RebuyValuator(BaseValuator):
                         page=page,
                         site=self.platform_name,
                         stage="price_missing",
-                        expected_keywords=["rebuy", "vendi", "offerta", "€"],
+                        expected_keywords=["rebuy", "vendere", "offerta", "pagamento", "€"],
                     )
-                    raise RuntimeError("Rebuy price not found after adaptive fallbacks.")
+                    last_state = payload.get("wizard_states", [])[-1]["state"] if payload.get("wizard_states") else "unknown"
+                    raise RuntimeError(f"Rebuy price not found after adaptive fallbacks (wizard_state={last_state}).")
                 payload["price_source"] = str(payload.get("price_source") or "dom")
                 return price, resolved_source_url or page.url, payload
             finally:
@@ -626,17 +839,22 @@ class RebuyValuator(BaseValuator):
                 _remove_file_if_exists(storage_state_path)
 
     async def _open_best_result_deep_link(self, page: Page, normalized_name: str, *, payload: dict[str, Any]) -> bool:
-        try:
-            html = await page.content()
-        except PlaywrightError:
-            return False
-
-        candidates = _extract_rebuy_product_link_candidates(
-            html=html,
-            base_url=page.url,
-            normalized_name=normalized_name,
-            limit=12,
-        )
+        candidates: list[dict[str, Any]] = []
+        for wait_ms in (0, 900, 1600):
+            if wait_ms:
+                await page.wait_for_timeout(wait_ms)
+            try:
+                html = await page.content()
+            except PlaywrightError:
+                continue
+            candidates = _extract_rebuy_product_link_candidates(
+                html=html,
+                base_url=page.url,
+                normalized_name=normalized_name,
+                limit=12,
+            )
+            if candidates:
+                break
         payload["deep_link_candidates"] = [
             {
                 "url": item["url"],
@@ -660,6 +878,7 @@ class RebuyValuator(BaseValuator):
             try:
                 await page.goto(url, wait_until="domcontentloaded")
                 await page.wait_for_timeout(900)
+                await self._accept_cookie_if_present(page)
             except PlaywrightError:
                 continue
             payload["deep_link_pick"] = {
@@ -688,6 +907,23 @@ class RebuyValuator(BaseValuator):
         if not opened:
             return {"offer": None, "url": None}
 
+        await self._accept_cookie_if_present(page)
+
+        try:
+            has_condition = await page.locator("text=/Come nuovo/i").first.is_visible(timeout=1200)
+        except PlaywrightError:
+            has_condition = False
+        if not has_condition:
+            progressed = await self._click_first_semantic(
+                page,
+                keywords=["sì", "si", "yes"],
+                selectors=["button", "[role='button']", "a", "label", "li", "div[role='option']"],
+                timeout_ms=2600,
+            )
+            if progressed:
+                payload.setdefault("wizard", []).append({"step": "yes_no", "selected": "si"})
+                await page.wait_for_timeout(1600)
+
         condition_selected = await self._click_first(page, condition_selectors, timeout_ms=5000)
         if not condition_selected:
             condition_selected = await self._click_first_semantic(
@@ -710,7 +946,55 @@ class RebuyValuator(BaseValuator):
         if not match.get("ok"):
             return {"offer": None, "url": None}
 
-        price, price_text = await self._extract_price(page, payload=payload)
+        price = None
+        price_text = ""
+        wizard_max_steps = _rebuy_wizard_max_steps()
+        for step_attempt in range(1, wizard_max_steps + 1):
+            try:
+                step_body = await page.inner_text("body", timeout=1600)
+            except PlaywrightError:
+                step_body = ""
+            payload.setdefault("wizard_states", []).append({"attempt": step_attempt, "state": _rebuy_wizard_state(step_body)})
+            price, price_text = await self._extract_price(page, payload=payload)
+            if price is not None:
+                break
+
+            await self._accept_cookie_if_present(page)
+
+            condition_progress = await self._click_first_semantic(
+                page,
+                keywords=["come nuovo"],
+                timeout_ms=2000,
+            )
+            if condition_progress:
+                payload["condition_selected"] = True
+                payload.setdefault("wizard", []).append({"step": "condition", "attempt": step_attempt, "selected": "come_nuovo"})
+                await page.wait_for_timeout(1600)
+                continue
+            progressed = await self._click_first_semantic(
+                page,
+                keywords=["sì", "si", "yes"],
+                selectors=["button", "[role='button']", "a", "label", "li", "div[role='option']"],
+                timeout_ms=2600,
+            )
+            if not progressed:
+                progressed = await self._click_first(
+                    page,
+                    selectors=[
+                        "button:has-text('Continua')",
+                        "button:has-text('Avanti')",
+                        "button:has-text('Weiter')",
+                    ],
+                    timeout_ms=2600,
+                )
+            if not progressed:
+                await page.wait_for_timeout(1800)
+                price, price_text = await self._extract_price(page, payload=payload)
+                if price is not None:
+                    break
+                break
+            payload.setdefault("wizard", []).append({"step": "auto", "attempt": step_attempt, "action": "progress"})
+            await page.wait_for_timeout(1600)
         payload["price_text"] = price_text
         if price is None:
             return {"offer": None, "url": None}
@@ -823,6 +1107,17 @@ class RebuyValuator(BaseValuator):
         return " ".join(chunks)
 
     async def _extract_price(self, page: Page, *, payload: dict[str, Any] | None = None) -> tuple[float | None, str]:
+        # Prefer immediate cash-out offers over promo/store credit.
+        try:
+            body_text = await page.inner_text("body", timeout=2200)
+        except PlaywrightError:
+            body_text = ""
+        cash_value, cash_snippet = _extract_rebuy_cash_payout(body_text)
+        if cash_value is not None:
+            if payload is not None:
+                payload["price_source"] = "dom-cash"
+            return cash_value, cash_snippet
+
         selector_candidates = self._selector_candidates(
             site=self.platform_name,
             slot="price",

@@ -1,0 +1,76 @@
+name: Tech Sniper IT Smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      products_json:
+        description: "JSON array of Amazon products ({title,price_eur,category,ean,url})"
+        required: false
+        default: |
+          [
+            {"title":"Apple iPhone 14 128GB","price_eur":650,"category":"apple_phone"},
+            {"title":"Apple Watch Ultra 2 GPS + Cellular 49mm","price_eur":750,"category":"smartwatch"},
+            {"title":"Valve Steam Deck OLED 1TB","price_eur":420,"category":"handheld_console"}
+          ]
+        type: string
+
+concurrency:
+  group: tech-sniper-it-smoke
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      SUPABASE_URL: ${{ vars.SUPABASE_URL || secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      SUPABASE_TABLE: ${{ vars.SUPABASE_TABLE || 'arbitrage_opportunities' }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ vars.TELEGRAM_CHAT_ID || secrets.TELEGRAM_CHAT_ID }}
+      OPENROUTER_API_KEYS: ${{ secrets.OPENROUTER_API_KEYS }}
+      OPENROUTER_MODEL: ${{ vars.OPENROUTER_MODEL || 'openrouter/auto' }}
+      OPENROUTER_BASE_URL: ${{ vars.OPENROUTER_BASE_URL || 'https://openrouter.ai/api/v1/chat/completions' }}
+      OPENROUTER_FREE_MODELS: ${{ vars.OPENROUTER_FREE_MODELS || 'perplexity/sonar,deepseek/deepseek-r1:free,qwen/qwen-2.5-72b-instruct:free,meta-llama/llama-3.3-70b-instruct:free,mistralai/mistral-small-3.1-24b-instruct:free,google/gemini-2.0-flash-exp:free' }}
+      MIN_SPREAD_EUR: ${{ vars.MIN_SPREAD_EUR || '40' }}
+      STRATEGY_PROFILE: ${{ vars.STRATEGY_PROFILE || 'balanced' }}
+      SCAN_MODE: "smoke"
+      SCAN_SMOKE_TARGET_PRODUCTS: "3"
+      SCAN_SMOKE_NAV_TIMEOUT_MS: "20000"
+      MAX_PARALLEL_PRODUCTS: "1"
+      SCAN_REQUIRE_COMPLETE_RESELLER_QUOTES: "false"
+      AMAZON_WAREHOUSE_ENABLED: "false"
+      AMAZON_WAREHOUSE_CART_PRICING_ENABLED: "false"
+      PLAYWRIGHT_NAV_TIMEOUT_MS: "20000"
+      REBUY_USE_STORAGE_STATE: ${{ vars.REBUY_USE_STORAGE_STATE || 'true' }}
+      REBUY_STORAGE_STATE_B64: ${{ secrets.REBUY_STORAGE_STATE_B64 }}
+      MPB_USE_STORAGE_STATE: ${{ vars.MPB_USE_STORAGE_STATE || 'true' }}
+      MPB_STORAGE_STATE_B64: ${{ secrets.MPB_STORAGE_STATE_B64 }}
+      TRENDDEVICE_USE_STORAGE_STATE: ${{ vars.TRENDDEVICE_USE_STORAGE_STATE || 'true' }}
+      TRENDDEVICE_STORAGE_STATE_B64: ${{ secrets.TRENDDEVICE_STORAGE_STATE_B64 }}
+      HEADLESS: "true"
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          python -m playwright install --with-deps chromium
+
+      - name: Inject products
+        run: |
+          printf "AMAZON_PRODUCTS_JSON=%s\n" '${{ github.event.inputs.products_json }}' >> "$GITHUB_ENV"
+
+      - name: Run smoke worker
+        run: |
+          python -u -m tech_sniper_it.worker
+
