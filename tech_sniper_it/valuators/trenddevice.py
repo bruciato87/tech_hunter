@@ -3,11 +3,15 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import random
 import re
 import tempfile
+import time
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 from typing import Any
+from urllib import error as urllib_error
+from urllib import request as urllib_request
 from urllib.parse import urlparse
 
 from bs4 import BeautifulSoup
@@ -164,6 +168,7 @@ ANCHOR_TOKENS: tuple[str, ...] = (
 )
 CAPACITY_TOKEN_PATTERN = re.compile(r"\b\d{2,4}\s*(?:gb|tb)\b", re.IGNORECASE)
 _TRENDDEVICE_STORAGE_STATE_ERROR = ""
+_TRENDDEVICE_DEFAULT_API_BASE_URL = "https://0lpt5fe6f2.execute-api.eu-south-1.amazonaws.com/prod"
 
 
 def _env_or_default(name: str, default: str) -> str:
@@ -209,6 +214,215 @@ def _remove_file_if_exists(path: str | None) -> None:
         return
     except Exception:
         return
+
+
+def _trenddevice_api_enabled() -> bool:
+    raw = _env_or_default("TRENDDEVICE_API_ENABLED", "true").lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
+def _trenddevice_api_base_url() -> str:
+    return _env_or_default("TRENDDEVICE_API_BASE_URL", _TRENDDEVICE_DEFAULT_API_BASE_URL).rstrip("/")
+
+
+def _trenddevice_api_timeout_seconds() -> float:
+    raw = (_env_or_default("TRENDDEVICE_API_TIMEOUT_SECONDS", "18") or "").strip()
+    try:
+        value = float(raw) if raw else 18.0
+    except ValueError:
+        value = 18.0
+    return max(5.0, min(value, 60.0))
+
+
+def _trenddevice_api_email_candidates() -> list[str]:
+    raw = (os.getenv("TRENDDEVICE_LEAD_EMAIL") or "").strip()
+    candidates: list[str] = []
+    if raw and "@" in raw:
+        local, _, domain = raw.partition("@")
+        local_base = local.split("+")[0] or "techsniperit"
+        suffix = f"{int(time.time())}{random.randint(100, 999)}"
+        candidates.append(f"{local_base}+scan{suffix}@{domain}")
+        candidates.append(raw)
+    ts = f"{int(time.time())}{random.randint(1000, 9999)}"
+    candidates.append(f"techsniperit{ts}@gmail.com")
+    candidates.append(f"techsniperit{ts}@outlook.com")
+    unique: list[str] = []
+    for value in candidates:
+        marker = value.casefold()
+        if marker not in {item.casefold() for item in unique}:
+            unique.append(value)
+    return unique[:4]
+
+
+def _trenddevice_api_request_json(
+    *,
+    method: str,
+    path: str,
+    payload: dict[str, Any] | None = None,
+    timeout_seconds: float,
+) -> tuple[Any | None, dict[str, Any]]:
+    url = f"{_trenddevice_api_base_url()}/{path.lstrip('/')}"
+    body: bytes | None = None
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+        ),
+        "Accept": "application/json, text/plain, */*",
+    }
+    if payload is not None:
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    request = urllib_request.Request(
+        url,
+        data=body,
+        method=method.upper(),
+        headers=headers,
+    )
+    try:
+        with urllib_request.urlopen(request, timeout=timeout_seconds) as response:
+            status = int(getattr(response, "status", 200) or 200)
+            raw = response.read().decode("utf-8", errors="ignore")
+        parsed = json.loads(raw) if raw else None
+        return parsed, {"ok": True, "status": status, "url": url}
+    except urllib_error.HTTPError as exc:
+        try:
+            raw = exc.read().decode("utf-8", errors="ignore")
+        except Exception:
+            raw = ""
+        details: dict[str, Any] = {"ok": False, "status": int(exc.code), "url": url, "raw": raw[:400]}
+        try:
+            details["json"] = json.loads(raw) if raw else None
+        except Exception:
+            details["json"] = None
+        return None, details
+    except Exception as exc:
+        return None, {"ok": False, "status": None, "url": url, "error": str(exc)}
+
+
+def _trenddevice_api_label_text(characteristic: dict[str, Any]) -> str:
+    values = characteristic.get("usato_caratteristiche_valori")
+    if isinstance(values, list):
+        for row in values:
+            if not isinstance(row, dict):
+                continue
+            name = str(row.get("nome") or "").strip()
+            description = str(row.get("descrizione") or "").strip()
+            text = " ".join(part for part in (name, description) if part).strip()
+            if text:
+                return text
+    return ""
+
+
+def _trenddevice_api_option_name(option: dict[str, Any]) -> str:
+    values = option.get("usato_opzioni_valori")
+    if isinstance(values, list):
+        for row in values:
+            if not isinstance(row, dict):
+                continue
+            name = str(row.get("nome") or "").strip()
+            if name:
+                return name
+    fallback = str(option.get("nome") or "").strip()
+    return fallback
+
+
+def _trenddevice_api_step_type(characteristic: dict[str, Any], options: list[WizardOption]) -> str:
+    label_norm = _normalize_wizard_text(_trenddevice_api_label_text(characteristic))
+    if "capacita" in label_norm:
+        return STEP_CAPACITY
+    if "condizion" in label_norm or "stato" in label_norm:
+        return STEP_CONDITION
+    if "batteria" in label_norm:
+        return STEP_BATTERY
+    if "network" in label_norm or "sim" in label_norm:
+        return STEP_SIM
+    if "provenienza" in label_norm or "comprato" in label_norm:
+        return STEP_MARKET
+    if "color" in label_norm:
+        return STEP_COLOR
+    return _detect_wizard_step(options)
+
+
+def _trenddevice_api_pick_device(
+    *,
+    devices: list[dict[str, Any]],
+    product: AmazonProduct,
+    normalized_name: str,
+) -> dict[str, Any] | None:
+    targets = _infer_family_targets(product, normalized_name)
+    query = _normalize_wizard_text(f"{product.title} {normalized_name}")
+    best_row: dict[str, Any] | None = None
+    best_score = -10_000
+    for row in devices:
+        if not isinstance(row, dict):
+            continue
+        models = row.get("models")
+        if not isinstance(models, list) or not models:
+            continue
+        name = _normalize_wizard_text(str(row.get("nome") or ""))
+        if not name:
+            continue
+        score = int(SequenceMatcher(None, query, name).ratio() * 30)
+        for target in targets:
+            if target and target in name:
+                score += 110
+        if product.category == ProductCategory.APPLE_PHONE:
+            score += 220 if "iphone" in name else -120
+        if product.category == ProductCategory.SMARTWATCH:
+            if "watch" in name or "garmin" in name:
+                score += 220
+            if "iphone" in name:
+                score -= 140
+        if "iphone" in query and "iphone" in name:
+            score += 80
+        if "watch" in query and "watch" in name:
+            score += 80
+        if score > best_score:
+            best_row = row
+            best_score = score
+    return best_row
+
+
+def _trenddevice_api_pick_model(
+    *,
+    models: list[dict[str, Any]],
+    normalized_name: str,
+) -> dict[str, Any] | None:
+    if not models:
+        return None
+    model_hint = _extract_iphone_model_hint(normalized_name)
+    ranked: list[tuple[int, dict[str, Any]]] = []
+    for index, row in enumerate(models):
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get("nome") or "").strip()
+        if not name:
+            continue
+        option = WizardOption(index=index, text=name, normalized=_normalize_wizard_text(name))
+        score = _model_score(option, model_hint=model_hint, normalized_name=normalized_name)
+        ranked.append((score, row))
+    if not ranked:
+        return None
+    ranked.sort(key=lambda item: item[0], reverse=True)
+    return ranked[0][1]
+
+
+def _trenddevice_api_extract_stima(data: Any) -> float | None:
+    if isinstance(data, dict):
+        richiesta = data.get("richiesta")
+        if isinstance(richiesta, dict):
+            value = _parse_plain_price(richiesta.get("stima"))
+            if value is not None:
+                return value
+            # Last-resort fallback: if stima is missing, use TD-money quote.
+            value = _parse_plain_price(richiesta.get("stima_money_td"))
+            if value is not None:
+                return value
+        value = _parse_plain_price(data.get("stima"))
+        if value is not None:
+            return value
+    return None
 
 
 @dataclass(slots=True)
@@ -1237,6 +1451,243 @@ class TrendDeviceValuator(BaseValuator):
             await page.wait_for_timeout(1400)
         return submitted
 
+    async def _try_api_offer(
+        self,
+        *,
+        product: AmazonProduct,
+        normalized_name: str,
+        payload: dict[str, Any],
+    ) -> tuple[float | None, str | None]:
+        if not _trenddevice_api_enabled():
+            payload["api"] = {"enabled": False, "reason": "disabled-by-env"}
+            return None, None
+
+        timeout_seconds = _trenddevice_api_timeout_seconds()
+
+        def _run() -> dict[str, Any]:
+            trace: dict[str, Any] = {
+                "enabled": True,
+                "base_url": _trenddevice_api_base_url(),
+                "timeout_seconds": timeout_seconds,
+                "post_attempts": [],
+            }
+
+            catalog_data, catalog_meta = _trenddevice_api_request_json(
+                method="GET",
+                path="/vendi/usato",
+                timeout_seconds=timeout_seconds,
+            )
+            trace["catalog"] = catalog_meta
+            if not isinstance(catalog_data, dict):
+                return {"ok": False, "reason": "catalog-unavailable", "trace": trace}
+            devices = catalog_data.get("usatoDevice")
+            if not isinstance(devices, list) or not devices:
+                return {"ok": False, "reason": "catalog-empty", "trace": trace}
+
+            device = _trenddevice_api_pick_device(
+                devices=[item for item in devices if isinstance(item, dict)],
+                product=product,
+                normalized_name=normalized_name,
+            )
+            if not isinstance(device, dict):
+                return {"ok": False, "reason": "device-not-found", "trace": trace}
+
+            models = device.get("models")
+            if not isinstance(models, list) or not models:
+                return {"ok": False, "reason": "model-list-empty", "trace": trace}
+            model = _trenddevice_api_pick_model(
+                models=[item for item in models if isinstance(item, dict)],
+                normalized_name=normalized_name,
+            )
+            if not isinstance(model, dict):
+                return {"ok": False, "reason": "model-not-found", "trace": trace}
+
+            model_id = int(model.get("id") or 0)
+            if model_id <= 0:
+                return {"ok": False, "reason": "invalid-model-id", "trace": trace}
+            trace["selected"] = {
+                "device_id": int(device.get("id") or 0),
+                "device_name": str(device.get("nome") or ""),
+                "model_id": model_id,
+                "model_name": str(model.get("nome") or ""),
+            }
+
+            detail_data, detail_meta = _trenddevice_api_request_json(
+                method="GET",
+                path=f"/vendi/usato/{model_id}",
+                timeout_seconds=timeout_seconds,
+            )
+            trace["model_detail"] = detail_meta
+            if not isinstance(detail_data, dict):
+                return {"ok": False, "reason": "model-detail-unavailable", "trace": trace}
+
+            characteristics = detail_data.get("usatoDevice")
+            if not isinstance(characteristics, list) or not characteristics:
+                return {"ok": False, "reason": "characteristics-empty", "trace": trace}
+
+            selected_characteristics: list[dict[str, Any]] = []
+            wizard_steps: list[dict[str, Any]] = [
+                {
+                    "step": 1,
+                    "step_type": STEP_DEVICE_FAMILY,
+                    "selected": str(device.get("nome") or ""),
+                    "options_count": len([item for item in devices if isinstance(item, dict)]),
+                    "confirmed": True,
+                    "source": "api",
+                },
+                {
+                    "step": 2,
+                    "step_type": STEP_MODEL,
+                    "selected": str(model.get("nome") or ""),
+                    "options_count": len([item for item in models if isinstance(item, dict)]),
+                    "confirmed": True,
+                    "source": "api",
+                },
+            ]
+            for step_index, characteristic in enumerate(characteristics, start=3):
+                if not isinstance(characteristic, dict):
+                    continue
+                options_raw = characteristic.get("usato_opzioni")
+                if not isinstance(options_raw, list) or not options_raw:
+                    continue
+                wizard_options: list[WizardOption] = []
+                for option_index, option in enumerate(options_raw):
+                    if not isinstance(option, dict):
+                        continue
+                    name = _trenddevice_api_option_name(option)
+                    if not name:
+                        continue
+                    wizard_options.append(
+                        WizardOption(
+                            index=option_index,
+                            text=name,
+                            normalized=_normalize_wizard_text(name),
+                            selector="api",
+                        )
+                    )
+                if not wizard_options:
+                    continue
+                step_type = _trenddevice_api_step_type(characteristic, wizard_options)
+                chosen = _pick_wizard_option(
+                    step=step_type,
+                    options=wizard_options,
+                    product=product,
+                    normalized_name=normalized_name,
+                )
+                if chosen is None:
+                    chosen = wizard_options[0]
+                option_payload = options_raw[chosen.index]
+                if not isinstance(option_payload, dict):
+                    continue
+                characteristic_payload = dict(characteristic)
+                characteristic_payload["usato_opzioni"] = [dict(option_payload)]
+                selected_characteristics.append(characteristic_payload)
+                wizard_steps.append(
+                    {
+                        "step": step_index,
+                        "step_type": step_type,
+                        "selected": chosen.text,
+                        "options_count": len(wizard_options),
+                        "confirmed": True,
+                        "source": "api",
+                    }
+                )
+
+            if not selected_characteristics:
+                return {"ok": False, "reason": "no-characteristics-selected", "trace": trace}
+
+            model_payload = dict(model)
+            model_payload["options"] = selected_characteristics
+            device_payload = dict(device)
+            device_payload["models"] = [model_payload]
+            device_payload["options"] = None
+
+            for email in _trenddevice_api_email_candidates():
+                request_payload = {
+                    "usatoDevice": device_payload,
+                    "email": email,
+                }
+                post_data, post_meta = _trenddevice_api_request_json(
+                    method="POST",
+                    path="/vendi/usato",
+                    payload=request_payload,
+                    timeout_seconds=timeout_seconds,
+                )
+                attempt_row = {
+                    "email_domain": email.split("@")[-1],
+                    "status": post_meta.get("status"),
+                    "ok": bool(post_meta.get("ok")),
+                }
+                trace["post_attempts"].append(attempt_row)
+                if not isinstance(post_data, dict):
+                    continue
+
+                richiesta = post_data.get("richiesta") if isinstance(post_data.get("richiesta"), dict) else {}
+                request_id = int(richiesta.get("id") or 0) if richiesta else 0
+                stima = _trenddevice_api_extract_stima(post_data)
+                detail_meta_payload: dict[str, Any] = {}
+                detail_data = None
+                if stima is None and request_id > 0:
+                    detail_data, detail_meta_payload = _trenddevice_api_request_json(
+                        method="GET",
+                        path=f"/richiesta/{request_id}",
+                        timeout_seconds=timeout_seconds,
+                    )
+                    if isinstance(detail_data, dict):
+                        stima = _trenddevice_api_extract_stima(detail_data)
+                if stima is None:
+                    continue
+
+                td_money = None
+                if isinstance(richiesta, dict):
+                    td_money = _parse_plain_price(richiesta.get("stima_money_td"))
+                if td_money is None and isinstance(detail_data, dict):
+                    detail_richiesta = detail_data.get("richiesta")
+                    if isinstance(detail_richiesta, dict):
+                        td_money = _parse_plain_price(detail_richiesta.get("stima_money_td"))
+                price_text = f"stima={stima:.2f}€"
+                if td_money is not None:
+                    price_text += f" | stima_money_td={td_money:.2f}€"
+                source_url = f"{self.base_url}?model={model_id}&request={request_id}" if request_id > 0 else f"{self.base_url}?model={model_id}"
+                validation_url = (
+                    f"{_trenddevice_api_base_url()}/richiesta/{request_id}" if request_id > 0 else f"{_trenddevice_api_base_url()}/vendi/usato/{model_id}"
+                )
+                trace["selected"]["request_id"] = request_id
+                if detail_meta_payload:
+                    trace["richiesta_detail"] = detail_meta_payload
+                return {
+                    "ok": True,
+                    "offer": stima,
+                    "price_text": price_text,
+                    "source_url": source_url,
+                    "validation_url": validation_url,
+                    "wizard": wizard_steps,
+                    "trace": trace,
+                }
+            return {"ok": False, "reason": "post-no-stima", "trace": trace}
+
+        result = await asyncio.to_thread(_run)
+        trace = result.get("trace") if isinstance(result, dict) else {}
+        payload["api"] = trace if isinstance(trace, dict) else {}
+        if not isinstance(result, dict) or not result.get("ok"):
+            payload["api"]["status"] = "fallback-dom"
+            if isinstance(result, dict):
+                payload["api"]["reason"] = result.get("reason", "unknown")
+            return None, None
+
+        payload["api"]["status"] = "ok"
+        payload["wizard"] = list(result.get("wizard") or [])
+        payload["price_source"] = "api"
+        payload["price_text"] = str(result.get("price_text") or "")
+        self._validate_match_or_raise(
+            product=product,
+            normalized_name=normalized_name,
+            source_url=str(result.get("validation_url") or result.get("source_url") or self.base_url),
+            price_text=payload["price_text"],
+            payload=payload,
+        )
+        return float(result["offer"]), str(result.get("source_url") or self.base_url)
+
     def _validate_match_or_raise(
         self,
         *,
@@ -1274,6 +1725,14 @@ class TrendDeviceValuator(BaseValuator):
             "adaptive_fallbacks": {},
             "network_price_candidates": [],
         }
+        api_offer, api_source_url = await self._try_api_offer(
+            product=product,
+            normalized_name=normalized_name,
+            payload=payload,
+        )
+        if api_offer is not None:
+            return api_offer, api_source_url or self.base_url, payload
+
         storage_state_path = _load_storage_state_b64()
         payload["storage_state"] = bool(storage_state_path)
         if _use_storage_state() and storage_state_path is None:
@@ -1696,6 +2155,11 @@ __all__ = [
     "_detect_wizard_step",
     "_extract_contextual_price",
     "_extract_iphone_model_hint",
+    "_trenddevice_api_extract_stima",
+    "_trenddevice_api_option_name",
+    "_trenddevice_api_pick_device",
+    "_trenddevice_api_pick_model",
+    "_trenddevice_api_step_type",
     "_is_email_gate_text",
     "_normalize_wizard_text",
 ]

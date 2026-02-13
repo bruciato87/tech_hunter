@@ -15,6 +15,7 @@ from tech_sniper_it.valuators.mpb import (
     _detect_blockers,
     _env_or_default,
     _extract_mpb_sell_link_candidates,
+    _extract_prices_from_json_blob,
     _extract_contextual_price,
     _load_storage_state_b64,
     _mark_mpb_temporarily_blocked,
@@ -171,6 +172,32 @@ def test_pick_best_mpb_network_candidate_requires_model_overlap() -> None:
             "value": 620.0,
             "snippet": "quote valuation sony a7 iv body 620,00 €",
             "url": "https://www.mpb.com/it-it/sell/product/sony-a7-iv/999",
+        },
+        {
+            "score": 72,
+            "value": 500.0,
+            "snippet": "quote valuation canon eos r7 body 500,00 €",
+            "url": "https://www.mpb.com/it-it/sell/product/canon-eos-r7/123",
+        },
+    ]
+    value, snippet = _pick_best_mpb_network_candidate(candidates, normalized_name="Canon EOS R7 Body")
+    assert value == 500.0
+    assert "canon eos r7" in snippet.lower()
+
+
+def test_extract_prices_from_json_blob_ignores_boolean_values() -> None:
+    rows = _extract_prices_from_json_blob({"offer": True, "price": False, "price_purchase": 5020})
+    values = [item[1] for item in rows]
+    assert values == [5020.0]
+
+
+def test_pick_best_mpb_network_candidate_skips_user_profile_endpoint() -> None:
+    candidates = [
+        {
+            "score": 90,
+            "value": 620.0,
+            "snippet": "quote valuation canon eos r7 body 620,00 €",
+            "url": "https://www.mpb.com/public-api/v2/user/me/",
         },
         {
             "score": 72,

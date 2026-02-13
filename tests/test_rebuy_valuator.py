@@ -10,6 +10,7 @@ from tech_sniper_it.valuators.rebuy import (
     _assess_rebuy_match,
     _extract_embedded_rebuy_urls,
     _extract_contextual_price,
+    _extract_rebuy_ry_inject_price,
     _pick_best_rebuy_network_candidate,
     _extract_rebuy_product_link_candidates,
     _load_storage_state_b64,
@@ -171,6 +172,59 @@ def test_extract_embedded_rebuy_urls_supports_escaped_script_payload() -> None:
     urls = _extract_embedded_rebuy_urls(html, base_url="https://www.rebuy.it/vendere/cerca?query=apple+watch")
     assert len(urls) == 2
     assert urls[0].startswith("https://www.rebuy.it/vendere/")
+
+
+def test_extract_rebuy_ry_inject_price_prefers_target_grade() -> None:
+    html = """
+    <html><body>
+      <script id="ry-inject" type="application/json">
+        {"iphoneGroupViewDto":{"product":{
+          "price_purchase":22902,
+          "purchase_a0_price":24750,
+          "purchase_a1_price":22902,
+          "variants":[{"purchasePrice":22902}]
+        }}}
+      </script>
+    </body></html>
+    """
+    value_a1, snippet_a1 = _extract_rebuy_ry_inject_price(html, target_grade="a1")
+    value_a0, snippet_a0 = _extract_rebuy_ry_inject_price(html, target_grade="a0")
+    assert value_a1 == 229.02
+    assert "purchase_a1_price" in snippet_a1
+    assert value_a0 == 247.5
+    assert "purchase_a0_price" in snippet_a0
+
+
+def test_extract_rebuy_ry_inject_price_ignores_relations_zero_values() -> None:
+    html = """
+    <html><body>
+      <script id="ry-inject" type="application/json">
+        {"iphoneGroupViewDto":{
+          "relations":{"root":[{"purchase_a1_price":0}]},
+          "product":{"purchase_a1_price":13500}
+        }}
+      </script>
+    </body></html>
+    """
+    value, snippet = _extract_rebuy_ry_inject_price(html, target_grade="a1")
+    assert value == 135.0
+    assert "product.purchase_a1_price" in snippet
+
+
+def test_extract_rebuy_ry_inject_price_ignores_relations_higher_prices() -> None:
+    html = """
+    <html><body>
+      <script id="ry-inject" type="application/json">
+        {"iphoneGroupViewDto":{
+          "relations":{"rom":[{"purchase_a1_price":36974}]},
+          "product":{"price_purchase":22902,"purchase_a1_price":22902}
+        }}
+      </script>
+    </body></html>
+    """
+    value, snippet = _extract_rebuy_ry_inject_price(html, target_grade="a1")
+    assert value == 229.02
+    assert "product.price_purchase" in snippet or "product.purchase_a1_price" in snippet
 
 
 def test_pick_best_rebuy_network_candidate_requires_model_coherence() -> None:

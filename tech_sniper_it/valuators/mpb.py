@@ -135,6 +135,7 @@ MPB_NETWORK_BLOCKERS: tuple[str, ...] = (
     "promo",
     "codice",
     "sconto",
+    "public api v2 user me",
 )
 _MPB_BLOCKED_UNTIL_TS = 0.0
 _MPB_BLOCK_REASON = ""
@@ -297,6 +298,8 @@ def _extract_prices_from_json_blob(blob: Any, path: str = "") -> list[tuple[int,
             rows.extend(_extract_prices_from_json_blob(value, f"{path}[{index}]"))
         return rows
 
+    if isinstance(blob, bool):
+        return rows
     if not isinstance(blob, (str, int, float)):
         return rows
 
@@ -313,7 +316,10 @@ def _extract_prices_from_json_blob(blob: Any, path: str = "") -> list[tuple[int,
             except ValueError:
                 value = None
     else:
-        value = float(blob)
+        try:
+            value = float(blob)
+        except (TypeError, ValueError):
+            value = None
 
     if value is None or value <= 0 or value > 15000:
         return rows
@@ -339,6 +345,8 @@ def _pick_best_mpb_network_candidate(
             continue
         snippet = str(candidate.get("snippet") or "").strip()
         url = str(candidate.get("url") or "").strip()
+        if "/public-api/v2/user/me" in url.lower():
+            continue
         joined = _normalize_match_text(f"{snippet} {url}")
         token_hits = sum(1 for token in tokens if token and token in joined)
         if tokens and token_hits <= 0:
@@ -697,6 +705,8 @@ class MPBValuator(BaseValuator):
                                     return
                                 url_norm = url.lower()
                                 if "mpb.com" not in url_norm:
+                                    return
+                                if "/public-api/v2/user/me" in url_norm:
                                     return
                                 request = getattr(response, "request", None)
                                 resource_type = ""

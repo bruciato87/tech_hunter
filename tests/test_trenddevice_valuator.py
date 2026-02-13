@@ -31,6 +31,11 @@ from tech_sniper_it.valuators.trenddevice import (
     _pick_best_network_candidate,
     _pick_wizard_option,
     _remove_file_if_exists,
+    _trenddevice_api_extract_stima,
+    _trenddevice_api_option_name,
+    _trenddevice_api_pick_device,
+    _trenddevice_api_pick_model,
+    _trenddevice_api_step_type,
 )
 
 
@@ -250,6 +255,50 @@ def test_is_email_gate_text_detects_lead_form_copy() -> None:
 
 def test_is_email_gate_text_rejects_generic_page_text() -> None:
     assert _is_email_gate_text("Vendi il tuo iPhone in pochi minuti.") is False
+
+
+def test_trenddevice_api_option_name_reads_nested_value() -> None:
+    option = {"usato_opzioni_valori": [{"nome": "128 GB"}]}
+    assert _trenddevice_api_option_name(option) == "128 GB"
+
+
+def test_trenddevice_api_step_type_prefers_label_mapping() -> None:
+    characteristic = {
+        "usato_caratteristiche_valori": [{"nome": "Condizioni", "descrizione": "In che stato è il dispositivo?"}]
+    }
+    options = [WizardOption(index=0, text="Normale usura", normalized="normale usura")]
+    assert _trenddevice_api_step_type(characteristic, options) == STEP_CONDITION
+
+
+def test_trenddevice_api_pick_device_prefers_watch_for_smartwatch() -> None:
+    product = AmazonProduct(
+        title="Apple Watch Series 9 GPS + Cellular 45mm",
+        price_eur=279.0,
+        category=ProductCategory.SMARTWATCH,
+    )
+    devices = [
+        {"id": 1, "nome": "iPhone", "models": [{"id": 796, "nome": "14"}]},
+        {"id": 9, "nome": "Apple Watch", "models": [{"id": 1024, "nome": "9° Serie"}]},
+    ]
+    picked = _trenddevice_api_pick_device(devices=devices, product=product, normalized_name=product.title)
+    assert isinstance(picked, dict)
+    assert picked.get("id") == 9
+
+
+def test_trenddevice_api_pick_model_prefers_exact_iphone_variant() -> None:
+    models = [
+        {"id": 784, "nome": "14 Pro Max"},
+        {"id": 788, "nome": "14 Pro"},
+        {"id": 650, "nome": "13"},
+    ]
+    picked = _trenddevice_api_pick_model(models=models, normalized_name="Apple iPhone 14 Pro 128GB")
+    assert isinstance(picked, dict)
+    assert picked.get("id") == 788
+
+
+def test_trenddevice_api_extract_stima_prefers_cash_quote() -> None:
+    data = {"richiesta": {"stima": 250, "stima_money_td": 270}}
+    assert _trenddevice_api_extract_stima(data) == 250.0
 
 
 def test_parse_plain_price_supports_eu_and_cents() -> None:

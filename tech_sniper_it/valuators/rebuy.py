@@ -104,6 +104,16 @@ REBUY_EMBEDDED_URL_PATTERN = re.compile(
     r"(?:https?://www\.rebuy\.it)?/(?:vendere/p/[a-z0-9\-_%]+/\d{4,}|vendere/[a-z0-9\-_%]+/[a-z0-9\-_%]*_\d{4,})",
     flags=re.IGNORECASE,
 )
+REBUY_RY_PRICE_KEYS: tuple[str, ...] = (
+    "purchase_a0_price",
+    "purchase_a1_price",
+    "purchase_a2_price",
+    "purchase_a3_price",
+    "purchase_a4_price",
+    "price_purchase",
+    "purchaseprice",
+    "purchase_price",
+)
 _REBUY_STORAGE_STATE_ERROR = ""
 
 
@@ -314,6 +324,118 @@ def _extract_embedded_rebuy_urls(html: str, *, base_url: str) -> list[str]:
         seen.add(marker)
         urls.append(absolute)
     return urls
+
+
+def _rebuy_target_grade() -> str:
+    raw = (_env_or_default("REBUY_TARGET_GRADE", "a1") or "").strip().lower()
+    if raw in {"a0", "a1", "a2", "a3", "a4"}:
+        return raw
+    return "a1"
+
+
+def _parse_rebuy_minor_units(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        parsed = float(value) / 100.0
+    elif isinstance(value, float):
+        parsed = value / 100.0 if value > 1000 else value
+    elif isinstance(value, str):
+        compact = value.strip()
+        if not compact:
+            return None
+        parsed = parse_eur_price(compact)
+        if parsed is None:
+            if compact.isdigit():
+                parsed = float(int(compact)) / 100.0
+            else:
+                compact = compact.replace(" ", "").replace(".", "").replace(",", ".")
+                try:
+                    parsed = float(compact)
+                except ValueError:
+                    return None
+                if parsed > 1000:
+                    parsed = parsed / 100.0
+    else:
+        return None
+    if parsed <= 0 or parsed > 15000:
+        return None
+    return round(parsed, 2)
+
+
+def _rebuy_key_score(key: str, *, target_grade: str) -> int:
+    key_norm = (key or "").strip().lower()
+    grade_key = f"purchase_{target_grade}_price"
+    if key_norm == grade_key:
+        return 120
+    if key_norm == "price_purchase":
+        return 112
+    if key_norm == "purchaseprice":
+        return 100
+    if key_norm.startswith("purchase_a") and key_norm.endswith("_price"):
+        # Same family, slightly lower priority than exact grade.
+        return 86
+    if key_norm in {"purchase_price"}:
+        return 78
+    return 62
+
+
+def _extract_rebuy_ry_inject_price(
+    html: str,
+    *,
+    target_grade: str,
+) -> tuple[float | None, str]:
+    if not html:
+        return None, ""
+    soup = BeautifulSoup(html, "html.parser")
+    script = soup.select_one("script#ry-inject")
+    if script is None:
+        return None, ""
+    raw = script.string or script.get_text(" ", strip=True)
+    if not raw:
+        return None, ""
+    try:
+        payload = json.loads(raw)
+    except Exception:
+        return None, ""
+
+    rows: list[tuple[int, float, str]] = []
+
+    def _walk(node: Any, path: str = "") -> None:
+        if isinstance(node, dict):
+            for key, value in node.items():
+                next_path = f"{path}.{key}" if path else str(key)
+                _walk(value, next_path)
+            return
+        if isinstance(node, list):
+            for index, value in enumerate(node[:140]):
+                _walk(value, f"{path}[{index}]")
+            return
+        if isinstance(node, bool):
+            return
+        tail = re.sub(r"\[\d+\]", "", (path.split(".")[-1] if path else "")).strip().lower()
+        if tail not in REBUY_RY_PRICE_KEYS:
+            return
+        path_lower = path.lower()
+        if ".relations." in path_lower or ".relations[" in path_lower:
+            return
+        parsed = _parse_rebuy_minor_units(node)
+        if parsed is None:
+            return
+        score = _rebuy_key_score(tail, target_grade=target_grade)
+        if ".product." in path_lower:
+            score += 24
+        if ".variants[" in path_lower:
+            score += 4
+        rows.append((score, parsed, f"{path}={node}"))
+
+    _walk(payload)
+    if not rows:
+        return None, ""
+    score, value, snippet = max(rows, key=lambda row: (row[0], row[1]))
+    if score <= 0:
+        return None, ""
+    return value, snippet[:260]
 
 
 def _extract_rebuy_product_link_candidates(
@@ -1337,6 +1459,19 @@ class RebuyValuator(BaseValuator):
         return " ".join(chunks)
 
     async def _extract_price(self, page: Page, *, payload: dict[str, Any] | None = None) -> tuple[float | None, str]:
+        try:
+            html = await page.content()
+        except PlaywrightError:
+            html = ""
+        inject_value, inject_snippet = _extract_rebuy_ry_inject_price(
+            html,
+            target_grade=_rebuy_target_grade(),
+        )
+        if inject_value is not None:
+            if payload is not None:
+                payload["price_source"] = "ry-inject"
+            return inject_value, inject_snippet
+
         # Prefer immediate cash-out offers over promo/store credit.
         try:
             body_text = await page.inner_text("body", timeout=2200)
@@ -1376,7 +1511,8 @@ class RebuyValuator(BaseValuator):
             except PlaywrightError:
                 continue
 
-        html = await page.content()
+        if not html:
+            html = await page.content()
         soup = BeautifulSoup(html, "html.parser")
         for node in soup.select("main, [class*='price' i], [class*='offer' i], [class*='valut' i]"):
             text = node.get_text(" ", strip=True)
@@ -1417,6 +1553,7 @@ __all__ = [
     "RebuyValuator",
     "_assess_rebuy_match",
     "_extract_contextual_price",
+    "_extract_rebuy_ry_inject_price",
     "_load_storage_state_b64",
     "_remove_file_if_exists",
 ]
