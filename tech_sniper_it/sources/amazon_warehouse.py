@@ -1779,6 +1779,16 @@ async def _resolve_cart_net_price(
             addition = _infer_cart_addition(before, after, asin)
             if addition.get("added"):
                 break
+            has_progress_hint = bool(
+                addition.get("new_asins")
+                or (int(addition.get("row_gain") or 0) > 0)
+                or isinstance(addition.get("delta_total"), (int, float))
+                or isinstance(addition.get("delta_subtotal"), (int, float))
+            )
+            if not has_progress_hint:
+                # No cart movement detected after first readback: extra retries are rarely useful
+                # and only slow down the full scan.
+                break
             if attempts < max_add_attempts:
                 await page.wait_for_timeout(retry_wait_ms * attempts)
         if not isinstance(addition, dict):
