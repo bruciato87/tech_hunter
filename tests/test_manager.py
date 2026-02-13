@@ -133,6 +133,46 @@ class RetryMetaBalancer(SmartAIBalancer):
         }
 
 
+class BrokenWatchBalancer(SmartAIBalancer):
+    async def normalize_with_meta(self, title: str) -> tuple[str, dict]:  # type: ignore[override]
+        return "iPhone 13 Pro 256GB", {
+            "provider": "openrouter",
+            "model": "mock",
+            "mode": "live",
+            "ai_used": True,
+        }
+
+
+class HallucinatedStorageWatchBalancer(SmartAIBalancer):
+    async def normalize_with_meta(self, title: str) -> tuple[str, dict]:  # type: ignore[override]
+        return "Apple Watch Ultra GPS + Cellular 49mm 32GB", {
+            "provider": "openrouter",
+            "model": "mock",
+            "mode": "live",
+            "ai_used": True,
+        }
+
+
+class CaptureQueryValuator:
+    def __init__(self, platform: str = "trenddevice") -> None:
+        self.platform_name = platform
+        self.queries: list[str] = []
+
+    async def valuate(self, product: AmazonProduct, normalized_name: str) -> ValuationResult:
+        self.queries.append(normalized_name)
+        return ValuationResult(
+            platform=self.platform_name,
+            normalized_name=normalized_name,
+            offer_eur=150.0,
+            source_url="https://www.trendevice.com/vendi/valutazione/?model=800&request=1234",
+            raw_payload={
+                "price_text": "Ti paghiamo 150,00 €",
+                "price_source": "api",
+                "match_quality": {"ok": True, "reason": "ok", "has_model_step": True, "token_ratio": 0.9},
+            },
+        )
+
+
 @pytest.mark.asyncio
 async def test_manager_selects_best_offer_and_notifies() -> None:
     storage = FakeStorage()
@@ -560,3 +600,47 @@ async def test_manager_does_not_circuit_break_trenddevice_after_single_email_gat
     assert len(decisions) == 2
     assert "trenddevice" in [offer.platform for offer in decisions[0].offers]
     assert "trenddevice" in [offer.platform for offer in decisions[1].offers]
+
+
+@pytest.mark.asyncio
+async def test_manager_ai_safeguard_rewrites_watch_phone_category_mismatch() -> None:
+    valuator = CaptureQueryValuator("trenddevice")
+    manager = ManagerUnderTest(
+        valuators=[valuator],
+        ai_balancer=BrokenWatchBalancer(gemini_keys=[], openrouter_keys=[]),
+        min_spread_eur=40.0,
+    )
+    product = AmazonProduct(
+        title="Apple Watch Ultra (GPS + Cellular, 49mm)",
+        price_eur=350.0,
+        category=ProductCategory.SMARTWATCH,
+    )
+
+    decision = await manager.evaluate_product(product)
+
+    assert "watch" in decision.normalized_name.lower()
+    assert "iphone" not in decision.normalized_name.lower()
+    assert valuator.queries
+    assert "watch" in valuator.queries[0].lower()
+    assert "iphone" not in valuator.queries[0].lower()
+
+
+@pytest.mark.asyncio
+async def test_manager_ai_safeguard_removes_untrusted_watch_storage() -> None:
+    valuator = CaptureQueryValuator("trenddevice")
+    manager = ManagerUnderTest(
+        valuators=[valuator],
+        ai_balancer=HallucinatedStorageWatchBalancer(gemini_keys=[], openrouter_keys=[]),
+        min_spread_eur=40.0,
+    )
+    product = AmazonProduct(
+        title="Apple Watch Ultra (GPS + Cellular, 49mm)",
+        price_eur=350.0,
+        category=ProductCategory.SMARTWATCH,
+    )
+
+    decision = await manager.evaluate_product(product)
+
+    assert "32gb" not in decision.normalized_name.lower()
+    assert valuator.queries
+    assert "32gb" not in valuator.queries[0].lower()

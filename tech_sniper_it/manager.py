@@ -62,6 +62,87 @@ _STRATEGY_PROFILES: dict[str, dict[str, Any]] = {
 }
 
 _CAPACITY_TOKEN_PATTERN = re.compile(r"\b\d{1,4}\s*(?:gb|tb)\b", re.IGNORECASE)
+_NORMALIZATION_COLOR_PATTERN = re.compile(
+    r"\b(nero|black|bianco|white|argento|silver|grafite|space gray|grigio|blu|azzurro|rosso|verde|viola|oro|gold)\b",
+    re.IGNORECASE,
+)
+_NORMALIZATION_NOISE_PATTERN = re.compile(
+    r"\b(ottime condizioni|ricondizionat[oa]?|reacondicionado|warehouse|amazon|come nuovo|grado a|excellent|renewed|used|usato)\b",
+    re.IGNORECASE,
+)
+
+_WATCH_ANCHORS = ("watch", "smartwatch", "garmin", "fenix", "epix", "forerunner")
+_PHONE_ANCHORS = ("iphone",)
+_DRONE_ANCHORS = ("drone", "dji", "mavic", "avata", "quadcopter")
+_HANDHELD_ANCHORS = ("steam deck", "rog ally", "legion go", "nintendo switch", "playstation portal")
+
+
+def _compact_text(value: str | None) -> str:
+    return re.sub(r"\s+", " ", (value or "").strip())
+
+
+def _contains_any(value: str, anchors: tuple[str, ...]) -> bool:
+    lowered = value.casefold()
+    return any(anchor in lowered for anchor in anchors)
+
+
+def _heuristic_title_normalize(title: str) -> str:
+    value = re.sub(r"\((.*?)\)", "", title or "")
+    value = _NORMALIZATION_NOISE_PATTERN.sub(" ", value)
+    value = _NORMALIZATION_COLOR_PATTERN.sub(" ", value)
+    value = re.sub(r"\s+", " ", value).strip(" -:,")
+    return value[:120]
+
+
+def _sanitize_ai_normalized_name(product: AmazonProduct, normalized_name: str) -> tuple[str, str | None]:
+    current = _compact_text(normalized_name)
+    source_text = _compact_text(product.title)
+    if not current:
+        fallback = _heuristic_title_normalize(product.title)
+        return (fallback or current), "empty-normalized"
+
+    source_lower = source_text.casefold()
+    current_lower = current.casefold()
+
+    def _fallback(reason: str) -> tuple[str, str | None]:
+        fallback = _heuristic_title_normalize(product.title)
+        if fallback:
+            return fallback, reason
+        return current, None
+
+    if product.category == ProductCategory.SMARTWATCH:
+        source_watch = _contains_any(source_lower, _WATCH_ANCHORS)
+        if source_watch and "iphone" in current_lower and "watch" not in current_lower and "garmin" not in current_lower:
+            return _fallback("category-mismatch-watch-vs-phone")
+        if source_watch and not _contains_any(current_lower, _WATCH_ANCHORS):
+            return _fallback("missing-watch-anchor")
+
+        source_capacities = _capacity_tokens(source_text)
+        current_capacities = _capacity_tokens(current)
+        if current_capacities and not current_capacities.intersection(source_capacities):
+            stripped = _compact_text(_CAPACITY_TOKEN_PATTERN.sub(" ", current)).strip(" -:,")
+            if stripped:
+                return stripped[:120], "removed-untrusted-storage"
+            return _fallback("removed-untrusted-storage-empty")
+
+    if product.category == ProductCategory.APPLE_PHONE:
+        source_phone = _contains_any(source_lower, _PHONE_ANCHORS)
+        if source_phone and "watch" in current_lower and "iphone" not in current_lower:
+            return _fallback("category-mismatch-phone-vs-watch")
+        if source_phone and not _contains_any(current_lower, _PHONE_ANCHORS):
+            return _fallback("missing-phone-anchor")
+
+    if product.category == ProductCategory.DRONE:
+        source_drone = _contains_any(source_lower, _DRONE_ANCHORS)
+        if source_drone and (_contains_any(current_lower, _PHONE_ANCHORS) or _contains_any(current_lower, _WATCH_ANCHORS)):
+            return _fallback("category-mismatch-drone")
+
+    if product.category == ProductCategory.HANDHELD_CONSOLE:
+        source_handheld = _contains_any(source_lower, _HANDHELD_ANCHORS)
+        if source_handheld and not _contains_any(current_lower, _HANDHELD_ANCHORS):
+            return _fallback("missing-handheld-anchor")
+
+    return current[:120], None
 
 
 def _env_or_default(name: str, default: str) -> str:
@@ -581,7 +662,7 @@ class ArbitrageManager:
         print(
             f"[scan] Evaluating product | title='{product.title}' | category={product.category.value} | amazon_price={product.price_eur:.2f}"
         )
-        normalized_name, ai_usage = await self.ai_balancer.normalize_with_meta(product.title)
+        normalized_name, ai_usage = await self._normalize_product_name(product)
         self._log_ai_usage(normalized_name, ai_usage)
         offers = await self._evaluate_offers(product.category, product, normalized_name)
         decision = self._build_decision(product, normalized_name, offers, ai_usage)
@@ -602,23 +683,27 @@ class ArbitrageManager:
         platform_failures: dict[str, int] = defaultdict(int)
         backoff_lock = asyncio.Lock()
 
-        async def _normalize_title(title: str) -> tuple[str, str, dict[str, Any]]:
+        async def _normalize_product(product: AmazonProduct) -> tuple[tuple[str, str], str, dict[str, Any]]:
             async with semaphore:
-                normalized_name, ai_usage = await self.ai_balancer.normalize_with_meta(title)
+                normalized_name, ai_usage = await self._normalize_product_name(product)
                 self._log_ai_usage(normalized_name, ai_usage)
-                return title, normalized_name, ai_usage
+                return (product.title, product.category.value), normalized_name, ai_usage
 
-        unique_titles = list(dict.fromkeys(item.title for item in items))
-        print(f"[scan] Normalization stage | unique_titles={len(unique_titles)}")
-        normalized_rows = await asyncio.gather(*(_normalize_title(title) for title in unique_titles))
-        title_map: dict[str, tuple[str, dict[str, Any]]] = {
-            title: (normalized_name, ai_usage)
-            for title, normalized_name, ai_usage in normalized_rows
+        keyed_products = {
+            (item.title, item.category.value): item
+            for item in items
+        }
+        unique_keys = list(keyed_products.keys())
+        print(f"[scan] Normalization stage | unique_title_category_keys={len(unique_keys)}")
+        normalized_rows = await asyncio.gather(*(_normalize_product(keyed_products[key]) for key in unique_keys))
+        title_map: dict[tuple[str, str], tuple[str, dict[str, Any]]] = {
+            key: (normalized_name, ai_usage)
+            for key, normalized_name, ai_usage in normalized_rows
         }
 
         grouped: dict[tuple[str, str], list[AmazonProduct]] = {}
         for item in items:
-            normalized_name, _usage = title_map[item.title]
+            normalized_name, _usage = title_map[(item.title, item.category.value)]
             key = (item.category.value, normalized_name)
             grouped.setdefault(key, []).append(item)
         print(f"[scan] Valuation stage | unique_model_groups={len(grouped)}")
@@ -672,7 +757,7 @@ class ArbitrageManager:
 
         decisions: list[ArbitrageDecision] = []
         for item in items:
-            normalized_name, ai_usage = title_map[item.title]
+            normalized_name, ai_usage = title_map[(item.title, item.category.value)]
             offers = offers_by_key[(item.category.value, normalized_name)]
             decision = self._build_decision(item, normalized_name, offers, ai_usage)
             decisions.append(decision)
@@ -687,6 +772,17 @@ class ArbitrageManager:
             )
         print("[scan] Parallel evaluation completed.")
         return decisions
+
+    async def _normalize_product_name(self, product: AmazonProduct) -> tuple[str, dict[str, Any]]:
+        normalized_name, ai_usage = await self.ai_balancer.normalize_with_meta(product.title)
+        sanitized, reason = _sanitize_ai_normalized_name(product, normalized_name)
+        if sanitized != normalized_name:
+            print(
+                "[scan] AI safeguard rewrite | "
+                f"category={product.category.value} reason={reason or 'n/a'} "
+                f"before='{normalized_name}' after='{sanitized}'"
+            )
+        return sanitized, ai_usage
 
     def _build_valuators(self, category: ProductCategory) -> list:
         common = {"headless": self.headless, "nav_timeout_ms": self.nav_timeout_ms}
