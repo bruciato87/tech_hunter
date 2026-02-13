@@ -112,6 +112,48 @@ NETWORK_PROMO_BLOCKERS: tuple[str, ...] = (
     "reso gratis",
     "rate",
 )
+MATCH_STOPWORDS: set[str] = {
+    "apple",
+    "amazon",
+    "warehouse",
+    "ricondizionato",
+    "ricondizionata",
+    "renewed",
+    "reconditionne",
+    "reconditioned",
+    "used",
+    "usato",
+    "con",
+    "senza",
+    "wifi",
+    "with",
+    "and",
+    "the",
+    "gps",
+    "cellular",
+    "lte",
+    "mm",
+    "pack",
+    "plus",
+}
+ANCHOR_TOKENS: tuple[str, ...] = (
+    "iphone",
+    "ipad",
+    "apple watch",
+    "watch",
+    "garmin",
+    "fenix",
+    "epix",
+    "forerunner",
+    "dji",
+    "steam",
+    "deck",
+    "rog",
+    "ally",
+    "legion",
+    "macbook",
+)
+CAPACITY_TOKEN_PATTERN = re.compile(r"\b\d{2,4}\s*(?:gb|tb)\b", re.IGNORECASE)
 _TRENDDEVICE_STORAGE_STATE_ERROR = ""
 
 
@@ -245,6 +287,104 @@ def _extract_iphone_model_hint(normalized_name: str) -> str:
     return f"{base} {variant}".strip()
 
 
+def _query_tokens(value: str) -> list[str]:
+    normalized = _normalize_wizard_text(value)
+    tokens = [item for item in normalized.split(" ") if item]
+    ranked: list[str] = []
+    for token in tokens:
+        if token in MATCH_STOPWORDS:
+            continue
+        if len(token) < 2:
+            continue
+        if token not in ranked:
+            ranked.append(token)
+    return ranked
+
+
+def _capacity_tokens(value: str) -> list[str]:
+    normalized = _normalize_wizard_text(value).replace(" ", "")
+    return sorted(set(match.group(0).replace(" ", "").lower() for match in CAPACITY_TOKEN_PATTERN.finditer(normalized)))
+
+
+def _infer_family_targets(product: AmazonProduct, normalized_name: str) -> list[str]:
+    combined = _normalize_wizard_text(f"{product.title} {normalized_name}")
+    targets: list[str] = []
+
+    def _push(value: str) -> None:
+        normalized_value = _normalize_wizard_text(value)
+        if normalized_value and normalized_value not in targets:
+            targets.append(normalized_value)
+
+    if product.category == ProductCategory.APPLE_PHONE:
+        _push("iphone")
+    if product.category == ProductCategory.SMARTWATCH:
+        _push("apple watch")
+        _push("smartwatch")
+        _push("watch")
+        _push("garmin")
+
+    if "iphone" in combined:
+        _push("iphone")
+    if "ipad" in combined:
+        _push("ipad")
+    if "apple watch" in combined or "watch ultra" in combined:
+        _push("apple watch")
+        _push("watch")
+    if "garmin" in combined:
+        _push("garmin")
+        _push("watch")
+    if "fenix" in combined:
+        _push("fenix")
+        _push("watch")
+    if "epix" in combined:
+        _push("epix")
+        _push("watch")
+    return targets
+
+
+def _pick_device_family_option(
+    options: list[WizardOption],
+    *,
+    product: AmazonProduct,
+    normalized_name: str,
+) -> WizardOption | None:
+    if not options:
+        return None
+    targets = _infer_family_targets(product, normalized_name)
+    if not targets:
+        return options[0]
+
+    watch_intent = any(item in {"watch", "apple watch", "garmin", "fenix", "epix"} for item in targets)
+    iphone_intent = "iphone" in targets
+    best: WizardOption | None = None
+    best_score = -10_000
+    for option in options:
+        text = option.normalized
+        score = 0
+        for target in targets:
+            if text == target:
+                score += 220
+            if target in text:
+                score += 110
+            for token in target.split():
+                if token in text:
+                    score += 28
+        score += int(SequenceMatcher(None, text, " ".join(targets[:2])).ratio() * 35)
+
+        if watch_intent and "iphone" in text and "watch" not in text and "garmin" not in text:
+            score -= 160
+        if iphone_intent and "watch" in text and "iphone" not in text:
+            score -= 60
+
+        if score > best_score:
+            best = option
+            best_score = score
+
+    if best is not None and best_score > 0:
+        return best
+    return options[0]
+
+
 def _model_score(option: WizardOption, *, model_hint: str, normalized_name: str) -> int:
     hint = _normalize_wizard_text(model_hint)
     full_name = _normalize_wizard_text(normalized_name)
@@ -300,16 +440,7 @@ def _pick_wizard_option(
         return None
 
     if step == STEP_DEVICE_FAMILY:
-        device_by_category = {
-            ProductCategory.APPLE_PHONE: "iphone",
-            ProductCategory.PHOTOGRAPHY: "iphone",
-            ProductCategory.GENERAL_TECH: "iphone",
-        }
-        target = device_by_category.get(product.category, "iphone")
-        for option in options:
-            if target in option.normalized:
-                return option
-        return options[0]
+        return _pick_device_family_option(options, product=product, normalized_name=normalized_name)
 
     if step == STEP_MODEL:
         model_hint = _extract_iphone_model_hint(normalized_name)
@@ -511,6 +642,170 @@ def _is_credible_network_candidate(candidate: dict[str, Any]) -> bool:
         return False
     valuation_terms = ("ti offriamo", "valutazione", "ricevi", "paghiamo", "quotazione", "offerta")
     return any(term in snippet_norm for term in valuation_terms)
+
+
+def _is_generic_trenddevice_url(url: str | None) -> bool:
+    parsed = urlparse(url or "")
+    path = (parsed.path or "").strip("/").lower()
+    if not path:
+        return True
+    return path in {"vendi", "vendi/valutazione"}
+
+
+def _assess_trenddevice_match(
+    *,
+    product: AmazonProduct,
+    normalized_name: str,
+    wizard_steps: list[dict[str, Any]],
+    source_url: str | None,
+    price_text: str | None,
+) -> dict[str, Any]:
+    query_norm = _normalize_wizard_text(normalized_name)
+    selected_parts = [
+        _normalize_wizard_text(str(step.get("selected", "")))
+        for step in wizard_steps
+        if isinstance(step, dict)
+    ]
+    selected_combined = " ".join(part for part in selected_parts if part)
+    url_parts = " ".join(part for part in ((urlparse(source_url or "").path or ""), (urlparse(source_url or "").query or "")) if part)
+    candidate_norm = _normalize_wizard_text(" ".join((selected_combined, str(price_text or ""), url_parts)))
+
+    ratio = SequenceMatcher(None, query_norm, candidate_norm).ratio() if query_norm and candidate_norm else 0.0
+    tokens = _query_tokens(normalized_name)
+    capacities = _capacity_tokens(normalized_name)
+    anchor_word_pool = {
+        token
+        for anchor in ANCHOR_TOKENS
+        for token in _normalize_wizard_text(anchor).split()
+        if token
+    }
+    anchor_words = sorted({token for token in tokens if token in anchor_word_pool})
+    if "apple watch" in query_norm and "watch" not in anchor_words:
+        anchor_words.append("watch")
+
+    required_tokens: list[str] = []
+    for item in capacities:
+        if item not in required_tokens:
+            required_tokens.append(item)
+    for item in anchor_words:
+        if item not in required_tokens:
+            required_tokens.append(item)
+    for item in tokens:
+        if item.isdigit() or re.search(r"\d", item):
+            if item not in required_tokens:
+                required_tokens.append(item)
+    for item in tokens:
+        if item not in required_tokens:
+            required_tokens.append(item)
+        if len(required_tokens) >= 7:
+            break
+
+    candidate_compact = candidate_norm.replace(" ", "")
+    hit_tokens = [token for token in required_tokens if token and token in candidate_norm]
+    capacity_hits = [token for token in capacities if token in candidate_compact]
+    anchor_hits = [token for token in anchor_words if token in candidate_norm]
+    token_ratio = (len(hit_tokens) / len(required_tokens)) if required_tokens else 0.0
+    generic_url = _is_generic_trenddevice_url(source_url)
+    has_model_step = any(str(step.get("step_type")) == STEP_MODEL for step in wizard_steps if isinstance(step, dict))
+    score = int((ratio * 100) + (len(hit_tokens) * 13) + (len(anchor_hits) * 10) + (14 if has_model_step else -14) - (34 if generic_url else 0))
+
+    watch_intent = any(token in query_norm for token in ("watch", "garmin", "fenix", "epix", "forerunner"))
+    if watch_intent and "iphone" in selected_combined and "watch" not in selected_combined and "garmin" not in selected_combined:
+        return {
+            "ok": False,
+            "reason": "device-family-mismatch",
+            "score": score,
+            "ratio": round(ratio, 3),
+            "token_ratio": round(token_ratio, 3),
+            "generic_url": generic_url,
+            "has_model_step": has_model_step,
+            "hit_tokens": hit_tokens,
+            "required_tokens": required_tokens,
+        }
+
+    if generic_url and not has_model_step:
+        return {
+            "ok": False,
+            "reason": "generic-url-no-model-step",
+            "score": score,
+            "ratio": round(ratio, 3),
+            "token_ratio": round(token_ratio, 3),
+            "generic_url": generic_url,
+            "has_model_step": has_model_step,
+            "hit_tokens": hit_tokens,
+            "required_tokens": required_tokens,
+        }
+    if capacities and len(capacity_hits) < len(capacities):
+        return {
+            "ok": False,
+            "reason": "capacity-mismatch",
+            "score": score,
+            "ratio": round(ratio, 3),
+            "token_ratio": round(token_ratio, 3),
+            "generic_url": generic_url,
+            "has_model_step": has_model_step,
+            "hit_tokens": hit_tokens,
+            "required_tokens": required_tokens,
+        }
+    if anchor_words and not anchor_hits:
+        return {
+            "ok": False,
+            "reason": "anchor-mismatch",
+            "score": score,
+            "ratio": round(ratio, 3),
+            "token_ratio": round(token_ratio, 3),
+            "generic_url": generic_url,
+            "has_model_step": has_model_step,
+            "hit_tokens": hit_tokens,
+            "required_tokens": required_tokens,
+        }
+    if generic_url and token_ratio < 0.75:
+        return {
+            "ok": False,
+            "reason": "generic-url-low-coverage",
+            "score": score,
+            "ratio": round(ratio, 3),
+            "token_ratio": round(token_ratio, 3),
+            "generic_url": generic_url,
+            "has_model_step": has_model_step,
+            "hit_tokens": hit_tokens,
+            "required_tokens": required_tokens,
+        }
+    if token_ratio < 0.55 and ratio < 0.60:
+        return {
+            "ok": False,
+            "reason": "low-token-similarity",
+            "score": score,
+            "ratio": round(ratio, 3),
+            "token_ratio": round(token_ratio, 3),
+            "generic_url": generic_url,
+            "has_model_step": has_model_step,
+            "hit_tokens": hit_tokens,
+            "required_tokens": required_tokens,
+        }
+    if score < 74:
+        return {
+            "ok": False,
+            "reason": "score-too-low",
+            "score": score,
+            "ratio": round(ratio, 3),
+            "token_ratio": round(token_ratio, 3),
+            "generic_url": generic_url,
+            "has_model_step": has_model_step,
+            "hit_tokens": hit_tokens,
+            "required_tokens": required_tokens,
+        }
+    return {
+        "ok": True,
+        "reason": "ok",
+        "score": score,
+        "ratio": round(ratio, 3),
+        "token_ratio": round(token_ratio, 3),
+        "generic_url": generic_url,
+        "has_model_step": has_model_step,
+        "hit_tokens": hit_tokens,
+        "required_tokens": required_tokens,
+    }
 
 
 class TrendDeviceValuator(BaseValuator):
@@ -812,6 +1107,29 @@ class TrendDeviceValuator(BaseValuator):
             await page.wait_for_timeout(1400)
         return submitted
 
+    def _validate_match_or_raise(
+        self,
+        *,
+        product: AmazonProduct,
+        normalized_name: str,
+        source_url: str | None,
+        price_text: str | None,
+        payload: dict[str, Any],
+    ) -> None:
+        match = _assess_trenddevice_match(
+            product=product,
+            normalized_name=normalized_name,
+            wizard_steps=payload.get("wizard", []),
+            source_url=source_url,
+            price_text=price_text,
+        )
+        payload["match_quality"] = match
+        if not match.get("ok"):
+            reason = str(match.get("reason", "low-confidence"))
+            raise RuntimeError(
+                f"TrendDevice low-confidence match ({reason}); discarded to prevent false-positive."
+            )
+
     async def _fetch_offer(
         self,
         product: AmazonProduct,
@@ -993,11 +1311,25 @@ class TrendDeviceValuator(BaseValuator):
                                     if price is not None:
                                         payload["price_source"] = "dom-post-email"
                                         payload["price_text"] = price_text
+                                        self._validate_match_or_raise(
+                                            product=product,
+                                            normalized_name=normalized_name,
+                                            source_url=page.url,
+                                            price_text=price_text,
+                                            payload=payload,
+                                        )
                                         return price, page.url, payload
                                     network_price, network_snippet = _pick_best_network_candidate(network_price_candidates)
                                     if network_price is not None:
                                         payload["price_source"] = "network-post-email"
                                         payload["price_text"] = network_snippet
+                                        self._validate_match_or_raise(
+                                            product=product,
+                                            normalized_name=normalized_name,
+                                            source_url=page.url,
+                                            price_text=network_snippet,
+                                            payload=payload,
+                                        )
                                         return network_price, page.url, payload
                                 if not options:
                                     await self._attach_ui_probe(
@@ -1050,11 +1382,25 @@ class TrendDeviceValuator(BaseValuator):
                             if price is not None:
                                 payload["price_source"] = "dom-post-email-stagnant"
                                 payload["price_text"] = price_text
+                                self._validate_match_or_raise(
+                                    product=product,
+                                    normalized_name=normalized_name,
+                                    source_url=page.url,
+                                    price_text=price_text,
+                                    payload=payload,
+                                )
                                 return price, page.url, payload
                             network_price, network_snippet = _pick_best_network_candidate(network_price_candidates)
                             if network_price is not None:
                                 payload["price_source"] = "network-post-email-stagnant"
                                 payload["price_text"] = network_snippet
+                                self._validate_match_or_raise(
+                                    product=product,
+                                    normalized_name=normalized_name,
+                                    source_url=page.url,
+                                    price_text=network_snippet,
+                                    payload=payload,
+                                )
                                 return network_price, page.url, payload
                             await self._attach_ui_probe(
                                 payload=payload,
@@ -1120,6 +1466,13 @@ class TrendDeviceValuator(BaseValuator):
                     if network_price is not None:
                         payload["price_source"] = "network"
                         payload["price_text"] = network_snippet
+                        self._validate_match_or_raise(
+                            product=product,
+                            normalized_name=normalized_name,
+                            source_url=page.url,
+                            price_text=network_snippet,
+                            payload=payload,
+                        )
                         return network_price, page.url, payload
                 payload["price_text"] = price_text
                 if price is None:
@@ -1132,6 +1485,13 @@ class TrendDeviceValuator(BaseValuator):
                         expected_keywords=["offerta", "valutazione", "ricevi", "€"],
                     )
                     raise RuntimeError(f"TrendDevice price not found after wizard ({reason})")
+                self._validate_match_or_raise(
+                    product=product,
+                    normalized_name=normalized_name,
+                    source_url=page.url,
+                    price_text=price_text,
+                    payload=payload,
+                )
                 return price, page.url, payload
             finally:
                 if response_tasks:
@@ -1143,6 +1503,7 @@ class TrendDeviceValuator(BaseValuator):
 
 __all__ = [
     "TrendDeviceValuator",
+    "_assess_trenddevice_match",
     "_detect_wizard_step",
     "_extract_contextual_price",
     "_extract_iphone_model_hint",

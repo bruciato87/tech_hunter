@@ -17,6 +17,7 @@ from tech_sniper_it.valuators.trenddevice import (
     STEP_SIM,
     STEP_YES_NO,
     WizardOption,
+    _assess_trenddevice_match,
     _detect_wizard_step,
     _extract_contextual_price,
     _extract_keyed_prices_from_text,
@@ -118,6 +119,21 @@ def test_pick_sim_prefers_physical_sim_card() -> None:
     picked = _pick_wizard_option(step=STEP_SIM, options=options, product=product, normalized_name=product.title)
     assert picked is not None
     assert "sim card" in picked.normalized
+
+
+def test_pick_device_family_prefers_watch_for_smartwatch_products() -> None:
+    product = AmazonProduct(
+        title="Apple Watch Series 9 GPS + Cellular 45mm",
+        price_eur=350.0,
+        category=ProductCategory.SMARTWATCH,
+    )
+    options = [
+        WizardOption(index=0, text="iPhone", normalized="iphone"),
+        WizardOption(index=1, text="Apple Watch", normalized="apple watch"),
+    ]
+    picked = _pick_wizard_option(step=STEP_DEVICE_FAMILY, options=options, product=product, normalized_name=product.title)
+    assert picked is not None
+    assert "watch" in picked.normalized
 
 
 def test_pick_wizard_option_other_steps() -> None:
@@ -290,6 +306,51 @@ def test_is_credible_network_candidate_rejects_static_promotional_chunk() -> Non
         "source": "context",
     }
     assert _is_credible_network_candidate(candidate) is False
+
+
+def test_assess_trenddevice_match_rejects_watch_mismatch_on_generic_url() -> None:
+    product = AmazonProduct(
+        title="Apple Watch Series 9 GPS + Cellular 45mm",
+        price_eur=279.0,
+        category=ProductCategory.SMARTWATCH,
+    )
+    match = _assess_trenddevice_match(
+        product=product,
+        normalized_name=product.title,
+        wizard_steps=[
+            {"step_type": STEP_DEVICE_FAMILY, "selected": "iPhone"},
+            {"step_type": STEP_MODEL, "selected": "14 Pro"},
+            {"step_type": STEP_CAPACITY, "selected": "128 GB"},
+        ],
+        source_url="https://www.trendevice.com/vendi/valutazione/",
+        price_text="Ti offriamo 525,00 €",
+    )
+    assert match["ok"] is False
+    assert match["reason"] in {
+        "device-family-mismatch",
+        "generic-url-low-coverage",
+        "anchor-mismatch",
+    }
+
+
+def test_assess_trenddevice_match_accepts_coherent_watch_quote() -> None:
+    product = AmazonProduct(
+        title="Apple Watch Series 9 GPS + Cellular 45mm",
+        price_eur=279.0,
+        category=ProductCategory.SMARTWATCH,
+    )
+    match = _assess_trenddevice_match(
+        product=product,
+        normalized_name=product.title,
+        wizard_steps=[
+            {"step_type": STEP_DEVICE_FAMILY, "selected": "Apple Watch"},
+            {"step_type": STEP_MODEL, "selected": "Series 9"},
+            {"step_type": STEP_CONDITION, "selected": "Normale usura"},
+        ],
+        source_url="https://www.trendevice.com/vendi/valutazione/series-9",
+        price_text="Ti offriamo 135,00 €",
+    )
+    assert match["ok"] is True
 
 
 def test_load_storage_state_b64_decodes_valid_json(monkeypatch: pytest.MonkeyPatch) -> None:
