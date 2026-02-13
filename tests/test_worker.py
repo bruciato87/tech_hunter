@@ -133,6 +133,43 @@ def test_filter_non_core_device_candidates_keeps_high_price_compatible_bundle() 
     assert len(dropped) == 0
 
 
+def test_filter_non_core_device_candidates_drops_generic_brand_only_title() -> None:
+    generic = AmazonProduct(
+        title="Garmin",
+        price_eur=449.99,
+        category=ProductCategory.SMARTWATCH,
+        source_marketplace="es",
+    )
+    specific = AmazonProduct(
+        title="Garmin Forerunner 955 Solar",
+        price_eur=547.53,
+        category=ProductCategory.SMARTWATCH,
+        source_marketplace="es",
+    )
+
+    kept, dropped = _filter_non_core_device_candidates([generic, specific])
+
+    assert len(kept) == 1
+    assert kept[0].title == "Garmin Forerunner 955 Solar"
+    assert len(dropped) == 1
+    assert "generic-brand-only-title" in dropped[0]
+
+
+def test_filter_non_core_device_candidates_drops_generic_two_token_title() -> None:
+    generic = AmazonProduct(
+        title="Apple iPhone",
+        price_eur=399.0,
+        category=ProductCategory.APPLE_PHONE,
+        source_marketplace="it",
+    )
+
+    kept, dropped = _filter_non_core_device_candidates([generic])
+
+    assert len(kept) == 0
+    assert len(dropped) == 1
+    assert "generic-two-token-title" in dropped[0]
+
+
 def test_coerce_product_invalid_missing_title() -> None:
     with pytest.raises(ValueError):
         _coerce_product({"price_eur": 100})

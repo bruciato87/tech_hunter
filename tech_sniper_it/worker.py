@@ -103,6 +103,36 @@ ACCESSORY_KEYWORDS: tuple[str, ...] = (
     "zaino",
 )
 
+GENERIC_TITLE_BRAND_TOKENS: tuple[str, ...] = (
+    "apple",
+    "garmin",
+    "dji",
+    "canon",
+    "sony",
+    "xiaomi",
+    "samsung",
+    "huawei",
+    "google",
+    "lenovo",
+    "asus",
+    "nintendo",
+    "valve",
+)
+
+GENERIC_TITLE_SECONDARY_TOKENS: tuple[str, ...] = (
+    "iphone",
+    "watch",
+    "smartwatch",
+    "ipad",
+    "tablet",
+    "drone",
+    "camera",
+    "fotocamera",
+    "telefono",
+    "cellulare",
+    "phone",
+)
+
 COMPATIBILITY_MARKERS: tuple[str, ...] = (
     "compatibile con",
     "compatible with",
@@ -1108,6 +1138,37 @@ def _accessory_guardrail_reasons(product: AmazonProduct) -> list[str]:
     return reasons
 
 
+def _generic_title_guardrail_reasons(product: AmazonProduct) -> list[str]:
+    source_marketplace = str(getattr(product, "source_marketplace", "") or "").strip().lower()
+    # Apply this guardrail only to warehouse crawled items. Explicit/manual payloads
+    # may intentionally pass coarse titles and should still be evaluated.
+    if not source_marketplace:
+        return []
+
+    title = (product.title or "").strip().lower()
+    if not title:
+        return ["empty-title"]
+
+    tokens = re.findall(r"[a-z0-9]+", title)
+    if not tokens:
+        return ["empty-title"]
+
+    has_storage = _has_storage_token(title)
+    has_digit = any(char.isdigit() for char in title)
+    if len(tokens) == 1 and not has_storage and not has_digit:
+        token = tokens[0]
+        if token in GENERIC_TITLE_BRAND_TOKENS:
+            return ["generic-brand-only-title"]
+        return ["generic-single-token-title"]
+
+    if len(tokens) == 2 and not has_storage and not has_digit:
+        first, second = tokens
+        if first in GENERIC_TITLE_BRAND_TOKENS and second in GENERIC_TITLE_SECONDARY_TOKENS:
+            return ["generic-two-token-title"]
+
+    return []
+
+
 def _filter_non_core_device_candidates(products: list[AmazonProduct]) -> tuple[list[AmazonProduct], list[str]]:
     if not _is_truthy_env("SCAN_FILTER_ACCESSORIES", "true"):
         return products, []
@@ -1115,6 +1176,7 @@ def _filter_non_core_device_candidates(products: list[AmazonProduct]) -> tuple[l
     dropped_logs: list[str] = []
     for item in products:
         reasons = _accessory_guardrail_reasons(item)
+        reasons.extend(_generic_title_guardrail_reasons(item))
         if reasons:
             dropped_logs.append(
                 f"title='{_safe_text(item.title, max_len=90)}' price={item.price_eur:.2f} reasons={','.join(reasons)}"
@@ -2299,17 +2361,17 @@ async def _run_scan_command(payload: dict[str, Any]) -> int:
     if len(deduped) != len(products):
         print(f"[scan] Deduplicated products: {len(products)} -> {len(deduped)}")
     products = deduped
-    products, accessory_drops = _filter_non_core_device_candidates(products)
-    if accessory_drops:
+    products, guardrail_drops = _filter_non_core_device_candidates(products)
+    if guardrail_drops:
         print(
-            "[scan] Accessory guardrail applied | "
-            f"dropped={len(accessory_drops)} kept={len(products)}"
+            "[scan] Candidate guardrail applied | "
+            f"dropped={len(guardrail_drops)} kept={len(products)}"
         )
-        preview = accessory_drops[:5]
+        preview = guardrail_drops[:5]
         for row in preview:
-            print(f"[scan] Accessory drop -> {row}")
-        if len(accessory_drops) > len(preview):
-            print(f"[scan] Accessory drop -> ... and {len(accessory_drops) - len(preview)} more.")
+            print(f"[scan] Candidate drop -> {row}")
+        if len(guardrail_drops) > len(preview):
+            print(f"[scan] Candidate drop -> ... and {len(guardrail_drops) - len(preview)} more.")
     exclude_min_keep_factor = max(1, int(_env_or_default("EXCLUDE_MIN_KEEP_AUTO_FACTOR", "2")))
     exclude_min_keep_hint = min(
         len(products),
