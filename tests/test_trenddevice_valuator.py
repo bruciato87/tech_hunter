@@ -429,6 +429,27 @@ def test_assess_trenddevice_match_accepts_coherent_watch_quote() -> None:
     assert match["ok"] is True
 
 
+def test_assess_trenddevice_match_accepts_api_style_spacing_and_series_aliases() -> None:
+    product = AmazonProduct(
+        title="Apple Watch Series 9 GPS + Cellular 45mm",
+        price_eur=279.0,
+        category=ProductCategory.SMARTWATCH,
+    )
+    match = _assess_trenddevice_match(
+        product=product,
+        normalized_name=product.title,
+        wizard_steps=[
+            {"step_type": STEP_DEVICE_FAMILY, "selected": "Apple Watch"},
+            {"step_type": STEP_MODEL, "selected": "9° Serie"},
+            {"step_type": STEP_MODEL, "selected": "45 mm"},
+            {"step_type": STEP_MODEL, "selected": "GPS + Cellular"},
+        ],
+        source_url="https://0lpt5fe6f2.execute-api.eu-south-1.amazonaws.com/prod/vendi/usato/1024?device=apple+watch&model=9+serie",
+        price_text="stima=135.00€ | Apple Watch | 9° Serie | 45 mm | GPS + Cellular",
+    )
+    assert match["ok"] is True
+
+
 def test_load_storage_state_b64_decodes_valid_json(monkeypatch: pytest.MonkeyPatch) -> None:
     raw = json.dumps({"cookies": [], "origins": []}, ensure_ascii=False).encode("utf-8")
     encoded = base64.b64encode(raw).decode("ascii")

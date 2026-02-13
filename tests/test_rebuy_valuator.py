@@ -57,6 +57,15 @@ def test_rebuy_assess_match_accepts_specific_sell_flow_url() -> None:
     assert match["ok"] is True
 
 
+def test_rebuy_assess_match_accepts_specific_sell_flow_url_without_capacity_token() -> None:
+    match = _assess_rebuy_match(
+        normalized_name="Apple iPhone 14 128GB",
+        candidate_text="Apple iPhone 14",
+        source_url="https://www.rebuy.it/vendere/p/apple-iphone-14/12684558",
+    )
+    assert match["ok"] is True
+
+
 def test_rebuy_assess_match_rejects_generic_category_url() -> None:
     match = _assess_rebuy_match(
         normalized_name='Apple iPad Air 13" M3 256GB Wi-Fi + 5G',

@@ -1014,9 +1014,25 @@ def _assess_trenddevice_match(
             break
 
     candidate_compact = candidate_norm.replace(" ", "")
-    hit_tokens = [token for token in required_tokens if token and token in candidate_norm]
-    capacity_hits = [token for token in capacities if token in candidate_compact]
-    anchor_hits = [token for token in anchor_words if token in candidate_norm]
+
+    def _token_present(token: str) -> bool:
+        normalized_token = _normalize_wizard_text(token)
+        if not normalized_token:
+            return False
+        if normalized_token in candidate_norm:
+            return True
+        compact_token = normalized_token.replace(" ", "")
+        if compact_token and compact_token in candidate_compact:
+            return True
+        if normalized_token == "series" and "serie" in candidate_norm:
+            return True
+        if normalized_token == "serie" and "series" in candidate_norm:
+            return True
+        return False
+
+    hit_tokens = [token for token in required_tokens if token and _token_present(token)]
+    capacity_hits = [token for token in capacities if _token_present(token)]
+    anchor_hits = [token for token in anchor_words if _token_present(token)]
     token_ratio = (len(hit_tokens) / len(required_tokens)) if required_tokens else 0.0
     generic_url = _is_generic_trenddevice_url(source_url)
     has_model_step = any(str(step.get("step_type")) == STEP_MODEL for step in wizard_steps if isinstance(step, dict))
@@ -1648,10 +1664,16 @@ class TrendDeviceValuator(BaseValuator):
                 price_text = f"stima={stima:.2f}€"
                 if td_money is not None:
                     price_text += f" | stima_money_td={td_money:.2f}€"
+                match_parts = [str(step.get("selected") or "") for step in wizard_steps if isinstance(step, dict)]
+                match_text = " | ".join(part for part in match_parts if part)
+                if match_text:
+                    match_text = f"{price_text} | {match_text}"
+                else:
+                    match_text = price_text
                 source_url = f"{self.base_url}?model={model_id}&request={request_id}" if request_id > 0 else f"{self.base_url}?model={model_id}"
-                validation_url = (
-                    f"{_trenddevice_api_base_url()}/richiesta/{request_id}" if request_id > 0 else f"{_trenddevice_api_base_url()}/vendi/usato/{model_id}"
-                )
+                device_label = _normalize_wizard_text(str(device.get("nome") or "")).replace(" ", "+")
+                model_label = _normalize_wizard_text(str(model.get("nome") or "")).replace(" ", "+")
+                validation_url = f"{_trenddevice_api_base_url()}/vendi/usato/{model_id}?device={device_label}&model={model_label}"
                 trace["selected"]["request_id"] = request_id
                 if detail_meta_payload:
                     trace["richiesta_detail"] = detail_meta_payload
@@ -1659,6 +1681,7 @@ class TrendDeviceValuator(BaseValuator):
                     "ok": True,
                     "offer": stima,
                     "price_text": price_text,
+                    "match_text": match_text,
                     "source_url": source_url,
                     "validation_url": validation_url,
                     "wizard": wizard_steps,
@@ -1679,11 +1702,12 @@ class TrendDeviceValuator(BaseValuator):
         payload["wizard"] = list(result.get("wizard") or [])
         payload["price_source"] = "api"
         payload["price_text"] = str(result.get("price_text") or "")
+        match_text = str(result.get("match_text") or payload["price_text"])
         self._validate_match_or_raise(
             product=product,
             normalized_name=normalized_name,
             source_url=str(result.get("validation_url") or result.get("source_url") or self.base_url),
-            price_text=payload["price_text"],
+            price_text=match_text,
             payload=payload,
         )
         return float(result["offer"]), str(result.get("source_url") or self.base_url)

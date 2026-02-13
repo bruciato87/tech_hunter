@@ -700,6 +700,10 @@ def _assess_rebuy_match(
         and (not query_anchors or bool(anchor_hits))
     )
     score = int((ratio * 100) + (len(hit_tokens) * 14) + (len(anchor_hits) * 8) - (40 if generic_url else 0))
+    if path.startswith("vendere/p/"):
+        score += 18
+    elif path.startswith("vendere/") and not generic_url:
+        score += 10
     if strong_generic_match:
         score += 18
 
@@ -728,7 +732,14 @@ def _assess_rebuy_match(
             "required_tokens": required_tokens,
         }
 
-    if capacities and len(capacity_hits) < len(capacities):
+    allow_missing_capacity = (
+        capacities
+        and len(capacity_hits) < len(capacities)
+        and path.startswith("vendere/p/")
+        and bool(anchor_hits)
+        and (token_ratio >= 0.62 or len(hit_tokens) >= 2)
+    )
+    if capacities and len(capacity_hits) < len(capacities) and not allow_missing_capacity:
         return {
             "ok": False,
             "reason": "capacity-mismatch",
@@ -980,6 +991,14 @@ class RebuyValuator(BaseValuator):
                 payload["resolved_source_url"] = resolved_source_url
 
                 match_text = await self._collect_match_text(page)
+                for key in ("deep_link_pick", "result_pick"):
+                    row = payload.get(key)
+                    if not isinstance(row, dict):
+                        continue
+                    for field in ("text", "url", "href"):
+                        value = str(row.get(field) or "").strip()
+                        if value:
+                            match_text = f"{match_text} {value}".strip()
                 try:
                     body_text = await page.inner_text("body", timeout=1800)
                 except PlaywrightError:
@@ -1246,6 +1265,14 @@ class RebuyValuator(BaseValuator):
         await page.wait_for_timeout(1400)
 
         match_text = await self._collect_match_text(page)
+        for key in ("deep_link_pick", "result_pick"):
+            row = payload.get(key)
+            if not isinstance(row, dict):
+                continue
+            for field in ("text", "url", "href"):
+                value = str(row.get(field) or "").strip()
+                if value:
+                    match_text = f"{match_text} {value}".strip()
         resolved_source_url = _resolve_rebuy_source_url(page.url, payload)
         payload["resolved_source_url"] = resolved_source_url
         match = _assess_rebuy_match(
