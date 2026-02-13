@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 from collections import defaultdict
 from collections.abc import Iterable
 from copy import deepcopy
@@ -141,6 +142,106 @@ def _valuator_parallel_limit(platform: str) -> int:
     except ValueError:
         value = default_limit
     return max(1, min(value, 12))
+
+
+def _valuator_query_variant_limit(platform: str) -> int:
+    platform_name = (platform or "").strip().lower()
+    defaults = {
+        "rebuy": 3,
+        "trenddevice": 3,
+        "mpb": 3,
+    }
+    default_limit = defaults.get(platform_name, 1)
+    env_name = f"VALUATOR_QUERY_VARIANTS_{platform_name.upper()}_MAX"
+    try:
+        value = int(_env_or_default(env_name, str(default_limit)))
+    except ValueError:
+        value = default_limit
+    return max(1, min(value, 6))
+
+
+def _trim_query_variant(value: str) -> str:
+    cleaned = re.sub(r"[\[\]\(\)\|,;/]+", " ", value or "")
+    cleaned = re.sub(
+        r"\b(warehouse|ricondizionat[oa]?|renewed|reconditioned|usato|used|pack|bundle|combo)\b",
+        " ",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    if not cleaned:
+        return ""
+    tokens = cleaned.split(" ")
+    if len(tokens) > 8:
+        cleaned = " ".join(tokens[:8])
+    return cleaned
+
+
+def _build_query_variants_for_valuator(product: AmazonProduct, normalized_name: str, platform: str) -> list[str]:
+    max_variants = _valuator_query_variant_limit(platform)
+    variants: list[str] = []
+    seen: set[str] = set()
+
+    def _push(raw: str | None) -> None:
+        value = re.sub(r"\s+", " ", (raw or "").strip())
+        if len(value) < 3:
+            return
+        marker = value.casefold()
+        if marker in seen:
+            return
+        seen.add(marker)
+        variants.append(value)
+
+    if platform in {"rebuy", "mpb"}:
+        ean = (product.ean or "").strip()
+        if ean and re.fullmatch(r"[0-9\-\s]{8,20}", ean):
+            _push(ean)
+    _push(normalized_name)
+    _push(_trim_query_variant(normalized_name))
+    _push(_trim_query_variant(product.title))
+    _push(product.title)
+    if not variants:
+        variants.append(normalized_name)
+    return variants[:max_variants]
+
+
+def _has_quote_verification(result: ValuationResult) -> bool:
+    payload = result.raw_payload if isinstance(result.raw_payload, dict) else {}
+    verification = payload.get("quote_verification")
+    return isinstance(verification, dict) and "ok" in verification
+
+
+def _should_retry_valuator_result(platform: str, result: ValuationResult, *, attempt: int, max_attempts: int) -> bool:
+    if attempt >= max_attempts:
+        return False
+    if result.is_valid and result.offer_eur is not None:
+        return False
+    error_text = (result.error or "").strip().lower()
+    if not error_text:
+        return True
+    hard_markers = (
+        "storage_state missing/invalid",
+        "temporarily paused after anti-bot challenge",
+        "blocked by anti-bot challenge",
+        "turnstile/cloudflare",
+    )
+    if any(marker in error_text for marker in hard_markers):
+        return False
+    soft_markers = (
+        "low-confidence",
+        "price not found",
+        "generic-source-url",
+        "generic-url",
+        "quote verification failed",
+        "search input not found",
+        "email-gate",
+        "stagnant-options",
+        "wizard",
+    )
+    if any(marker in error_text for marker in soft_markers):
+        return True
+    # Conservative default for TrendDevice/Rebuy/MPB: one extra query variant before giving up.
+    return platform in {"trenddevice", "rebuy", "mpb"}
 
 
 def _operating_cost_eur() -> float:
@@ -573,7 +674,7 @@ class ArbitrageManager:
         valuator_names = [getattr(valuator, "platform_name", valuator.__class__.__name__) for valuator in valuators]
         print(f"[scan] Selected valuators -> {valuator_names}")
 
-        async def _run_valuator(valuator: Any) -> ValuationResult:
+        async def _run_once(valuator: Any, query_name: str) -> ValuationResult:
             platform = _valuator_platform_name(valuator)
             limit = _valuator_parallel_limit(platform)
             if limit <= 1:
@@ -582,8 +683,64 @@ class ArbitrageManager:
                     semaphore = asyncio.Semaphore(limit)
                     self._platform_semaphores[platform] = semaphore
                 async with semaphore:
-                    return await valuator.valuate(product, normalized_name)
-            return await valuator.valuate(product, normalized_name)
+                    return await valuator.valuate(product, query_name)
+            return await valuator.valuate(product, query_name)
+
+        async def _run_valuator(valuator: Any) -> ValuationResult:
+            platform = _valuator_platform_name(valuator)
+            query_variants = _build_query_variants_for_valuator(product, normalized_name, platform)
+            last_result: ValuationResult | None = None
+
+            for attempt_index, query_name in enumerate(query_variants, start=1):
+                raw = await _run_once(valuator, query_name)
+                verified = raw if _has_quote_verification(raw) else _verify_real_resale_quote(raw)
+                payload = deepcopy(verified.raw_payload) if isinstance(verified.raw_payload, dict) else {}
+                payload["query_retry"] = {
+                    "enabled": len(query_variants) > 1,
+                    "attempt": attempt_index,
+                    "max_attempts": len(query_variants),
+                    "query": query_name,
+                    "platform": platform,
+                }
+                verified = ValuationResult(
+                    platform=verified.platform,
+                    normalized_name=verified.normalized_name,
+                    offer_eur=verified.offer_eur,
+                    condition=verified.condition,
+                    currency=verified.currency,
+                    source_url=verified.source_url,
+                    raw_payload=payload,
+                    error=verified.error,
+                )
+                last_result = verified
+                if verified.is_valid and verified.offer_eur is not None:
+                    if attempt_index > 1:
+                        print(
+                            "[scan] Query retry recovered quote | "
+                            f"platform={platform} attempt={attempt_index}/{len(query_variants)} query='{query_name}' "
+                            f"offer={verified.offer_eur}"
+                        )
+                    return verified
+                if not _should_retry_valuator_result(
+                    platform,
+                    verified,
+                    attempt=attempt_index,
+                    max_attempts=len(query_variants),
+                ):
+                    return verified
+                print(
+                    "[scan] Query retry next variant | "
+                    f"platform={platform} attempt={attempt_index}/{len(query_variants)} "
+                    f"query='{query_name}' error={verified.error}"
+                )
+            if last_result is not None:
+                return last_result
+            return ValuationResult(
+                platform=platform,
+                normalized_name=normalized_name,
+                offer_eur=None,
+                error=f"{platform} valuation failed before query attempts.",
+            )
 
         tasks = [_run_valuator(valuator) for valuator in valuators]
         raw_results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -601,7 +758,7 @@ class ArbitrageManager:
                     )
                 )
                 continue
-            verified = _verify_real_resale_quote(raw)
+            verified = raw if _has_quote_verification(raw) else _verify_real_resale_quote(raw)
             offers.append(verified)
             print(
                 "[scan] Offer result -> "

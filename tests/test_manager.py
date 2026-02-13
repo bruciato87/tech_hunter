@@ -44,6 +44,41 @@ class StaticValuator:
         )
 
 
+class QueryRetryValuator:
+    def __init__(self, platform: str) -> None:
+        self.platform_name = platform
+        self.queries: list[str] = []
+
+    async def valuate(self, product: AmazonProduct, normalized_name: str) -> ValuationResult:
+        self.queries.append(normalized_name)
+        if "valve" not in normalized_name.lower():
+            return ValuationResult(
+                platform=self.platform_name,
+                normalized_name=normalized_name,
+                offer_eur=None,
+                error=f"{self.platform_name} low-confidence match (low-token-similarity); discarded to prevent false-positive.",
+                raw_payload={
+                    "price_source": "dom",
+                    "match_quality": {"ok": False, "reason": "low-token-similarity"},
+                },
+            )
+        if self.platform_name == "rebuy":
+            source_url = "https://www.rebuy.it/comprare/valve-steam-deck-oled-1tb/123456"
+        else:
+            source_url = "https://www.trendevice.com/vendi/valutazione/prodotto/valve-steam-deck-oled-1tb"
+        return ValuationResult(
+            platform=self.platform_name,
+            normalized_name=normalized_name,
+            offer_eur=320.0,
+            source_url=source_url,
+            raw_payload={
+                "price_text": "Ti paghiamo 320,00 €",
+                "price_source": "dom",
+                "match_quality": {"ok": True, "reason": "ok"},
+            },
+        )
+
+
 class FakeStorage:
     def __init__(self) -> None:
         self.saved = []
@@ -67,6 +102,17 @@ class ManagerUnderTest(ArbitrageManager):
 
     def _build_valuators(self, category: ProductCategory):  # noqa: ANN001
         return self._valuators
+
+
+class RetryMetaBalancer(SmartAIBalancer):
+    async def normalize_with_meta(self, title: str) -> tuple[str, dict]:  # type: ignore[override]
+        normalized = title.replace("Valve ", "", 1)
+        return normalized, {
+            "provider": "test",
+            "model": "mock",
+            "mode": "live",
+            "ai_used": True,
+        }
 
 
 @pytest.mark.asyncio
@@ -363,3 +409,28 @@ async def test_manager_quote_verification_accepts_mpb_specific_sell_url() -> Non
     assert decision.best_offer.platform == "mpb"
     assert decision.best_offer.offer_eur == 480.0
     assert decision.should_notify is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("platform", ["rebuy", "trenddevice"])
+async def test_manager_query_variant_retry_recovers_rebuy_and_trenddevice(platform: str) -> None:
+    valuator = QueryRetryValuator(platform)
+    manager = ManagerUnderTest(
+        valuators=[valuator],
+        ai_balancer=RetryMetaBalancer(gemini_keys=[], openrouter_keys=[]),
+        min_spread_eur=40.0,
+    )
+    product = AmazonProduct(
+        title="Valve Steam Deck OLED 1TB",
+        price_eur=100.0,
+        category=ProductCategory.GENERAL_TECH,
+    )
+
+    decision = await manager.evaluate_product(product)
+
+    assert decision.best_offer is not None
+    assert decision.best_offer.platform == platform
+    assert decision.best_offer.offer_eur == 320.0
+    assert decision.should_notify is True
+    assert len(valuator.queries) >= 2
+    assert any("Valve" in query for query in valuator.queries)
