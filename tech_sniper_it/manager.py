@@ -149,9 +149,9 @@ def _valuator_parallel_limit(platform: str) -> int:
 def _valuator_query_variant_limit(platform: str) -> int:
     platform_name = (platform or "").strip().lower()
     defaults = {
-        "rebuy": 3,
+        "rebuy": 2,
         "trenddevice": 2,
-        "mpb": 2,
+        "mpb": 1,
     }
     default_limit = defaults.get(platform_name, 1)
     env_name = f"VALUATOR_QUERY_VARIANTS_{platform_name.upper()}_MAX"
@@ -165,11 +165,11 @@ def _valuator_query_variant_limit(platform: str) -> int:
 def _valuator_timeout_seconds(platform: str) -> float:
     platform_name = (platform or "").strip().lower()
     defaults = {
-        "rebuy": 70.0,
-        "trenddevice": 70.0,
-        "mpb": 65.0,
+        "rebuy": 45.0,
+        "trenddevice": 45.0,
+        "mpb": 28.0,
     }
-    default_timeout = defaults.get(platform_name, 65.0)
+    default_timeout = defaults.get(platform_name, 45.0)
     env_name = f"VALUATOR_TIMEOUT_{platform_name.upper()}_SECONDS"
     raw = _env_or_default(env_name, _env_or_default("VALUATOR_TIMEOUT_DEFAULT_SECONDS", str(default_timeout)))
     try:

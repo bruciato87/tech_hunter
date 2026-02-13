@@ -932,10 +932,10 @@ class MPBValuator(BaseValuator):
         locale_segment = _mpb_api_locale_segment(market)
         search_path = _mpb_api_search_path(market)
         condition = _mpb_api_condition()
-        query_limit = max(1, int(_env_or_default("MPB_API_QUERY_LIMIT", "2")))
-        model_limit = max(1, int(_env_or_default("MPB_API_MODEL_LIMIT", "3")))
-        rows = max(6, min(20, int(_env_or_default("MPB_API_SEARCH_ROWS", "10"))))
-        api_budget_seconds = max(6.0, min(40.0, float(_env_or_default("MPB_API_TIME_BUDGET_SECONDS", "18"))))
+        query_limit = max(1, int(_env_or_default("MPB_API_QUERY_LIMIT", "1")))
+        model_limit = max(1, int(_env_or_default("MPB_API_MODEL_LIMIT", "2")))
+        rows = max(6, min(20, int(_env_or_default("MPB_API_SEARCH_ROWS", "8"))))
+        api_budget_seconds = max(6.0, min(40.0, float(_env_or_default("MPB_API_TIME_BUDGET_SECONDS", "12"))))
         deadline = time.monotonic() + api_budget_seconds
 
         api_payload: dict[str, Any] = {

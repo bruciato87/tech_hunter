@@ -1916,7 +1916,7 @@ async def _run_scan_command(payload: dict[str, Any]) -> int:
     nav_timeout_ms = int(_env_or_default("PLAYWRIGHT_NAV_TIMEOUT_MS", "45000"))
     if scan_mode == "smoke":
         nav_timeout_ms = min(nav_timeout_ms, int(_env_or_default("SCAN_SMOKE_NAV_TIMEOUT_MS", "20000")))
-    scan_target_products = max(1, int(_env_or_default("SCAN_TARGET_PRODUCTS", _env_or_default("AMAZON_WAREHOUSE_MAX_PRODUCTS", "12"))))
+    scan_target_products = max(1, int(_env_or_default("SCAN_TARGET_PRODUCTS", _env_or_default("AMAZON_WAREHOUSE_MAX_PRODUCTS", "8"))))
     if scan_mode == "smoke":
         scan_target_products = min(scan_target_products, max(1, int(_env_or_default("SCAN_SMOKE_TARGET_PRODUCTS", "3"))))
     candidate_multiplier = max(1, int(_env_or_default("SCAN_CANDIDATE_MULTIPLIER", "4")))
