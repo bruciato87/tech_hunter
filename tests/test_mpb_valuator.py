@@ -191,6 +191,32 @@ def test_extract_prices_from_json_blob_ignores_boolean_values() -> None:
     assert values == [5020.0]
 
 
+def test_extract_prices_from_json_blob_converts_large_minor_units_to_major() -> None:
+    rows = _extract_prices_from_json_blob({"payload": {"offer_price": 50200}})
+    values = [item[1] for item in rows]
+    assert values == [502.0]
+
+
+def test_pick_best_mpb_network_candidate_skips_count_metrics() -> None:
+    candidates = [
+        {
+            "score": 90,
+            "value": 120.0,
+            "snippet": "results[0].product_price.count.values[0]=120",
+            "url": "https://www.mpb.com/search-service/product/query/?query=canon",
+        },
+        {
+            "score": 72,
+            "value": 500.0,
+            "snippet": "quote valuation canon eos r7 body 500,00 €",
+            "url": "https://www.mpb.com/it-it/sell/product/canon-eos-r7/123",
+        },
+    ]
+    value, snippet = _pick_best_mpb_network_candidate(candidates, normalized_name="Canon EOS R7 Body")
+    assert value == 500.0
+    assert "canon eos r7" in snippet.lower()
+
+
 def test_pick_best_mpb_network_candidate_skips_user_profile_endpoint() -> None:
     candidates = [
         {

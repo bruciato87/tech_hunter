@@ -321,6 +321,8 @@ def _extract_prices_from_json_blob(blob: Any, path: str = "") -> list[tuple[int,
         except (TypeError, ValueError):
             value = None
 
+    if value is not None and value > 15000 and value <= 2_000_000:
+        value = value / 100.0
     if value is None or value <= 0 or value > 15000:
         return rows
     rows.append((64, float(value), f"{path}={blob}"))
@@ -341,11 +343,13 @@ def _pick_best_mpb_network_candidate(
             value = float(candidate.get("value"))
         except (TypeError, ValueError):
             continue
-        if value <= 0 or value > 15000:
+        if value < 20 or value > 15000:
             continue
         snippet = str(candidate.get("snippet") or "").strip()
         url = str(candidate.get("url") or "").strip()
         if "/public-api/v2/user/me" in url.lower():
+            continue
+        if "count.values" in snippet.lower() or ".count." in snippet.lower():
             continue
         joined = _normalize_match_text(f"{snippet} {url}")
         token_hits = sum(1 for token in tokens if token and token in joined)
