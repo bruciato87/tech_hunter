@@ -148,6 +148,15 @@ def _load_storage_state_b64() -> str | None:
         handle.close()
 
 
+def _mpb_require_storage_state() -> bool:
+    return _env_or_default("MPB_REQUIRE_STORAGE_STATE", "true").lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+
+
 def _remove_file_if_exists(path: str | None) -> None:
     if not path:
         return
@@ -231,6 +240,10 @@ class MPBValuator(BaseValuator):
             )
         max_attempts = max(1, int(_env_or_default("MPB_MAX_ATTEMPTS", "3")))
         storage_state_path = _load_storage_state_b64()
+        if _mpb_require_storage_state() and storage_state_path is None:
+            raise RuntimeError(
+                "MPB storage_state missing/invalid; set MPB_STORAGE_STATE_B64 or disable MPB_REQUIRE_STORAGE_STATE."
+            )
         payload: dict[str, Any] = {
             "query": normalized_name,
             "condition_target": "Ottimo",

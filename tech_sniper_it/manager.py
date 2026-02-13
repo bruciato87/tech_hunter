@@ -40,6 +40,21 @@ def _valuator_backoff_threshold(platform: str) -> int:
     return max(1, int(_env_or_default(env_name, str(platform_default))))
 
 
+def _valuator_parallel_limit(platform: str) -> int:
+    platform_name = (platform or "").strip().lower()
+    defaults = {
+        "mpb": 1,
+        "trenddevice": 2,
+    }
+    default_limit = defaults.get(platform_name, 4)
+    env_name = f"VALUATOR_MAX_PARALLEL_{platform_name.upper()}"
+    try:
+        value = int(_env_or_default(env_name, str(default_limit)))
+    except ValueError:
+        value = default_limit
+    return max(1, min(value, 12))
+
+
 def _should_backoff_result(result: ValuationResult) -> bool:
     platform = (result.platform or "").strip().lower()
     if not platform:
@@ -56,6 +71,7 @@ def _should_backoff_result(result: ValuationResult) -> bool:
                 "cloudflare",
                 "search input not found",
                 "price not found after retries",
+                "storage_state missing/invalid",
             )
         )
     if platform == "trenddevice":
@@ -80,6 +96,7 @@ class ArbitrageManager:
         self.min_spread_eur = min_spread_eur
         self.headless = headless
         self.nav_timeout_ms = nav_timeout_ms
+        self._platform_semaphores: dict[str, asyncio.Semaphore] = {}
 
     async def evaluate_product(self, product: AmazonProduct) -> ArbitrageDecision:
         print(
@@ -262,7 +279,19 @@ class ArbitrageManager:
         valuator_names = [getattr(valuator, "platform_name", valuator.__class__.__name__) for valuator in valuators]
         print(f"[scan] Selected valuators -> {valuator_names}")
 
-        tasks = [valuator.valuate(product, normalized_name) for valuator in valuators]
+        async def _run_valuator(valuator: Any) -> ValuationResult:
+            platform = _valuator_platform_name(valuator)
+            limit = _valuator_parallel_limit(platform)
+            if limit <= 1:
+                semaphore = self._platform_semaphores.get(platform)
+                if semaphore is None:
+                    semaphore = asyncio.Semaphore(limit)
+                    self._platform_semaphores[platform] = semaphore
+                async with semaphore:
+                    return await valuator.valuate(product, normalized_name)
+            return await valuator.valuate(product, normalized_name)
+
+        tasks = [_run_valuator(valuator) for valuator in valuators]
         raw_results = await asyncio.gather(*tasks, return_exceptions=True)
 
         offers: list[ValuationResult] = []

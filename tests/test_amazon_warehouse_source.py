@@ -10,6 +10,7 @@ from tech_sniper_it.sources.amazon_warehouse import (
     _decode_storage_state_env,
     _detect_page_barriers,
     _expand_marketplaces,
+    _extract_asin_from_url,
     _extract_products_from_html,
     _parse_cart_summary,
     _load_storage_state_paths,
@@ -202,6 +203,7 @@ def test_parse_cart_summary_extracts_subtotal_promo_and_total() -> None:
     """
     summary = _parse_cart_summary(html, "B0ABCDE123")
     assert summary["target_in_cart"] is True
+    assert summary["cart_asins"] == ["B0ABCDE123"]
     assert summary["target_row_price"] == 699.0
     assert summary["subtotal_price"] == 699.0
     assert summary["promo_discount_eur"] == 70.0
@@ -228,6 +230,11 @@ def test_parse_cart_summary_falls_back_to_subtotal_minus_promo_when_total_missin
     assert summary["subtotal_price"] == 499.0
     assert summary["promo_discount_eur"] == 30.0
     assert summary["total_price"] == 469.0
+
+
+def test_extract_asin_from_url_supports_aw_path_and_query_fallback() -> None:
+    assert _extract_asin_from_url("https://www.amazon.it/gp/aw/d/B0ABCDEF12?smid=A11") == "B0ABCDEF12"
+    assert _extract_asin_from_url("https://www.amazon.es/s?k=test&pd_rd_i=B09XYZ1234") == "B09XYZ1234"
 
 
 def test_detect_page_barriers_flags_captcha_and_consent() -> None:

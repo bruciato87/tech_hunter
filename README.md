@@ -84,6 +84,9 @@ python -m tech_sniper_it.worker
 - `MPB_USE_STORAGE_STATE` (default: `true`)
 - `MPB_STORAGE_STATE_B64` (optional base64 Playwright storage state for MPB challenge bypass)
 - `MPB_BLOCK_COOLDOWN_SECONDS` (default: `1800`, temporary MPB pause after anti-bot challenge detection)
+- `MPB_REQUIRE_STORAGE_STATE` (default: `true`, skip MPB run when storage state is missing/invalid to avoid challenge loops)
+- `VALUATOR_MAX_PARALLEL_MPB` (default: `1`, serializes MPB requests to reduce anti-bot triggers)
+- `VALUATOR_MAX_PARALLEL_TRENDDEVICE` (default: `2`)
 - `TRENDDEVICE_LEAD_EMAIL` (optional lead email used by TrendDevice wizard when required)
 - `TRENDDEVICE_USE_STORAGE_STATE` (default: `true`)
 - `TRENDDEVICE_STORAGE_STATE_B64` (optional base64 Playwright storage state for logged-in TrendDevice session)
@@ -114,12 +117,14 @@ python -m tech_sniper_it.worker
 - `AMAZON_WAREHOUSE_CART_PRICING_ENABLED` (default: `false`, validates real cart net price in authenticated session)
 - `AMAZON_WAREHOUSE_CART_PRICING_MAX_ITEMS` (default: `4`, max candidates per scan validated via cart)
 - `AMAZON_WAREHOUSE_CART_PRICING_REQUIRE_EMPTY_CART` (default: `true`, skip cart validation unless cart is empty to avoid side effects)
+- `AMAZON_WAREHOUSE_CART_PRICING_ALLOW_DELTA` (default: `true`, when cart is not empty computes candidate net price from before/after cart delta)
 - `AMAZON_WAREHOUSE_DEBUG_ON_EMPTY` (default: `true`, saves diagnostic dump on zero parsed results)
 - `AMAZON_WAREHOUSE_DEBUG_DIR` (default: `/tmp/tech_sniper_it_debug`)
 
 Cart promo validator behavior:
 
 - when enabled, the worker adds the candidate to cart, reads subtotal/promo/total, and removes that same item immediately.
+- when the cart already contains other items, delta mode can still compute net price from cart totals (if enabled).
 - if item removal fails, the cart price is discarded to prevent persistent cart pollution.
 
 ### AI Free-Tier Selection Logic

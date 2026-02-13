@@ -8,7 +8,7 @@ import random
 import re
 import tempfile
 from typing import Any
-from urllib.parse import quote_plus, unquote, urljoin, urlparse
+from urllib.parse import parse_qs, quote_plus, unquote, urljoin, urlparse
 
 from bs4 import BeautifulSoup
 from playwright.async_api import Error as PlaywrightError
@@ -664,6 +664,10 @@ def _cart_pricing_require_empty_cart() -> bool:
     return _is_truthy_env("AMAZON_WAREHOUSE_CART_PRICING_REQUIRE_EMPTY_CART", "true")
 
 
+def _cart_pricing_allow_delta_non_empty() -> bool:
+    return _is_truthy_env("AMAZON_WAREHOUSE_CART_PRICING_ALLOW_DELTA", "true")
+
+
 def _retry_delay_for_attempt(base_ms: int, attempt: int) -> int:
     multiplier = max(1, 2 ** max(0, attempt - 1))
     jitter = random.randint(0, 250)
@@ -910,10 +914,29 @@ def _extract_asin_from_url(url: str | None) -> str | None:
     raw = (url or "").strip()
     if not raw:
         return None
-    match = re.search(r"/(?:dp|gp/product)/([A-Z0-9]{10})", raw, flags=re.IGNORECASE)
-    if not match:
-        return None
-    return match.group(1).upper()
+    parsed = urlparse(raw if raw.startswith(("http://", "https://")) else f"https://{raw}")
+    path = parsed.path or ""
+
+    patterns = (
+        r"/dp/([A-Z0-9]{10})",
+        r"/gp/product/([A-Z0-9]{10})",
+        r"/gp/aw/d/([A-Z0-9]{10})",
+        r"/gp/-/product/([A-Z0-9]{10})",
+        r"/exec/obidos/ASIN/([A-Z0-9]{10})",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, path, flags=re.IGNORECASE)
+        if match:
+            return match.group(1).upper()
+
+    query = parse_qs(parsed.query or "")
+    for key in ("asin", "ASIN", "pd_rd_i"):
+        values = query.get(key) or []
+        for value in values:
+            candidate = (value or "").strip().upper()
+            if re.fullmatch(r"[A-Z0-9]{10}", candidate):
+                return candidate
+    return None
 
 
 def _cart_url_for_host(host: str) -> str:
@@ -984,6 +1007,11 @@ def _extract_labeled_price_from_text(text: str, hints: tuple[str, ...]) -> float
 def _parse_cart_summary(html: str, asin: str | None) -> dict[str, Any]:
     soup = BeautifulSoup(html, "html.parser")
     rows = _collect_cart_rows(soup)
+    cart_asins = [
+        (row.get("data-asin") or "").strip().upper()
+        for row in rows
+        if (row.get("data-asin") or "").strip()
+    ]
     full_text = soup.get_text(" ", strip=True)
     lowered = full_text.lower()
     is_empty = (len(rows) == 0) or any(hint in lowered for hint in CART_EMPTY_HINTS)
@@ -1024,6 +1052,7 @@ def _parse_cart_summary(html: str, asin: str | None) -> dict[str, Any]:
 
     return {
         "row_count": len(rows),
+        "cart_asins": cart_asins,
         "is_empty": is_empty,
         "target_in_cart": target_in_cart,
         "target_row_price": target_row_price,
@@ -1045,6 +1074,19 @@ async def _read_cart_summary(page, *, host: str, asin: str | None) -> dict[str, 
     summary["barriers"] = _detect_page_barriers(html, title)
     summary["url"] = page.url
     return summary
+
+
+def _positive_delta(after_value: Any, before_value: Any) -> float | None:
+    if not isinstance(after_value, (int, float)):
+        return None
+    if before_value is None:
+        return round(float(after_value), 2) if float(after_value) > 0 else None
+    if not isinstance(before_value, (int, float)):
+        return None
+    delta = float(after_value) - float(before_value)
+    if delta <= 0:
+        return None
+    return round(delta, 2)
 
 
 async def _click_add_to_cart(page) -> bool:  # noqa: ANN001
@@ -1069,7 +1111,14 @@ async def _remove_asin_from_cart(page, *, host: str, asin: str) -> bool:  # noqa
         return False
 
     row_locator = page.locator(
-        f"div.sc-list-item[data-asin='{asin}'], div[data-asin='{asin}'][data-name='Active Items']"
+        ",".join(
+            [
+                f"div.sc-list-item[data-asin='{asin}']",
+                f"div[data-asin='{asin}'][data-name='Active Items']",
+                f"div[data-asin='{asin}'][data-itemid]",
+                f"[data-asin='{asin}']",
+            ]
+        )
     ).first
     try:
         if not await row_locator.count():
@@ -1091,16 +1140,35 @@ async def _remove_asin_from_cart(page, *, host: str, asin: str) -> bool:  # noqa
             continue
 
     if not clicked:
+        remove_pattern = re.compile(r"(delete|remove|elimina|löschen|supprimer|eliminar)", re.IGNORECASE)
+        try:
+            target = row_locator.get_by_role("button", name=remove_pattern).first
+            if await target.count() and await target.is_visible(timeout=800):
+                await target.click(timeout=1800)
+                clicked = True
+        except PlaywrightError:
+            pass
+
+    if not clicked:
+        try:
+            target = page.locator("a[data-feature-id='item-delete-button'], [data-action='delete'] a").first
+            if await target.count() and await target.is_visible(timeout=800):
+                await target.click(timeout=1800)
+                clicked = True
+        except PlaywrightError:
+            pass
+
+    if not clicked:
         return False
 
-    await page.wait_for_timeout(1400)
+    await page.wait_for_timeout(600)
     try:
-        await page.goto(_cart_url_for_host(host), wait_until="domcontentloaded")
-        await page.wait_for_timeout(800)
-        row_check = page.locator(
-            f"div.sc-list-item[data-asin='{asin}'], div[data-asin='{asin}'][data-name='Active Items']"
-        ).first
-        return not await row_check.count()
+        await row_locator.wait_for(state="detached", timeout=5000)
+    except PlaywrightError:
+        pass
+    try:
+        summary = await _read_cart_summary(page, host=host, asin=asin)
+        return not bool(summary.get("target_in_cart"))
     except PlaywrightError:
         return False
 
@@ -1121,6 +1189,7 @@ async def _resolve_cart_net_price(
         "subtotal_price": None,
         "promo_discount_eur": None,
         "total_price": None,
+        "net_price_source": None,
         "reason": None,
     }
     if not asin:
@@ -1132,7 +1201,8 @@ async def _resolve_cart_net_price(
     if {"signin", "captcha", "sorry-page"} & barriers:
         result["reason"] = "cart-unavailable"
         return result
-    if require_empty_cart and not before.get("is_empty"):
+    allow_delta = _cart_pricing_allow_delta_non_empty()
+    if require_empty_cart and not before.get("is_empty") and not allow_delta:
         result["reason"] = "cart-not-empty"
         return result
     if before.get("target_in_cart"):
@@ -1169,21 +1239,50 @@ async def _resolve_cart_net_price(
         result["subtotal_price"] = subtotal
         result["promo_discount_eur"] = promo_discount
         result["total_price"] = total_price
+        before_total = before.get("total_price")
+        before_subtotal = before.get("subtotal_price")
+        before_promo = before.get("promo_discount_eur")
+        delta_total = _positive_delta(total_price, before_total)
+        delta_subtotal = _positive_delta(subtotal, before_subtotal)
+        delta_promo = _positive_delta(promo_discount, before_promo)
         net_price: float | None = None
-        if isinstance(total_price, (int, float)) and total_price > 0:
+        if allow_delta and not before.get("is_empty"):
+            if isinstance(delta_total, (int, float)) and delta_total > 0:
+                net_price = float(delta_total)
+                result["net_price_source"] = "delta_total"
+            elif isinstance(delta_subtotal, (int, float)) and delta_subtotal > 0:
+                if isinstance(delta_promo, (int, float)) and delta_subtotal > delta_promo:
+                    net_price = float(delta_subtotal) - float(delta_promo)
+                    result["net_price_source"] = "delta_subtotal_minus_promo_delta"
+                else:
+                    net_price = float(delta_subtotal)
+                    result["net_price_source"] = "delta_subtotal"
+        if net_price is None and isinstance(total_price, (int, float)) and total_price > 0 and before.get("is_empty"):
             net_price = float(total_price)
+            result["net_price_source"] = "cart_total"
         elif (
-            isinstance(subtotal, (int, float))
+            net_price is None
+            and isinstance(subtotal, (int, float))
             and isinstance(promo_discount, (int, float))
             and subtotal > promo_discount
         ):
             net_price = float(subtotal) - float(promo_discount)
-        elif require_empty_cart and before.get("is_empty") and isinstance(subtotal, (int, float)) and subtotal > 0:
+            result["net_price_source"] = "subtotal_minus_promo"
+        elif (
+            net_price is None
+            and require_empty_cart
+            and before.get("is_empty")
+            and isinstance(subtotal, (int, float))
+            and subtotal > 0
+        ):
             net_price = float(subtotal)
-        elif isinstance(row_price, (int, float)) and row_price > 0:
+            result["net_price_source"] = "subtotal_empty_cart"
+        elif net_price is None and isinstance(row_price, (int, float)) and row_price > 0:
             net_price = float(row_price)
-        elif isinstance(subtotal, (int, float)) and subtotal > 0:
+            result["net_price_source"] = "row_price"
+        elif net_price is None and isinstance(subtotal, (int, float)) and subtotal > 0 and before.get("is_empty"):
             net_price = float(subtotal)
+            result["net_price_source"] = "subtotal_fallback"
         if net_price is None:
             result["reason"] = "net-price-not-found"
             return result
@@ -1217,6 +1316,7 @@ async def apply_cart_net_pricing(
         return {"checked": 0, "updated": 0, "skipped": len(products)}
 
     require_empty_cart = _cart_pricing_require_empty_cart()
+    allow_delta_non_empty = _cart_pricing_allow_delta_non_empty()
     candidates: list[tuple[Any, str, str]] = []
     seen_urls: set[str] = set()
     for product in products:
@@ -1298,6 +1398,7 @@ async def apply_cart_net_pricing(
                                 f"subtotal={_format_money(pricing.get('subtotal_price'))} "
                                 f"promo_discount={_format_money(pricing.get('promo_discount_eur'))} "
                                 f"total={_format_money(pricing.get('total_price'))} "
+                                f"source={pricing.get('net_price_source') or 'n/d'} "
                                 f"removed={pricing.get('removed')}"
                             )
                         else:
@@ -1308,6 +1409,7 @@ async def apply_cart_net_pricing(
                                 f"subtotal={_format_money(pricing.get('subtotal_price'))} "
                                 f"promo_discount={_format_money(pricing.get('promo_discount_eur'))} "
                                 f"total={_format_money(pricing.get('total_price'))} "
+                                f"source={pricing.get('net_price_source') or 'n/d'} "
                                 f"removed={pricing.get('removed')}"
                             )
                 finally:
@@ -1318,7 +1420,8 @@ async def apply_cart_net_pricing(
 
     print(
         "[warehouse/cart] Pricing validator summary | "
-        f"checked={checked} updated={updated} skipped={skipped} require_empty_cart={require_empty_cart}"
+        f"checked={checked} updated={updated} skipped={skipped} "
+        f"require_empty_cart={require_empty_cart} allow_delta_non_empty={allow_delta_non_empty}"
     )
     return {"checked": checked, "updated": updated, "skipped": skipped}
 

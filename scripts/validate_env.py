@@ -241,6 +241,12 @@ def main() -> int:
         "off",
     }
     mpb_storage_state = (os.getenv("MPB_STORAGE_STATE_B64") or "").strip()
+    mpb_require_storage_state = _env_or_default("MPB_REQUIRE_STORAGE_STATE", "true").lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
     if mpb_use_storage_state and mpb_storage_state:
         try:
             decoded = base64.b64decode(mpb_storage_state).decode("utf-8")
@@ -249,6 +255,21 @@ def main() -> int:
                 warnings.append("MPB_STORAGE_STATE_B64 must decode to a JSON object.")
         except Exception:
             warnings.append("MPB_STORAGE_STATE_B64 is not valid base64 JSON.")
+    if mpb_require_storage_state and not mpb_use_storage_state:
+        warnings.append("MPB_REQUIRE_STORAGE_STATE=true but MPB_USE_STORAGE_STATE=false.")
+    if mpb_require_storage_state and not mpb_storage_state:
+        warnings.append("MPB_REQUIRE_STORAGE_STATE=true but MPB_STORAGE_STATE_B64 is empty.")
+
+    for env_name in ("VALUATOR_MAX_PARALLEL_MPB", "VALUATOR_MAX_PARALLEL_TRENDDEVICE"):
+        raw = (os.getenv(env_name) or "").strip()
+        if not raw:
+            continue
+        try:
+            value = int(raw)
+            if value < 1:
+                errors.append(f"{env_name} must be >= 1.")
+        except ValueError:
+            errors.append(f"{env_name} must be integer.")
 
     trenddevice_email = (os.getenv("TRENDDEVICE_LEAD_EMAIL") or "").strip()
     if trenddevice_email and "@" not in trenddevice_email:
@@ -407,6 +428,10 @@ def main() -> int:
                 errors.append("AMAZON_WAREHOUSE_CART_PRICING_MAX_ITEMS must be >= 1.")
         except ValueError:
             errors.append("AMAZON_WAREHOUSE_CART_PRICING_MAX_ITEMS must be integer.")
+
+        raw_cart_delta = (os.getenv("AMAZON_WAREHOUSE_CART_PRICING_ALLOW_DELTA") or "").strip().lower()
+        if raw_cart_delta and raw_cart_delta not in {"1", "true", "yes", "on", "0", "false", "no", "off"}:
+            errors.append("AMAZON_WAREHOUSE_CART_PRICING_ALLOW_DELTA must be boolean.")
 
         if cart_pricing_enabled and not use_storage_state:
             warnings.append(

@@ -15,6 +15,7 @@ from tech_sniper_it.valuators.mpb import (
     _load_storage_state_b64,
     _mark_mpb_temporarily_blocked,
     _mpb_block_remaining_seconds,
+    _mpb_require_storage_state,
     _remove_file_if_exists,
 )
 
@@ -90,3 +91,10 @@ def test_mpb_temporary_block_mark_and_clear(monkeypatch: pytest.MonkeyPatch) -> 
     assert remaining > 0
     _clear_mpb_temporary_block()
     assert _mpb_block_remaining_seconds() == 0
+
+
+def test_mpb_require_storage_state_defaults_true(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("MPB_REQUIRE_STORAGE_STATE", raising=False)
+    assert _mpb_require_storage_state() is True
+    monkeypatch.setenv("MPB_REQUIRE_STORAGE_STATE", "false")
+    assert _mpb_require_storage_state() is False

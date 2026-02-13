@@ -284,3 +284,48 @@ def test_validate_env_fails_on_invalid_mpb_block_cooldown(tmp_path: Path) -> Non
     )
     assert result.returncode == 1
     assert "MPB_BLOCK_COOLDOWN_SECONDS must be >= 60." in result.stdout
+
+
+def test_validate_env_fails_on_invalid_valuator_parallel_limit(tmp_path: Path) -> None:
+    result = _run_validate_env(
+        tmp_path,
+        {
+            "GEMINI_API_KEYS": "k1",
+            "MIN_SPREAD_EUR": "40",
+            "MAX_PARALLEL_PRODUCTS": "2",
+            "PLAYWRIGHT_NAV_TIMEOUT_MS": "45000",
+            "VALUATOR_MAX_PARALLEL_MPB": "0",
+        },
+    )
+    assert result.returncode == 1
+    assert "VALUATOR_MAX_PARALLEL_MPB must be >= 1." in result.stdout
+
+
+def test_validate_env_warns_when_mpb_requires_storage_state_without_value(tmp_path: Path) -> None:
+    result = _run_validate_env(
+        tmp_path,
+        {
+            "GEMINI_API_KEYS": "k1",
+            "MIN_SPREAD_EUR": "40",
+            "MAX_PARALLEL_PRODUCTS": "2",
+            "PLAYWRIGHT_NAV_TIMEOUT_MS": "45000",
+            "MPB_REQUIRE_STORAGE_STATE": "true",
+        },
+    )
+    assert result.returncode == 0
+    assert "MPB_REQUIRE_STORAGE_STATE=true but MPB_STORAGE_STATE_B64 is empty." in result.stdout
+
+
+def test_validate_env_fails_on_invalid_cart_pricing_allow_delta(tmp_path: Path) -> None:
+    result = _run_validate_env(
+        tmp_path,
+        {
+            "GEMINI_API_KEYS": "k1",
+            "MIN_SPREAD_EUR": "40",
+            "MAX_PARALLEL_PRODUCTS": "2",
+            "PLAYWRIGHT_NAV_TIMEOUT_MS": "45000",
+            "AMAZON_WAREHOUSE_CART_PRICING_ALLOW_DELTA": "sometimes",
+        },
+    )
+    assert result.returncode == 1
+    assert "AMAZON_WAREHOUSE_CART_PRICING_ALLOW_DELTA must be boolean." in result.stdout
