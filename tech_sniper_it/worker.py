@@ -165,7 +165,7 @@ DEVICE_ANCHOR_PRICE_FLOOR: tuple[tuple[str, float], ...] = (
     ("rog ally", 300.0),
     ("legion go", 340.0),
     ("macbook", 180.0),
-    ("ipad", 100.0),
+    ("ipad", 240.0),
     ("canon eos", 180.0),
     ("sony alpha", 180.0),
     ("mirrorless", 180.0),

@@ -195,6 +195,50 @@ def test_extract_products_from_html_discards_low_outlier_even_without_installmen
     assert item["price_eur"] == 589.0
 
 
+def test_extract_products_from_html_rejects_low_current_price_when_list_anchor_indicates_outlier() -> None:
+    html = """
+    <html>
+      <body>
+        <div data-component-type="s-search-result">
+          <h2>
+            <a href="/Apple-iPad-Air-13-M3-256GB/dp/B0ABCDE123/ref=sr_1_1">
+              <span>Apple iPad Air 13" M3 256GB Wi-Fi + Cellular</span>
+            </a>
+          </h2>
+          <span class="a-price"><span class="a-offscreen">185,44 €</span></span>
+          <span class="a-price a-text-price"><span class="a-offscreen">927,20 €</span></span>
+          <span>Risparmi 185,44 €</span>
+        </div>
+      </body>
+    </html>
+    """
+    items = _extract_products_from_html(html, "www.amazon.it")
+    assert len(items) == 1
+    item = items[0]
+    assert item["displayed_price_eur"] == 927.2
+    assert item["price_eur"] == 927.2
+
+
+def test_extract_products_from_html_does_not_fallback_to_ambiguous_row_text_prices() -> None:
+    html = """
+    <html>
+      <body>
+        <div data-component-type="s-search-result">
+          <h2>
+            <a href="/Apple-iPad-Air-13-M3-256GB/dp/B0ABCDE123/ref=sr_1_1">
+              <span>Apple iPad Air 13" M3 256GB Wi-Fi</span>
+            </a>
+          </h2>
+          <span>Risparmi 185,44 €</span>
+          <span>Prezzo precedente 927,20 €</span>
+        </div>
+      </body>
+    </html>
+    """
+    items = _extract_products_from_html(html, "www.amazon.it")
+    assert items == []
+
+
 def test_extract_products_from_html_applies_coupon_eur_discount_to_net_price() -> None:
     html = """
     <html>

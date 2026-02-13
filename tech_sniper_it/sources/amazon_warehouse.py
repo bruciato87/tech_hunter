@@ -113,6 +113,19 @@ DISCOUNT_HINTS: tuple[str, ...] = (
     "al pagamento",
     "au paiement",
 )
+EXTRA_DISCOUNT_HINTS: tuple[str, ...] = (
+    "coupon",
+    "buono",
+    "promozion",
+    "promo",
+    "sconto extra",
+    "extra discount",
+    "al checkout",
+    "at checkout",
+    "al pagamento",
+    "au paiement",
+    "alla cassa",
+)
 INSTALLMENT_HINTS: tuple[str, ...] = (
     "al mese",
     "a mese",
@@ -395,7 +408,12 @@ def _extract_price_from_row(row: Any) -> float | None:
     return None
 
 
-def _extract_prices_by_selectors(row: Any, selectors: tuple[str, ...]) -> list[float]:
+def _extract_prices_by_selectors(
+    row: Any,
+    selectors: tuple[str, ...],
+    *,
+    skip_discount_context: bool = False,
+) -> list[float]:
     all_values: list[float] = []
     values: list[float] = []
     for selector in selectors:
@@ -417,6 +435,8 @@ def _extract_prices_by_selectors(row: Any, selectors: tuple[str, ...]) -> list[f
             all_values.append(parsed)
             if any(hint in context_text for hint in INSTALLMENT_HINTS):
                 continue
+            if skip_discount_context and any(hint in context_text for hint in DISCOUNT_HINTS):
+                continue
             values.append(parsed)
     if values:
         return values
@@ -432,6 +452,18 @@ def _extract_prices_by_selectors(row: Any, selectors: tuple[str, ...]) -> list[f
     return all_values
 
 
+def _extract_all_eur_amounts(text: str) -> list[float]:
+    values: list[float] = []
+    if not text:
+        return values
+    for match in EUR_AMOUNT_PATTERN.finditer(text):
+        amount = parse_eur_price(match.group(0))
+        if amount is None or amount <= 0:
+            continue
+        values.append(float(amount))
+    return values
+
+
 def _extract_discount_amounts_from_text(text: str) -> tuple[list[float], list[float]]:
     if not text:
         return [], []
@@ -441,7 +473,7 @@ def _extract_discount_amounts_from_text(text: str) -> tuple[list[float], list[fl
 
     for match in EUR_AMOUNT_PATTERN.finditer(text):
         snippet = lowered[max(0, match.start() - 72) : min(len(lowered), match.end() + 72)]
-        if not any(hint in snippet for hint in DISCOUNT_HINTS):
+        if not any(hint in snippet for hint in EXTRA_DISCOUNT_HINTS):
             continue
         value = parse_eur_price(match.group(0))
         if value is None or value <= 0:
@@ -450,7 +482,7 @@ def _extract_discount_amounts_from_text(text: str) -> tuple[list[float], list[fl
 
     for match in PERCENT_AMOUNT_PATTERN.finditer(text):
         snippet = lowered[max(0, match.start() - 72) : min(len(lowered), match.end() + 72)]
-        if not any(hint in snippet for hint in DISCOUNT_HINTS):
+        if not any(hint in snippet for hint in EXTRA_DISCOUNT_HINTS):
             continue
         raw = (match.group(1) or "").replace(",", ".").strip()
         try:
@@ -465,10 +497,19 @@ def _extract_discount_amounts_from_text(text: str) -> tuple[list[float], list[fl
 
 
 def _extract_price_details_from_row(row: Any) -> dict[str, float]:
-    current_prices = _extract_prices_by_selectors(row, CURRENT_PRICE_SELECTORS)
+    current_prices = _extract_prices_by_selectors(
+        row,
+        CURRENT_PRICE_SELECTORS,
+        skip_discount_context=True,
+    )
     list_prices = _extract_prices_by_selectors(row, LIST_PRICE_SELECTORS)
-    all_prices = _extract_prices_by_selectors(row, (".a-price .a-offscreen",))
-    row_text = row.get_text(" ", strip=True).lower()
+    all_prices = _extract_prices_by_selectors(
+        row,
+        (".a-price .a-offscreen",),
+        skip_discount_context=True,
+    )
+    row_text_raw = row.get_text(" ", strip=True)
+    row_text = row_text_raw.lower()
     has_installment_hints = any(hint in row_text for hint in INSTALLMENT_HINTS)
     if len(current_prices) >= 2:
         top = max(current_prices)
@@ -485,9 +526,28 @@ def _extract_price_details_from_row(row: Any) -> dict[str, float]:
     if displayed_price is None and all_prices:
         displayed_price = min(all_prices)
     if displayed_price is None:
-        displayed_price = None if has_installment_hints else parse_eur_price(row.get_text(" ", strip=True))
+        fallback_amounts = _extract_all_eur_amounts(row_text_raw)
+        if not has_installment_hints and len(fallback_amounts) == 1:
+            displayed_price = fallback_amounts[0]
     if displayed_price is None:
         return {}
+
+    list_anchor: float | None = None
+    if list_prices:
+        candidate = max(list_prices)
+        if candidate > displayed_price:
+            list_anchor = candidate
+    elif len(all_prices) >= 2:
+        candidate = max(all_prices)
+        if candidate > displayed_price:
+            list_anchor = candidate
+
+    if list_anchor is not None and displayed_price <= (list_anchor * 0.55):
+        correction_pool = [value for value in [*current_prices, *all_prices] if value >= (list_anchor * 0.55)]
+        if correction_pool:
+            displayed_price = min(correction_pool)
+        elif has_installment_hints:
+            return {}
 
     list_price: float | None = None
     if list_prices:
