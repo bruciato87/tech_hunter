@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from tech_sniper_it.ai_balancer import SmartAIBalancer
@@ -76,6 +78,22 @@ class QueryRetryValuator:
                 "price_source": "dom",
                 "match_quality": {"ok": True, "reason": "ok"},
             },
+        )
+
+
+class SlowValuator:
+    def __init__(self, platform: str, delay_seconds: float) -> None:
+        self.platform_name = platform
+        self.delay_seconds = delay_seconds
+
+    async def valuate(self, product: AmazonProduct, normalized_name: str) -> ValuationResult:
+        await asyncio.sleep(self.delay_seconds)
+        return ValuationResult(
+            platform=self.platform_name,
+            normalized_name=normalized_name,
+            offer_eur=300.0,
+            source_url="https://example.test/sell/item/123",
+            raw_payload={"price_text": "300,00 €", "price_source": "dom"},
         )
 
 
@@ -467,3 +485,49 @@ async def test_manager_query_variant_retry_recovers_rebuy_and_trenddevice(platfo
     assert decision.should_notify is True
     assert len(valuator.queries) >= 2
     assert any("Valve" in query for query in valuator.queries)
+
+
+@pytest.mark.asyncio
+async def test_manager_applies_valuator_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("tech_sniper_it.manager._valuator_timeout_seconds", lambda _platform: 0.01)
+    manager = ManagerUnderTest(
+        valuators=[SlowValuator("rebuy", delay_seconds=0.06)],
+        ai_balancer=FakeBalancer(gemini_keys=[], openrouter_keys=[]),
+        min_spread_eur=40.0,
+    )
+    product = AmazonProduct(
+        title="Valve Steam Deck OLED 1TB",
+        price_eur=220.0,
+        category=ProductCategory.GENERAL_TECH,
+    )
+
+    decision = await manager.evaluate_product(product)
+
+    assert decision.best_offer is None
+    assert decision.offers
+    assert "timeout" in (decision.offers[0].error or "").lower()
+
+
+@pytest.mark.asyncio
+async def test_manager_does_not_circuit_break_trenddevice_after_single_email_gate(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("VALUATOR_CIRCUIT_BREAKER_ENABLED", "true")
+    monkeypatch.setenv("VALUATOR_BACKOFF_TRENDDEVICE_ERRORS", "1")
+
+    manager = ManagerUnderTest(
+        valuators=[
+            StaticValuator("trenddevice", None, error="TrendDevice price not found after wizard (email-gate-submitted)."),
+            StaticValuator("rebuy", 150.0),
+        ],
+        ai_balancer=TitleBalancer(gemini_keys=[], openrouter_keys=[]),
+        min_spread_eur=40.0,
+    )
+    items = [
+        AmazonProduct(title="Apple Watch Series 9 GPS + Cellular 45mm", price_eur=300.0, category=ProductCategory.SMARTWATCH),
+        AmazonProduct(title="Apple Watch Ultra 2 GPS + Cellular 49mm", price_eur=500.0, category=ProductCategory.SMARTWATCH),
+    ]
+
+    decisions = await manager.evaluate_many(items, max_parallel_products=1)
+
+    assert len(decisions) == 2
+    assert "trenddevice" in [offer.platform for offer in decisions[0].offers]
+    assert "trenddevice" in [offer.platform for offer in decisions[1].offers]

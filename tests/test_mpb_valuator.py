@@ -20,6 +20,7 @@ from tech_sniper_it.valuators.mpb import (
     _mark_mpb_temporarily_blocked,
     _mpb_block_remaining_seconds,
     _mpb_require_storage_state,
+    _pick_best_mpb_network_candidate,
     _remove_file_if_exists,
 )
 
@@ -161,3 +162,23 @@ def test_extract_mpb_sell_link_candidates_ranks_specific_urls() -> None:
     )
     assert candidates
     assert candidates[0]["url"].startswith("https://www.mpb.com/it-it/sell/product/canon-eos-r7")
+
+
+def test_pick_best_mpb_network_candidate_requires_model_overlap() -> None:
+    candidates = [
+        {
+            "score": 70,
+            "value": 620.0,
+            "snippet": "quote valuation sony a7 iv body 620,00 €",
+            "url": "https://www.mpb.com/it-it/sell/product/sony-a7-iv/999",
+        },
+        {
+            "score": 72,
+            "value": 500.0,
+            "snippet": "quote valuation canon eos r7 body 500,00 €",
+            "url": "https://www.mpb.com/it-it/sell/product/canon-eos-r7/123",
+        },
+    ]
+    value, snippet = _pick_best_mpb_network_candidate(candidates, normalized_name="Canon EOS R7 Body")
+    assert value == 500.0
+    assert "canon eos r7" in snippet.lower()

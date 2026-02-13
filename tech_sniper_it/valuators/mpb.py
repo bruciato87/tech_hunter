@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
@@ -113,6 +114,28 @@ ANCHOR_TOKENS: tuple[str, ...] = (
     "deck",
 )
 CAPACITY_TOKEN_PATTERN = re.compile(r"\b\d{2,4}\s*(?:gb|tb)\b", re.IGNORECASE)
+MPB_NETWORK_PRICE_KEYS: tuple[str, ...] = (
+    "price",
+    "prezzo",
+    "offer",
+    "offerta",
+    "valuation",
+    "quote",
+    "estimate",
+    "stima",
+    "cash",
+    "payout",
+    "amount",
+)
+MPB_NETWORK_BLOCKERS: tuple[str, ...] = (
+    "fino a",
+    "a partire da",
+    "price drop",
+    "newsletter",
+    "promo",
+    "codice",
+    "sconto",
+)
 _MPB_BLOCKED_UNTIL_TS = 0.0
 _MPB_BLOCK_REASON = ""
 _MPB_STORAGE_STATE_ERROR = ""
@@ -237,6 +260,99 @@ def _extract_contextual_price(text: str) -> tuple[float | None, str]:
     if score <= 0:
         return None, ""
     return value, snippet
+
+
+def _extract_keyed_prices_from_text(text: str) -> list[tuple[int, float, str]]:
+    if not text:
+        return []
+    compact = " ".join(text.split())
+    rows: list[tuple[int, float, str]] = []
+    for keyword in MPB_NETWORK_PRICE_KEYS:
+        pattern = re.compile(rf"(?i){re.escape(keyword)}[^0-9€]{{0,42}}(\d{{2,5}}(?:[.,]\d{{1,2}})?)\s*€?")
+        for match in pattern.finditer(compact):
+            value = parse_eur_price(match.group(1))
+            if value is None:
+                raw = match.group(1).replace(".", "").replace(",", ".")
+                try:
+                    value = float(raw)
+                except ValueError:
+                    value = None
+            if value is None or value <= 0 or value > 15000:
+                continue
+            snippet = compact[max(0, match.start() - 80) : min(len(compact), match.end() + 80)].strip()
+            rows.append((56, float(value), snippet))
+    return rows
+
+
+def _extract_prices_from_json_blob(blob: Any, path: str = "") -> list[tuple[int, float, str]]:
+    rows: list[tuple[int, float, str]] = []
+    if isinstance(blob, dict):
+        for key, value in blob.items():
+            key_text = str(key)
+            next_path = f"{path}.{key_text}" if path else key_text
+            rows.extend(_extract_prices_from_json_blob(value, next_path))
+        return rows
+    if isinstance(blob, list):
+        for index, value in enumerate(blob):
+            rows.extend(_extract_prices_from_json_blob(value, f"{path}[{index}]"))
+        return rows
+
+    if not isinstance(blob, (str, int, float)):
+        return rows
+
+    path_norm = _normalize_match_text(path)
+    if not any(keyword in path_norm for keyword in MPB_NETWORK_PRICE_KEYS):
+        return rows
+
+    if isinstance(blob, str):
+        value = parse_eur_price(blob)
+        if value is None:
+            raw = blob.replace(" ", "").replace(".", "").replace(",", ".")
+            try:
+                value = float(raw)
+            except ValueError:
+                value = None
+    else:
+        value = float(blob)
+
+    if value is None or value <= 0 or value > 15000:
+        return rows
+    rows.append((64, float(value), f"{path}={blob}"))
+    return rows
+
+
+def _pick_best_mpb_network_candidate(
+    candidates: list[dict[str, Any]],
+    *,
+    normalized_name: str,
+) -> tuple[float | None, str]:
+    if not candidates:
+        return None, ""
+    tokens = _query_tokens(normalized_name)[:6]
+    ranked: list[tuple[int, float, str]] = []
+    for candidate in candidates:
+        try:
+            value = float(candidate.get("value"))
+        except (TypeError, ValueError):
+            continue
+        if value <= 0 or value > 15000:
+            continue
+        snippet = str(candidate.get("snippet") or "").strip()
+        url = str(candidate.get("url") or "").strip()
+        joined = _normalize_match_text(f"{snippet} {url}")
+        token_hits = sum(1 for token in tokens if token and token in joined)
+        if tokens and token_hits <= 0:
+            continue
+        blocker_hit = any(marker in joined for marker in MPB_NETWORK_BLOCKERS)
+        if blocker_hit:
+            continue
+        score = int(candidate.get("score", 0)) + (token_hits * 10)
+        ranked.append((score, value, snippet or url))
+
+    if not ranked:
+        return None, ""
+    _score, value, snippet = max(ranked, key=lambda row: (row[0], row[1]))
+    return round(value, 2), snippet[:260]
 
 
 def _contains_price_hint(text: str) -> bool:
@@ -524,6 +640,8 @@ class MPBValuator(BaseValuator):
             "storage_state": bool(storage_state_path),
         }
         blocker_hits: list[str] = []
+        had_unblocked_attempt = False
+        network_price_candidates: list[dict[str, Any]] = []
         search_selectors = self._selector_candidates(
             site=self.platform_name,
             slot="search_input",
@@ -570,6 +688,81 @@ class MPBValuator(BaseValuator):
                         await _apply_stealth_context(context)
                         page = await context.new_page()
                         page.set_default_timeout(self.nav_timeout_ms)
+                        response_tasks: set[asyncio.Task[Any]] = set()
+
+                        async def _capture_response_body(response) -> None:  # noqa: ANN001
+                            try:
+                                url = str(getattr(response, "url", "") or "")
+                                if not url:
+                                    return
+                                url_norm = url.lower()
+                                if "mpb.com" not in url_norm:
+                                    return
+                                request = getattr(response, "request", None)
+                                resource_type = ""
+                                if request is not None:
+                                    resource_type = str(getattr(request, "resource_type", "") or "").lower()
+                                if resource_type not in {"xhr", "fetch"} and not any(
+                                    token in url_norm for token in ("offer", "valuation", "quote", "price", "sell", "api", "graphql")
+                                ):
+                                    return
+                                body = await response.text()
+                                if not body:
+                                    return
+
+                                local_rows: list[tuple[int, float, str, str]] = []
+                                contextual_value, contextual_snippet = _extract_contextual_price(body)
+                                if contextual_value is not None:
+                                    local_rows.append((62, contextual_value, contextual_snippet, "context"))
+                                for score, value, snippet in _extract_keyed_prices_from_text(body):
+                                    local_rows.append((score, value, snippet, "keyword"))
+
+                                parsed_json: Any | None = None
+                                body_stripped = body.strip()
+                                if body_stripped.startswith("{") or body_stripped.startswith("["):
+                                    try:
+                                        parsed_json = json.loads(body_stripped)
+                                    except Exception:
+                                        parsed_json = None
+                                if parsed_json is not None:
+                                    for score, value, snippet in _extract_prices_from_json_blob(parsed_json):
+                                        local_rows.append((score, value, snippet, "json"))
+
+                                if not local_rows:
+                                    return
+                                for score, value, snippet, source in local_rows:
+                                    snippet_norm = _normalize_match_text(snippet)
+                                    if any(marker in snippet_norm for marker in MPB_NETWORK_BLOCKERS):
+                                        continue
+                                    network_price_candidates.append(
+                                        {
+                                            "url": url,
+                                            "status": getattr(response, "status", None),
+                                            "score": int(score),
+                                            "value": float(value),
+                                            "snippet": snippet[:260],
+                                            "source": source,
+                                            "query": query,
+                                            "query_index": query_index,
+                                            "attempt": attempt,
+                                        }
+                                    )
+                                if len(network_price_candidates) > 50:
+                                    del network_price_candidates[:-50]
+                            except Exception:
+                                return
+
+                        def _on_response(response) -> None:  # noqa: ANN001
+                            task = asyncio.create_task(_capture_response_body(response))
+                            response_tasks.add(task)
+                            task.add_done_callback(lambda done: response_tasks.discard(done))
+
+                        async def _drain_response_tasks() -> None:
+                            if not response_tasks:
+                                return
+                            await asyncio.gather(*tuple(response_tasks), return_exceptions=True)
+
+                        page.on("response", _on_response)
                         try:
                             payload["query"] = query
                             await page.goto(self.base_url, wait_until="domcontentloaded")
@@ -601,8 +794,29 @@ class MPBValuator(BaseValuator):
                                 if fallback["offer"] is not None:
                                     _clear_mpb_temporary_block()
                                     return fallback["offer"], fallback["url"], payload
+                                network_price, network_snippet = _pick_best_mpb_network_candidate(
+                                    network_price_candidates,
+                                    normalized_name=normalized_name,
+                                )
+                                network_match = _assess_mpb_match(
+                                    normalized_name=normalized_name,
+                                    candidate_text=network_snippet,
+                                    source_url=str(fallback.get("url") or page.url),
+                                )
+                                if network_price is not None and network_match.get("ok"):
+                                    _clear_mpb_temporary_block()
+                                    payload["query"] = query
+                                    payload["query_index"] = query_index
+                                    payload["price_text"] = network_snippet
+                                    payload["price_source"] = "network-fallback"
+                                    payload["match_quality"] = network_match
+                                    payload["network_price_candidates"] = network_price_candidates[-12:]
+                                    return network_price, str(fallback.get("url") or page.url), payload
+                                if bool(fallback.get("unblocked")):
+                                    had_unblocked_attempt = True
                                 blocker_hits.extend(fallback["blockers"])
                                 continue
+                            had_unblocked_attempt = True
 
                             search_selector = await self._wait_for_search_input(
                                 page,
@@ -657,6 +871,26 @@ class MPBValuator(BaseValuator):
                                 if fallback["offer"] is not None:
                                     _clear_mpb_temporary_block()
                                     return fallback["offer"], fallback["url"], payload
+                                network_price, network_snippet = _pick_best_mpb_network_candidate(
+                                    network_price_candidates,
+                                    normalized_name=normalized_name,
+                                )
+                                network_match = _assess_mpb_match(
+                                    normalized_name=normalized_name,
+                                    candidate_text=network_snippet,
+                                    source_url=str(fallback.get("url") or page.url),
+                                )
+                                if network_price is not None and network_match.get("ok"):
+                                    _clear_mpb_temporary_block()
+                                    payload["query"] = query
+                                    payload["query_index"] = query_index
+                                    payload["price_text"] = network_snippet
+                                    payload["price_source"] = "network-fallback"
+                                    payload["match_quality"] = network_match
+                                    payload["network_price_candidates"] = network_price_candidates[-12:]
+                                    return network_price, str(fallback.get("url") or page.url), payload
+                                if bool(fallback.get("unblocked")):
+                                    had_unblocked_attempt = True
                                 blocker_hits.extend(fallback["blockers"])
                                 continue
 
@@ -712,6 +946,20 @@ class MPBValuator(BaseValuator):
                             ui_probe = None
                             if price is None or not match.get("ok"):
                                 if price is None:
+                                    network_price, network_snippet = _pick_best_mpb_network_candidate(
+                                        network_price_candidates,
+                                        normalized_name=normalized_name,
+                                    )
+                                    if network_price is not None and match.get("ok"):
+                                        _clear_mpb_temporary_block()
+                                        payload["query"] = query
+                                        payload["query_index"] = query_index
+                                        payload["price_text"] = network_snippet
+                                        payload["condition_selected"] = condition_selected
+                                        payload["price_source"] = "network"
+                                        payload["network_price_candidates"] = network_price_candidates[-12:]
+                                        return network_price, page.url, payload
+                                if price is None:
                                     ui_probe = await self._attach_ui_probe(
                                         payload=payload,
                                         page=page,
@@ -732,6 +980,26 @@ class MPBValuator(BaseValuator):
                                 if fallback["offer"] is not None:
                                     _clear_mpb_temporary_block()
                                     return fallback["offer"], fallback["url"], payload
+                                network_price, network_snippet = _pick_best_mpb_network_candidate(
+                                    network_price_candidates,
+                                    normalized_name=normalized_name,
+                                )
+                                network_match = _assess_mpb_match(
+                                    normalized_name=normalized_name,
+                                    candidate_text=network_snippet,
+                                    source_url=str(fallback.get("url") or page.url),
+                                )
+                                if network_price is not None and network_match.get("ok"):
+                                    _clear_mpb_temporary_block()
+                                    payload["query"] = query
+                                    payload["query_index"] = query_index
+                                    payload["price_text"] = network_snippet
+                                    payload["price_source"] = "network-fallback"
+                                    payload["match_quality"] = network_match
+                                    payload["network_price_candidates"] = network_price_candidates[-12:]
+                                    return network_price, str(fallback.get("url") or page.url), payload
+                                if bool(fallback.get("unblocked")):
+                                    had_unblocked_attempt = True
                                 blocker_hits.extend(fallback["blockers"])
 
                             payload["attempts"].append(
@@ -763,12 +1031,21 @@ class MPBValuator(BaseValuator):
                                 payload["price_source"] = "sell_flow"
                                 return price, page.url, payload
                         finally:
+                            await _drain_response_tasks()
+                            if network_price_candidates:
+                                payload["network_price_candidates"] = network_price_candidates[-12:]
+                            try:
+                                page.off("response", _on_response)
+                            except Exception:
+                                pass
                             await context.close()
             finally:
                 await browser.close()
                 _remove_file_if_exists(storage_state_path)
 
-        if blocker_hits:
+        if network_price_candidates:
+            payload["network_price_candidates"] = network_price_candidates[-12:]
+        if blocker_hits and not had_unblocked_attempt:
             _mark_mpb_temporarily_blocked("turnstile/cloudflare")
             payload["blocker_hits"] = blocker_hits[:40]
             raise ValuatorRuntimeError(
@@ -776,6 +1053,8 @@ class MPBValuator(BaseValuator):
                 payload=payload,
                 source_url=self.base_url,
             )
+        if blocker_hits:
+            payload["blocker_hits"] = blocker_hits[:40]
         raise ValuatorRuntimeError(
             "MPB price not found after retries.",
             payload=payload,
@@ -812,7 +1091,7 @@ class MPBValuator(BaseValuator):
             await page.wait_for_timeout(900)
             await self._accept_cookie_if_present(page)
         except PlaywrightError:
-            return {"offer": None, "url": None, "blockers": []}
+            return {"offer": None, "url": None, "blockers": [], "unblocked": False}
 
         blockers = await self._detect_page_blockers(page)
         if blockers:
@@ -827,7 +1106,7 @@ class MPBValuator(BaseValuator):
                     "blockers": blockers,
                 }
             )
-            return {"offer": None, "url": None, "blockers": blockers}
+            return {"offer": None, "url": None, "blockers": blockers, "unblocked": False}
 
         opened_sell = await self._click_first(page, direct_sell_selectors, timeout_ms=2500)
         if not opened_sell:
@@ -894,7 +1173,7 @@ class MPBValuator(BaseValuator):
             payload["price_source"] = "direct_search"
             payload["query"] = query
             payload["query_index"] = query_index
-            return {"offer": price, "url": page.url, "blockers": []}
+            return {"offer": price, "url": page.url, "blockers": [], "unblocked": True}
         return await self._deep_link_fallback(
             page=page,
             attempt=attempt,
@@ -920,7 +1199,7 @@ class MPBValuator(BaseValuator):
         try:
             html = await page.content()
         except PlaywrightError:
-            return {"offer": None, "url": None, "blockers": []}
+            return {"offer": None, "url": None, "blockers": [], "unblocked": True}
 
         candidates = _extract_mpb_sell_link_candidates(
             html=html,
@@ -939,7 +1218,7 @@ class MPBValuator(BaseValuator):
             for item in candidates[:6]
         ]
         if not candidates:
-            return {"offer": None, "url": None, "blockers": []}
+            return {"offer": None, "url": None, "blockers": [], "unblocked": True}
 
         link_limit = max(1, int(_env_or_default("MPB_DEEP_LINK_LIMIT", "4")))
         blockers_acc: list[str] = []
@@ -1017,9 +1296,9 @@ class MPBValuator(BaseValuator):
             payload["price_text"] = price_text
             payload["condition_selected"] = condition_selected
             payload["price_source"] = "direct_sell_link"
-            return {"offer": price, "url": page.url, "blockers": blockers_acc}
+            return {"offer": price, "url": page.url, "blockers": blockers_acc, "unblocked": True}
 
-        return {"offer": None, "url": None, "blockers": blockers_acc}
+        return {"offer": None, "url": None, "blockers": blockers_acc, "unblocked": True}
 
     async def _collect_match_text(self, page: Page) -> str:
         chunks: list[str] = []
@@ -1098,6 +1377,37 @@ class MPBValuator(BaseValuator):
             price, snippet = _extract_contextual_price(text)
             if price is not None:
                 return price, snippet
+        script_rows: list[tuple[int, float, str]] = []
+        for script in soup.select("script"):
+            script_text = ""
+            if script.string:
+                script_text = script.string
+            elif script.get_text(strip=True):
+                script_text = script.get_text(" ", strip=True)
+            if not script_text or len(script_text) < 30:
+                continue
+            trimmed = script_text[:100000]
+            for score, value, snippet in _extract_keyed_prices_from_text(trimmed):
+                snippet_norm = _normalize_match_text(snippet)
+                if not any(hint in snippet_norm for hint in ("offerta", "valuation", "estimate", "we pay", "ti paghiamo")):
+                    continue
+                script_rows.append((score, value, snippet))
+            script_type = (script.get("type") or "").lower()
+            raw = trimmed.strip()
+            if "json" in script_type or raw.startswith("{") or raw.startswith("["):
+                try:
+                    parsed = json.loads(raw)
+                except Exception:
+                    parsed = None
+                if parsed is not None:
+                    for score, value, snippet in _extract_prices_from_json_blob(parsed):
+                        snippet_norm = _normalize_match_text(snippet)
+                        if not any(hint in snippet_norm for hint in ("offerta", "valuation", "estimate", "we pay", "ti paghiamo")):
+                            continue
+                        script_rows.append((score, value, snippet))
+        if script_rows:
+            _score, value, snippet = max(script_rows, key=lambda row: (row[0], row[1]))
+            return value, snippet[:260]
         text = soup.get_text(" ", strip=True)
         price, snippet = _extract_contextual_price(text)
         if price is not None:

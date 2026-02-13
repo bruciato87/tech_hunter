@@ -297,6 +297,33 @@ def test_pick_best_network_candidate_prefers_high_score_then_value() -> None:
     assert "280" in snippet
 
 
+def test_pick_best_network_candidate_filters_unrelated_model_price() -> None:
+    value, snippet = _pick_best_network_candidate(
+        [
+            {
+                "score": 74,
+                "value": 525.0,
+                "snippet": "quote apple watch ultra 2 525,00 €",
+                "source": "json",
+                "url": "https://www.trendevice.com/vendi/api/quotes",
+                "wizard_progress": 4,
+            },
+            {
+                "score": 74,
+                "value": 135.0,
+                "snippet": "quote apple watch series 9 45mm 135,00 €",
+                "source": "json",
+                "url": "https://www.trendevice.com/vendi/api/quotes",
+                "wizard_progress": 4,
+            },
+        ],
+        normalized_name="Apple Watch Series 9 GPS + Cellular 45mm",
+        wizard_steps=[{"step_type": STEP_MODEL, "selected": "Series 9"}],
+    )
+    assert value == 135.0
+    assert "series 9" in snippet.lower()
+
+
 def test_is_credible_network_candidate_rejects_static_promotional_chunk() -> None:
     candidate = {
         "url": "https://www.trendevice.com/_next/static/chunks/abc.js",

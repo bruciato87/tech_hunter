@@ -10,6 +10,7 @@ from tech_sniper_it.valuators.rebuy import (
     _assess_rebuy_match,
     _extract_embedded_rebuy_urls,
     _extract_contextual_price,
+    _pick_best_rebuy_network_candidate,
     _extract_rebuy_product_link_candidates,
     _load_storage_state_b64,
     _remove_file_if_exists,
@@ -170,3 +171,28 @@ def test_extract_embedded_rebuy_urls_supports_escaped_script_payload() -> None:
     urls = _extract_embedded_rebuy_urls(html, base_url="https://www.rebuy.it/vendere/cerca?query=apple+watch")
     assert len(urls) == 2
     assert urls[0].startswith("https://www.rebuy.it/vendere/")
+
+
+def test_pick_best_rebuy_network_candidate_requires_model_coherence() -> None:
+    candidates = [
+        {
+            "price": 520.0,
+            "snippet": "Pagamento Diretto 520,00 € Apple Watch Ultra 2",
+            "url": "https://www.rebuy.it/vendere/p/apple-watch-ultra-2/123",
+            "status": 200,
+            "source": "network-cash",
+        },
+        {
+            "price": 800.0,
+            "snippet": "Pagamento Diretto 800,00 € DJI Mini 4 Pro",
+            "url": "https://www.rebuy.it/vendere/p/dji-mini-4-pro/999",
+            "status": 200,
+            "source": "network-cash",
+        },
+    ]
+    value, snippet = _pick_best_rebuy_network_candidate(
+        candidates,
+        normalized_name="Apple Watch Ultra 2 GPS + Cellular 49mm",
+    )
+    assert value == 520.0
+    assert "apple watch" in snippet.lower()

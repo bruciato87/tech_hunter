@@ -230,9 +230,14 @@ def _extract_rebuy_cash_payout(text: str) -> tuple[float | None, str]:
     return None, ""
 
 
-def _pick_best_rebuy_network_candidate(candidates: list[dict[str, Any]]) -> tuple[float | None, str]:
+def _pick_best_rebuy_network_candidate(
+    candidates: list[dict[str, Any]],
+    *,
+    normalized_name: str | None = None,
+) -> tuple[float | None, str]:
     if not candidates:
         return None, ""
+    tokens = _query_tokens(normalized_name or "")[:6] if normalized_name else []
     ranked: list[tuple[int, float, str]] = []
     for item in candidates:
         try:
@@ -244,6 +249,16 @@ def _pick_best_rebuy_network_candidate(candidates: list[dict[str, Any]]) -> tupl
         snippet = str(item.get("snippet") or "").strip()
         snippet_norm = snippet.lower()
         url_norm = str(item.get("url") or "").lower()
+        joined_norm = _normalize_match_text(f"{snippet} {unquote(urlparse(url_norm).path or '')} {unquote(urlparse(url_norm).query or '')}")
+        if tokens:
+            token_hits = sum(1 for token in tokens if token and token in joined_norm)
+            if token_hits <= 0:
+                continue
+        else:
+            token_hits = 0
+        if any(marker in snippet_norm for marker in ("newsletter", "sconto", "codice", "coupon", "iscriviti")):
+            continue
+        source = str(item.get("source") or "").strip().lower()
         score = 0
         if "pagamento diretto" in snippet_norm:
             score += 40
@@ -255,6 +270,9 @@ def _pick_best_rebuy_network_candidate(candidates: list[dict[str, Any]]) -> tupl
             score += 10
         if int(item.get("status", 0) or 0) == 200:
             score += 3
+        if source.startswith("network-context") and token_hits < 2:
+            continue
+        score += token_hits * 10
         ranked.append((score, value, snippet))
     if not ranked:
         return None, ""
@@ -879,7 +897,10 @@ class RebuyValuator(BaseValuator):
                 price_text = ""
                 wizard_max_steps = _rebuy_wizard_max_steps()
                 for step_attempt in range(1, wizard_max_steps + 1):
-                    network_price, network_snippet = _pick_best_rebuy_network_candidate(network_price_candidates)
+                    network_price, network_snippet = _pick_best_rebuy_network_candidate(
+                        network_price_candidates,
+                        normalized_name=normalized_name,
+                    )
                     if network_price is not None:
                         payload["price_source"] = "network"
                         payload["price_text"] = network_snippet
@@ -969,7 +990,10 @@ class RebuyValuator(BaseValuator):
 
                 payload["price_text"] = price_text
                 if price is None:
-                    network_price, network_snippet = _pick_best_rebuy_network_candidate(network_price_candidates)
+                    network_price, network_snippet = _pick_best_rebuy_network_candidate(
+                        network_price_candidates,
+                        normalized_name=normalized_name,
+                    )
                     if network_price is not None:
                         payload["price_source"] = "network"
                         payload["price_text"] = network_snippet
@@ -1115,7 +1139,10 @@ class RebuyValuator(BaseValuator):
         price_text = ""
         wizard_max_steps = _rebuy_wizard_max_steps()
         for step_attempt in range(1, wizard_max_steps + 1):
-            network_price, network_snippet = _pick_best_rebuy_network_candidate(network_price_candidates or [])
+            network_price, network_snippet = _pick_best_rebuy_network_candidate(
+                network_price_candidates or [],
+                normalized_name=normalized_name,
+            )
             if network_price is not None:
                 payload["price_source"] = "deep_link_rescue_network"
                 payload["price_text"] = network_snippet
@@ -1356,6 +1383,29 @@ class RebuyValuator(BaseValuator):
             value, snippet = _extract_contextual_price(text)
             if value is not None:
                 return value, snippet
+        script_rows: list[tuple[int, float, str]] = []
+        for script in soup.select("script"):
+            script_text = ""
+            if script.string:
+                script_text = script.string
+            elif script.get_text(strip=True):
+                script_text = script.get_text(" ", strip=True)
+            if not script_text or len(script_text) < 30:
+                continue
+            trimmed = script_text[:100000]
+            value, snippet = _extract_rebuy_cash_payout(trimmed)
+            if value is not None:
+                script_rows.append((80, value, snippet))
+            value, snippet = _extract_contextual_price(trimmed)
+            if value is not None:
+                snippet_norm = _normalize_match_text(snippet)
+                if any(term in snippet_norm for term in ("pagamento diretto", "offerta preliminare", "ti paghiamo", "ricevi")):
+                    script_rows.append((66, value, snippet))
+        if script_rows:
+            _score, value, snippet = max(script_rows, key=lambda row: (row[0], row[1]))
+            if payload is not None and _score >= 80:
+                payload["price_source"] = "dom-script-cash"
+            return value, snippet[:260]
         text = soup.get_text(" ", strip=True)
         value, snippet = _extract_contextual_price(text)
         if value is not None:

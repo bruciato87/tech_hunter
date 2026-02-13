@@ -1316,6 +1316,47 @@ async def _cleanup_cart_asins(page, *, host: str, asins: list[str]) -> dict[str,
     }
 
 
+async def _bulk_delete_visible_cart_items(page, *, max_clicks: int = 5) -> int:  # noqa: ANN001
+    clicked = 0
+    selectors = (
+        "input[name^='submit.delete']",
+        "input[name='submit.delete']",
+        "[data-action='delete'] input",
+        "[data-action='delete'] a",
+        "a[data-feature-id='item-delete-button']",
+        "button[aria-label*='Delete' i]",
+        "button[aria-label*='Remove' i]",
+        "button[aria-label*='Elimina' i]",
+        "button:has-text('Elimina')",
+        "button:has-text('Rimuovi')",
+    )
+    for selector in selectors:
+        if clicked >= max_clicks:
+            break
+        try:
+            locator = page.locator(selector)
+            count = min(await locator.count(), max_clicks - clicked)
+        except PlaywrightError:
+            continue
+        for _ in range(count):
+            if clicked >= max_clicks:
+                break
+            try:
+                node = locator.first
+                if not await node.is_visible(timeout=700):
+                    break
+                try:
+                    await node.scroll_into_view_if_needed(timeout=700)
+                except PlaywrightError:
+                    pass
+                await node.click(timeout=1600, force=True)
+                clicked += 1
+                await page.wait_for_timeout(450)
+            except PlaywrightError:
+                break
+    return clicked
+
+
 async def _force_empty_cart(page, *, host: str, max_rounds: int = 5) -> dict[str, Any]:  # noqa: ANN001
     removed_total: list[str] = []
     failed_total: list[str] = []
@@ -1366,6 +1407,14 @@ async def _force_empty_cart(page, *, host: str, max_rounds: int = 5) -> dict[str
                     progress = True
             except Exception:
                 progress = False
+            if not progress:
+                try:
+                    bulk_clicks = await _bulk_delete_visible_cart_items(page, max_clicks=4)
+                    if bulk_clicks > 0:
+                        await page.wait_for_timeout(1000)
+                        progress = True
+                except Exception:
+                    progress = False
             if not progress:
                 break
 

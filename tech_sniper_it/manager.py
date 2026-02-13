@@ -120,8 +120,10 @@ def _valuator_platform_name(valuator: Any) -> str:
 def _valuator_backoff_threshold(platform: str) -> int:
     default_threshold = max(1, int(_env_or_default("VALUATOR_BACKOFF_DEFAULT_ERRORS", "2")))
     defaults = {
-        "mpb": 1,
-        "trenddevice": 1,
+        # Do not disable platforms too aggressively: a single transient reseller failure
+        # should not silence quotes for the rest of the scan.
+        "mpb": 2,
+        "trenddevice": 3,
     }
     platform_name = platform.strip().lower()
     platform_default = defaults.get(platform_name, default_threshold)
@@ -148,8 +150,8 @@ def _valuator_query_variant_limit(platform: str) -> int:
     platform_name = (platform or "").strip().lower()
     defaults = {
         "rebuy": 3,
-        "trenddevice": 3,
-        "mpb": 3,
+        "trenddevice": 2,
+        "mpb": 2,
     }
     default_limit = defaults.get(platform_name, 1)
     env_name = f"VALUATOR_QUERY_VARIANTS_{platform_name.upper()}_MAX"
@@ -158,6 +160,23 @@ def _valuator_query_variant_limit(platform: str) -> int:
     except ValueError:
         value = default_limit
     return max(1, min(value, 6))
+
+
+def _valuator_timeout_seconds(platform: str) -> float:
+    platform_name = (platform or "").strip().lower()
+    defaults = {
+        "rebuy": 70.0,
+        "trenddevice": 70.0,
+        "mpb": 65.0,
+    }
+    default_timeout = defaults.get(platform_name, 65.0)
+    env_name = f"VALUATOR_TIMEOUT_{platform_name.upper()}_SECONDS"
+    raw = _env_or_default(env_name, _env_or_default("VALUATOR_TIMEOUT_DEFAULT_SECONDS", str(default_timeout)))
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        value = default_timeout
+    return max(12.0, min(value, 180.0))
 
 
 def _trim_query_variant(value: str) -> str:
@@ -309,13 +328,11 @@ def _should_backoff_result(result: ValuationResult) -> bool:
                 "anti-bot challenge",
                 "turnstile",
                 "cloudflare",
-                "search input not found",
-                "price not found after retries",
                 "storage_state missing/invalid",
             )
         )
     if platform == "trenddevice":
-        return "email-gate" in error_text
+        return "storage_state missing/invalid" in error_text
     return False
 
 
@@ -724,14 +741,44 @@ class ArbitrageManager:
         async def _run_once(valuator: Any, query_name: str) -> ValuationResult:
             platform = _valuator_platform_name(valuator)
             limit = _valuator_parallel_limit(platform)
+            timeout_seconds = _valuator_timeout_seconds(platform)
+
+            async def _execute() -> ValuationResult:
+                return await asyncio.wait_for(
+                    valuator.valuate(product, query_name),
+                    timeout=timeout_seconds,
+                )
+
+            async def _timeout_result() -> ValuationResult:
+                return ValuationResult(
+                    platform=platform,
+                    normalized_name=normalized_name,
+                    offer_eur=None,
+                    error=(
+                        f"{platform} valuation timeout after {timeout_seconds:.0f}s "
+                        f"(query='{query_name}')"
+                    ),
+                    raw_payload={
+                        "timeout_s": timeout_seconds,
+                        "query": query_name,
+                        "platform": platform,
+                    },
+                )
+
             if limit <= 1:
                 semaphore = self._platform_semaphores.get(platform)
                 if semaphore is None:
                     semaphore = asyncio.Semaphore(limit)
                     self._platform_semaphores[platform] = semaphore
                 async with semaphore:
-                    return await valuator.valuate(product, query_name)
-            return await valuator.valuate(product, query_name)
+                    try:
+                        return await _execute()
+                    except asyncio.TimeoutError:
+                        return await _timeout_result()
+            try:
+                return await _execute()
+            except asyncio.TimeoutError:
+                return await _timeout_result()
 
         async def _run_valuator(valuator: Any) -> ValuationResult:
             platform = _valuator_platform_name(valuator)

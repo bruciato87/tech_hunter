@@ -645,14 +645,55 @@ def _extract_prices_from_json_blob(blob: Any, path: str = "") -> list[tuple[int,
     return candidates
 
 
-def _pick_best_network_candidate(candidates: list[dict[str, Any]]) -> tuple[float | None, str]:
+def _pick_best_network_candidate(
+    candidates: list[dict[str, Any]],
+    *,
+    normalized_name: str | None = None,
+    wizard_steps: list[dict[str, Any]] | None = None,
+) -> tuple[float | None, str]:
     credible = [item for item in candidates if _is_credible_network_candidate(item)]
     if not credible:
         return None, ""
+    model_tokens = _query_tokens(normalized_name or "")[:7] if normalized_name else []
+    selected_tokens: list[str] = []
+    for step in (wizard_steps or []):
+        if not isinstance(step, dict):
+            continue
+        selected = _normalize_wizard_text(str(step.get("selected", "")))
+        if not selected:
+            continue
+        for token in selected.split():
+            if len(token) < 2:
+                continue
+            if token not in selected_tokens:
+                selected_tokens.append(token)
+            if len(selected_tokens) >= 8:
+                break
+    ranked_rows: list[dict[str, Any]] = []
+    for item in credible:
+        snippet = str(item.get("snippet", ""))
+        url = str(item.get("url", ""))
+        joined = _normalize_wizard_text(f"{snippet} {urlparse(url).path} {urlparse(url).query}")
+        token_hits = sum(1 for token in model_tokens if token and token in joined)
+        selected_hits = sum(1 for token in selected_tokens if token and token in joined)
+        source = str(item.get("source", "")).strip().lower()
+        if model_tokens and token_hits <= 0:
+            continue
+        if source == "json" and model_tokens and token_hits < 2:
+            continue
+        row = dict(item)
+        row["token_hits"] = token_hits
+        row["selected_hits"] = selected_hits
+        ranked_rows.append(row)
+
+    if not ranked_rows:
+        return None, ""
     best = max(
-        credible,
+        ranked_rows,
         key=lambda item: (
             int(item.get("wizard_progress", 0) or 0),
+            int(item.get("token_hits", 0) or 0),
+            int(item.get("selected_hits", 0) or 0),
             int(item.get("score", 0)),
             float(item.get("value", 0.0)),
         ),
@@ -1023,6 +1064,37 @@ class TrendDeviceValuator(BaseValuator):
             value, snippet = _extract_contextual_price(text)
             if value is not None:
                 return value, snippet
+        script_rows: list[tuple[int, float, str]] = []
+        for script in soup.select("script"):
+            script_text = ""
+            if script.string:
+                script_text = script.string
+            elif script.get_text(strip=True):
+                script_text = script.get_text(" ", strip=True)
+            if not script_text or len(script_text) < 30:
+                continue
+            trimmed = script_text[:120000]
+            for score, value, snippet in _extract_keyed_prices_from_text(trimmed):
+                snippet_norm = _normalize_wizard_text(snippet)
+                if not any(term in snippet_norm for term in ("valutazione", "quote", "offerta", "ti offriamo", "ricevi")):
+                    continue
+                script_rows.append((score, value, snippet))
+            script_type = (script.get("type") or "").lower()
+            raw = trimmed.strip()
+            if "json" in script_type or raw.startswith("{") or raw.startswith("["):
+                try:
+                    parsed = json.loads(raw)
+                except Exception:
+                    parsed = None
+                if parsed is not None:
+                    for score, value, snippet in _extract_prices_from_json_blob(parsed):
+                        snippet_norm = _normalize_wizard_text(snippet)
+                        if not any(term in snippet_norm for term in ("valutazione", "quote", "offerta", "ti offriamo", "ricevi")):
+                            continue
+                        script_rows.append((score, value, snippet))
+        if script_rows:
+            _score, value, snippet = max(script_rows, key=lambda row: (row[0], row[1]))
+            return value, snippet[:260]
         body_text = soup.get_text(" ", strip=True)
         return None, body_text[:220]
 
@@ -1381,7 +1453,11 @@ class TrendDeviceValuator(BaseValuator):
                                             payload=payload,
                                         )
                                         return price, page.url, payload
-                                    network_price, network_snippet = _pick_best_network_candidate(network_price_candidates)
+                                    network_price, network_snippet = _pick_best_network_candidate(
+                                        network_price_candidates,
+                                        normalized_name=normalized_name,
+                                        wizard_steps=payload.get("wizard", []),
+                                    )
                                     if network_price is not None:
                                         payload["price_source"] = "network-post-email"
                                         payload["price_text"] = network_snippet
@@ -1452,7 +1528,11 @@ class TrendDeviceValuator(BaseValuator):
                                     payload=payload,
                                 )
                                 return price, page.url, payload
-                            network_price, network_snippet = _pick_best_network_candidate(network_price_candidates)
+                            network_price, network_snippet = _pick_best_network_candidate(
+                                network_price_candidates,
+                                normalized_name=normalized_name,
+                                wizard_steps=payload.get("wizard", []),
+                            )
                             if network_price is not None:
                                 payload["price_source"] = "network-post-email-stagnant"
                                 payload["price_text"] = network_snippet
@@ -1505,7 +1585,11 @@ class TrendDeviceValuator(BaseValuator):
                                         payload=payload,
                                     )
                                     return price, page.url, payload
-                                network_price, network_snippet = _pick_best_network_candidate(network_price_candidates)
+                                network_price, network_snippet = _pick_best_network_candidate(
+                                    network_price_candidates,
+                                    normalized_name=normalized_name,
+                                    wizard_steps=payload.get("wizard", []),
+                                )
                                 if network_price is not None:
                                     payload["price_source"] = "network-pre-reset"
                                     payload["price_text"] = network_snippet
@@ -1558,7 +1642,11 @@ class TrendDeviceValuator(BaseValuator):
                 price, price_text = await self._extract_price(page, payload=payload)
                 if price is None:
                     await _drain_response_tasks()
-                    network_price, network_snippet = _pick_best_network_candidate(network_price_candidates)
+                    network_price, network_snippet = _pick_best_network_candidate(
+                        network_price_candidates,
+                        normalized_name=normalized_name,
+                        wizard_steps=payload.get("wizard", []),
+                    )
                     if network_price is not None:
                         payload["price_source"] = "network"
                         payload["price_text"] = network_snippet
