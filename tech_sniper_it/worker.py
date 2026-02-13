@@ -642,6 +642,17 @@ def _required_platforms_for_category(category: ProductCategory) -> tuple[str, ..
     return CATEGORY_REQUIRED_PLATFORMS.get(category, ("rebuy",))
 
 
+def _required_platforms_for_product(product: AmazonProduct, normalized_name: str | None = None) -> tuple[str, ...]:
+    category = getattr(product, "category", ProductCategory.GENERAL_TECH)
+    if category != ProductCategory.SMARTWATCH:
+        return _required_platforms_for_category(category)
+    merged = f"{getattr(product, 'title', '')} {normalized_name or ''}".lower()
+    is_apple_watch = "apple watch" in merged or ("apple" in merged and "watch" in merged)
+    if is_apple_watch:
+        return _required_platforms_for_category(category)
+    return ("rebuy",)
+
+
 def _offer_has_real_reseller_quote(offer) -> bool:  # noqa: ANN001
     if offer is None:
         return False
@@ -666,9 +677,15 @@ def _offer_has_real_reseller_quote(offer) -> bool:  # noqa: ANN001
 
 def _missing_required_reseller_quotes(decision, *, optional_platforms: set[str] | None = None) -> list[str]:  # noqa: ANN001
     optional = optional_platforms or set()
+    product = getattr(decision, "product", None)
+    normalized_name = str(getattr(decision, "normalized_name", "") or "")
+    if isinstance(product, AmazonProduct):
+        required_platforms = _required_platforms_for_product(product, normalized_name)
+    else:
+        required_platforms = _required_platforms_for_category(getattr(product, "category", ProductCategory.GENERAL_TECH))
     required = [
         platform
-        for platform in _required_platforms_for_category(getattr(decision.product, "category", ProductCategory.GENERAL_TECH))
+        for platform in required_platforms
         if platform not in optional
     ]
     valid_platforms: set[str] = set()
@@ -705,8 +722,13 @@ def _detect_outage_optional_platforms(decisions: list) -> set[str]:  # noqa: ANN
 
     required: set[str] = set()
     for decision in decisions:
-        category = getattr(getattr(decision, "product", None), "category", ProductCategory.GENERAL_TECH)
-        required.update(_required_platforms_for_category(category))
+        product = getattr(decision, "product", None)
+        normalized_name = str(getattr(decision, "normalized_name", "") or "")
+        if isinstance(product, AmazonProduct):
+            required.update(_required_platforms_for_product(product, normalized_name))
+        else:
+            category = getattr(product, "category", ProductCategory.GENERAL_TECH)
+            required.update(_required_platforms_for_category(category))
 
     if not required:
         return set()
@@ -2615,7 +2637,15 @@ async def _run_scan_command(payload: dict[str, Any]) -> int:
             decisions_for_cache = [
                 item
                 for item in complete_decisions
-                if not (set(_required_platforms_for_category(getattr(item.product, "category", ProductCategory.GENERAL_TECH))) & required_with_optional)
+                if not (
+                    set(
+                        _required_platforms_for_product(
+                            item.product,
+                            str(getattr(item, "normalized_name", "") or ""),
+                        )
+                    )
+                    & required_with_optional
+                )
             ]
         else:
             decisions_for_cache = decisions

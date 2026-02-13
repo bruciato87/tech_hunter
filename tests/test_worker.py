@@ -337,6 +337,40 @@ def test_split_complete_quote_decisions_respects_optional_platforms() -> None:
     assert not rejected
 
 
+def test_split_complete_quote_decisions_allows_non_apple_smartwatch_without_trenddevice() -> None:
+    product = AmazonProduct(
+        title="Garmin Forerunner 955 Solar",
+        price_eur=449.99,
+        category=ProductCategory.SMARTWATCH,
+    )
+    decision = type(
+        "Decision",
+        (),
+        {
+            "product": product,
+            "normalized_name": "Garmin Forerunner 955 Solar",
+            "offers": [
+                type(
+                    "Offer",
+                    (),
+                    {
+                        "platform": "rebuy",
+                        "offer_eur": 126.92,
+                        "error": None,
+                        "source_url": "https://www.rebuy.it/vendere/smartwatch/garmin-forerunner-955-schwarz-am-silikonarmband-schwarz_13303170",
+                        "raw_payload": {"price_source": "ry-inject", "quote_verification": {"ok": True}},
+                    },
+                )()
+            ],
+        },
+    )()
+
+    accepted, rejected = _split_complete_quote_decisions([decision])
+
+    assert len(accepted) == 1
+    assert not rejected
+
+
 def test_detect_outage_optional_platforms_marks_required_platform_without_quotes() -> None:
     product = AmazonProduct(
         title="Apple iPhone 14 128GB",
@@ -365,6 +399,39 @@ def test_detect_outage_optional_platforms_marks_required_platform_without_quotes
     )()
     optional = _detect_outage_optional_platforms([decision])
     assert "trenddevice" in optional
+    assert "rebuy" not in optional
+
+
+def test_detect_outage_optional_platforms_non_apple_watch_requires_only_rebuy() -> None:
+    product = AmazonProduct(
+        title="Garmin Forerunner 955 Solar",
+        price_eur=449.99,
+        category=ProductCategory.SMARTWATCH,
+    )
+    decision = type(
+        "Decision",
+        (),
+        {
+            "product": product,
+            "normalized_name": "Garmin Forerunner 955 Solar",
+            "offers": [
+                type(
+                    "Offer",
+                    (),
+                    {
+                        "platform": "rebuy",
+                        "offer_eur": 126.92,
+                        "error": None,
+                        "source_url": "https://www.rebuy.it/vendere/smartwatch/garmin-forerunner-955-schwarz-am-silikonarmband-schwarz_13303170",
+                        "raw_payload": {"price_source": "ry-inject", "quote_verification": {"ok": True}},
+                    },
+                )()
+            ],
+        },
+    )()
+
+    optional = _detect_outage_optional_platforms([decision])
+    assert "trenddevice" not in optional
     assert "rebuy" not in optional
 
 
