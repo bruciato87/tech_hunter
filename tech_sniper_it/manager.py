@@ -70,6 +70,8 @@ _NORMALIZATION_NOISE_PATTERN = re.compile(
     r"\b(ottime condizioni|ricondizionat[oa]?|reacondicionado|warehouse|amazon|come nuovo|grado a|excellent|renewed|used|usato)\b",
     re.IGNORECASE,
 )
+_WATCH_ULTRA_VERSION_PATTERN = re.compile(r"\bultra(?:[\s\-_]+)?(\d{1,2})\b", re.IGNORECASE)
+_WATCH_SERIES_VERSION_PATTERN = re.compile(r"\bseri(?:es|e)(?:[\s\-_]+)?(\d{1,2})\b", re.IGNORECASE)
 
 _WATCH_ANCHORS = ("watch", "smartwatch", "garmin", "fenix", "epix", "forerunner")
 _PHONE_ANCHORS = ("iphone",)
@@ -92,6 +94,82 @@ def _heuristic_title_normalize(title: str) -> str:
     value = _NORMALIZATION_COLOR_PATTERN.sub(" ", value)
     value = re.sub(r"\s+", " ", value).strip(" -:,")
     return value[:120]
+
+
+def _watch_generation_signature(value: str | None) -> dict[str, set[str]]:
+    normalized = _compact_text(value).casefold()
+    ultra = {
+        match.group(1)
+        for match in _WATCH_ULTRA_VERSION_PATTERN.finditer(normalized)
+        if match.group(1)
+    }
+    series = {
+        match.group(1)
+        for match in _WATCH_SERIES_VERSION_PATTERN.finditer(normalized)
+        if match.group(1)
+    }
+    return {
+        "ultra": ultra,
+        "series": series,
+    }
+
+
+def _align_watch_generation_to_source(current: str, source: str) -> tuple[str, str | None]:
+    current_value = _compact_text(current)
+    source_value = _compact_text(source)
+    current_sig = _watch_generation_signature(current_value)
+    source_sig = _watch_generation_signature(source_value)
+    updated = current_value
+    reason_parts: list[str] = []
+
+    if current_sig["ultra"]:
+        if not source_sig["ultra"]:
+            replaced = re.sub(r"(?i)\bultra\s*\d{1,2}\b", "Ultra", updated)
+            if replaced != updated:
+                updated = replaced
+                reason_parts.append("removed-untrusted-watch-generation")
+        elif source_sig["ultra"].isdisjoint(current_sig["ultra"]):
+            preferred_ultra = sorted(source_sig["ultra"], key=lambda item: int(item))[0]
+            replaced = re.sub(r"(?i)\bultra\s*\d{1,2}\b", f"Ultra {preferred_ultra}", updated)
+            if replaced != updated:
+                updated = replaced
+                reason_parts.append("aligned-watch-generation")
+
+    if current_sig["series"]:
+        if not source_sig["series"]:
+            replaced = re.sub(r"(?i)\b(seri(?:es|e))\s*\d{1,2}\b", r"\1", updated)
+            if replaced != updated:
+                updated = replaced
+                reason_parts.append("removed-untrusted-watch-series")
+        elif source_sig["series"].isdisjoint(current_sig["series"]):
+            preferred_series = sorted(source_sig["series"], key=lambda item: int(item))[0]
+            replaced = re.sub(r"(?i)\b(seri(?:es|e))\s*\d{1,2}\b", fr"Series {preferred_series}", updated)
+            if replaced != updated:
+                updated = replaced
+                reason_parts.append("aligned-watch-series")
+
+    updated = _compact_text(updated).strip(" -:,")
+    if reason_parts:
+        return updated[:120], "+".join(reason_parts)
+    return current_value[:120], None
+
+
+def _watch_generation_mismatch(reference: str, candidate: str) -> bool:
+    reference_norm = _compact_text(reference).casefold()
+    if not _contains_any(reference_norm, _WATCH_ANCHORS):
+        return False
+    ref_sig = _watch_generation_signature(reference_norm)
+    cand_sig = _watch_generation_signature(candidate)
+    for key in ("ultra", "series"):
+        cand_values = cand_sig[key]
+        if not cand_values:
+            continue
+        ref_values = ref_sig[key]
+        if not ref_values:
+            return True
+        if ref_values.isdisjoint(cand_values):
+            return True
+    return False
 
 
 def _sanitize_ai_normalized_name(product: AmazonProduct, normalized_name: str) -> tuple[str, str | None]:
@@ -124,6 +202,9 @@ def _sanitize_ai_normalized_name(product: AmazonProduct, normalized_name: str) -
             if stripped:
                 return stripped[:120], "removed-untrusted-storage"
             return _fallback("removed-untrusted-storage-empty")
+        aligned_watch, watch_reason = _align_watch_generation_to_source(current, source_text)
+        if aligned_watch != current:
+            return aligned_watch[:120], watch_reason or "watch-generation-guardrail"
 
     if product.category == ProductCategory.APPLE_PHONE:
         source_phone = _contains_any(source_lower, _PHONE_ANCHORS)
@@ -217,6 +298,46 @@ def _build_rebuy_candidate_context(*, payload: dict[str, Any], source_url: str) 
             value = str(row.get(field) or "").strip()
             if value:
                 parts.append(value)
+    return " ".join(parts)
+
+
+def _build_trenddevice_candidate_context(*, payload: dict[str, Any], source_url: str) -> str:
+    parts: list[str] = [source_url]
+    for key in ("price_text", "query", "source_url"):
+        value = str(payload.get(key) or "").strip()
+        if value:
+            parts.append(value)
+    wizard_steps = payload.get("wizard_steps")
+    if isinstance(wizard_steps, list):
+        for row in wizard_steps[-8:]:
+            if not isinstance(row, dict):
+                continue
+            selected = str(row.get("selected") or "").strip()
+            if selected:
+                parts.append(selected)
+            step_name = str(row.get("name") or row.get("step") or "").strip()
+            if step_name:
+                parts.append(step_name)
+    return " ".join(parts)
+
+
+def _build_mpb_candidate_context(*, payload: dict[str, Any], source_url: str) -> str:
+    parts: list[str] = [source_url]
+    for key in ("price_text", "query", "source_url", "result_title", "result_subtitle", "selected_title"):
+        value = str(payload.get(key) or "").strip()
+        if value:
+            parts.append(value)
+    candidates = payload.get("result_candidates")
+    if isinstance(candidates, list):
+        for item in candidates[:4]:
+            if not isinstance(item, dict):
+                continue
+            title = str(item.get("title") or item.get("text") or "").strip()
+            if title:
+                parts.append(title)
+            href = str(item.get("href") or item.get("url") or "").strip()
+            if href:
+                parts.append(href)
     return " ".join(parts)
 
 
@@ -553,6 +674,9 @@ def _verify_real_resale_quote(result: ValuationResult) -> ValuationResult:
         "offer_eur": result.offer_eur,
         "source_url": source_url or None,
     }
+    original_title = _compact_text(str(payload.get("original_title") or ""))
+    if original_title:
+        checks["original_title"] = original_title
     if result.offer_eur <= 0 or result.offer_eur > 10000:
         reasons.append("offer-out-of-range")
 
@@ -603,6 +727,8 @@ def _verify_real_resale_quote(result: ValuationResult) -> ValuationResult:
         checks["candidate_storage_tokens"] = sorted(candidate_storage_tokens)
         if query_storage_tokens and candidate_storage_tokens and not query_storage_tokens.intersection(candidate_storage_tokens):
             reasons.append("variant-storage-mismatch")
+        if original_title and _watch_generation_mismatch(original_title, candidate_context):
+            reasons.append("source-watch-generation-mismatch")
         if not price_text:
             reasons.append("missing-price-context")
     elif platform == "trenddevice":
@@ -624,12 +750,18 @@ def _verify_real_resale_quote(result: ValuationResult) -> ValuationResult:
                 reasons.append("generic-url-no-model-step")
             elif token_ratio < 0.55:
                 reasons.append("generic-url-low-coverage")
+        candidate_context = _build_trenddevice_candidate_context(payload=payload, source_url=source_url)
+        if original_title and _watch_generation_mismatch(original_title, candidate_context):
+            reasons.append("source-watch-generation-mismatch")
         if not price_text:
             reasons.append("missing-price-context")
     elif platform == "mpb":
         checks["generic_url"] = _is_generic_mpb_offer_url(source_url)
         if checks["generic_url"]:
             reasons.append("generic-source-url")
+        candidate_context = _build_mpb_candidate_context(payload=payload, source_url=source_url)
+        if original_title and _watch_generation_mismatch(original_title, candidate_context):
+            reasons.append("source-watch-generation-mismatch")
         if not checks["price_source"] and not price_text:
             reasons.append("missing-price-context")
 
@@ -921,6 +1053,21 @@ class ArbitrageManager:
 
             for attempt_index, query_name in enumerate(query_variants, start=1):
                 raw = await _run_once(valuator, query_name)
+                raw_payload = deepcopy(raw.raw_payload) if isinstance(raw.raw_payload, dict) else {}
+                raw_payload.setdefault("original_title", product.title)
+                raw_payload.setdefault("original_category", product.category.value)
+                raw_payload.setdefault("original_price_eur", product.price_eur)
+                raw_payload.setdefault("normalized_query", query_name)
+                raw = ValuationResult(
+                    platform=raw.platform,
+                    normalized_name=raw.normalized_name,
+                    offer_eur=raw.offer_eur,
+                    condition=raw.condition,
+                    currency=raw.currency,
+                    source_url=raw.source_url,
+                    raw_payload=raw_payload,
+                    error=raw.error,
+                )
                 verified = raw if _has_quote_verification(raw) else _verify_real_resale_quote(raw)
                 payload = deepcopy(verified.raw_payload) if isinstance(verified.raw_payload, dict) else {}
                 payload["query_retry"] = {

@@ -153,6 +153,16 @@ class HallucinatedStorageWatchBalancer(SmartAIBalancer):
         }
 
 
+class HallucinatedGenerationWatchBalancer(SmartAIBalancer):
+    async def normalize_with_meta(self, title: str) -> tuple[str, dict]:  # type: ignore[override]
+        return "Apple Watch Ultra 3 GPS + Cellular 49mm", {
+            "provider": "openrouter",
+            "model": "mock",
+            "mode": "live",
+            "ai_used": True,
+        }
+
+
 class CaptureQueryValuator:
     def __init__(self, platform: str = "trenddevice") -> None:
         self.platform_name = platform
@@ -644,3 +654,87 @@ async def test_manager_ai_safeguard_removes_untrusted_watch_storage() -> None:
     assert "32gb" not in decision.normalized_name.lower()
     assert valuator.queries
     assert "32gb" not in valuator.queries[0].lower()
+
+
+@pytest.mark.asyncio
+async def test_manager_ai_safeguard_removes_untrusted_watch_generation() -> None:
+    valuator = CaptureQueryValuator("trenddevice")
+    manager = ManagerUnderTest(
+        valuators=[valuator],
+        ai_balancer=HallucinatedGenerationWatchBalancer(gemini_keys=[], openrouter_keys=[]),
+        min_spread_eur=40.0,
+    )
+    product = AmazonProduct(
+        title="Apple Watch Ultra (GPS + Cellular, 49mm)",
+        price_eur=350.0,
+        category=ProductCategory.SMARTWATCH,
+    )
+
+    decision = await manager.evaluate_product(product)
+
+    assert "ultra 3" not in decision.normalized_name.lower()
+    assert "apple watch ultra" in decision.normalized_name.lower()
+    assert valuator.queries
+    assert "ultra 3" not in valuator.queries[0].lower()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("platform", "source_url", "payload"),
+    [
+        (
+            "rebuy",
+            "https://www.rebuy.it/vendere/smartwatch/apple-watch-ultra-3-49-mm-cassa-in-titanio-nero-wifi-plus-cellulare_21513678",
+            {
+                "price_text": "Pagamento Diretto 512,08 €",
+                "price_source": "ry-inject",
+                "query": "Apple Watch Ultra GPS + Cellular 49mm",
+                "match_quality": {"ok": True, "reason": "ok", "token_ratio": 0.84},
+            },
+        ),
+        (
+            "trenddevice",
+            "https://www.trendevice.com/vendi/valutazione/",
+            {
+                "price_text": "Ti paghiamo 520,00 €",
+                "price_source": "api",
+                "query": "Apple Watch Ultra GPS + Cellular 49mm",
+                "match_quality": {"ok": True, "reason": "ok", "has_model_step": True, "token_ratio": 0.91},
+                "wizard_steps": [
+                    {"name": "Modello", "selected": "Apple Watch Ultra 3 49mm"},
+                    {"name": "Condizione", "selected": "Grado A"},
+                ],
+            },
+        ),
+    ],
+)
+async def test_manager_quote_verification_rejects_watch_generation_mismatch(
+    platform: str,
+    source_url: str,
+    payload: dict,
+) -> None:
+    manager = ManagerUnderTest(
+        valuators=[
+            StaticValuator(
+                platform,
+                512.08,
+                source_url=source_url,
+                raw_payload=payload,
+            )
+        ],
+        ai_balancer=TitleBalancer(gemini_keys=[], openrouter_keys=[]),
+        min_spread_eur=40.0,
+    )
+    product = AmazonProduct(
+        title="Apple Watch Ultra GPS + Cellular 49mm",
+        price_eur=379.0,
+        category=ProductCategory.SMARTWATCH,
+    )
+
+    decision = await manager.evaluate_product(product)
+
+    assert decision.best_offer is None
+    assert decision.should_notify is False
+    assert decision.offers[0].error is not None
+    assert "quote verification failed" in str(decision.offers[0].error)
+    assert "source-watch-generation-mismatch" in str(decision.offers[0].error)
