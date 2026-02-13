@@ -91,6 +91,8 @@ python -m tech_sniper_it.worker
 - `SCAN_FILTER_ACCESSORIES` (default: `true`, blocks covers/cases/accessories from deal evaluation)
 - `PLAYWRIGHT_NAV_TIMEOUT_MS` (default: `45000`)
 - `HEADLESS` (default: `true`)
+- `REBUY_USE_STORAGE_STATE` (default: `true`)
+- `REBUY_STORAGE_STATE_B64` (optional Playwright storage state for logged-in Rebuy session; accepts base64 JSON or raw JSON)
 - `MPB_MAX_ATTEMPTS` (default: `3`)
 - `MPB_USE_STORAGE_STATE` (default: `true`)
 - `MPB_STORAGE_STATE_B64` (optional Playwright storage state for MPB challenge bypass; accepts base64 JSON or raw JSON)
@@ -287,6 +289,26 @@ Keep enabled:
 
 - `MPB_USE_STORAGE_STATE=true`
 
+### Free Bypass With Rebuy Session State
+
+Rebuy can occasionally degrade to anti-bot/cookie gating and hide reliable sell quotes.
+To keep quote extraction stable, capture a local Playwright session and store it as secret.
+
+Generate storage state base64:
+
+```bash
+source .venv/bin/activate
+python scripts/capture_rebuy_storage_state.py
+```
+
+Copy the printed base64 value to GitHub Secret:
+
+- `REBUY_STORAGE_STATE_B64`
+
+Keep enabled:
+
+- `REBUY_USE_STORAGE_STATE=true`
+
 ## Supabase Setup (RLS Enabled)
 
 Migration file is already prepared at:
@@ -327,6 +349,7 @@ Optional secrets:
 - `TELEGRAM_CHAT_ID` (can be moved to Variables)
 - `TRENDDEVICE_LEAD_EMAIL`
 - `TRENDDEVICE_STORAGE_STATE_B64` (recommended if TrendDevice email-gate blocks quote extraction)
+- `REBUY_STORAGE_STATE_B64` (recommended if Rebuy anti-bot/cookie gate blocks stable quote extraction)
 - `MPB_STORAGE_STATE_B64` (recommended if MPB Cloudflare challenge blocks the sell wizard)
 - `AMAZON_WAREHOUSE_STORAGE_STATE_B64` (global fallback)
 - `AMAZON_WAREHOUSE_STORAGE_STATE_B64_IT`
@@ -342,6 +365,7 @@ Optional secrets:
 - `MIN_SPREAD_EUR`
 - `MAX_PARALLEL_PRODUCTS`
 - `PLAYWRIGHT_NAV_TIMEOUT_MS`
+- `REBUY_USE_STORAGE_STATE`
 - `TRENDDEVICE_USE_STORAGE_STATE`
 - `TRENDDEVICE_EMAIL_GATE_WAIT_MS`
 - `MPB_MAX_ATTEMPTS`

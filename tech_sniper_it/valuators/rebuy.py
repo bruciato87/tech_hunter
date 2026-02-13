@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import json
+import os
 import re
+import tempfile
 from difflib import SequenceMatcher
 from typing import Any
 from urllib.parse import unquote, urlparse
@@ -11,7 +14,7 @@ from playwright.async_api import Page
 from playwright.async_api import async_playwright
 
 from tech_sniper_it.models import AmazonProduct
-from tech_sniper_it.utils import parse_eur_price
+from tech_sniper_it.utils import decode_json_dict_maybe_base64, parse_eur_price
 from tech_sniper_it.valuators.base import BaseValuator
 
 PRICE_HINTS: tuple[str, ...] = ("ti paghiamo", "valutazione", "offerta", "ricevi", "vendi")
@@ -71,6 +74,46 @@ GENERIC_REBUY_CATEGORIES: set[str] = {
     "console",
 }
 CAPACITY_TOKEN_PATTERN = re.compile(r"\b\d{2,4}\s*(?:gb|tb)\b", re.IGNORECASE)
+_REBUY_STORAGE_STATE_ERROR = ""
+
+
+def _use_storage_state() -> bool:
+    raw = (os.getenv("REBUY_USE_STORAGE_STATE") or "true").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
+def _load_storage_state_b64() -> str | None:
+    global _REBUY_STORAGE_STATE_ERROR
+    _REBUY_STORAGE_STATE_ERROR = ""
+    if not _use_storage_state():
+        return None
+    raw = (os.getenv("REBUY_STORAGE_STATE_B64") or "").strip()
+    if not raw:
+        _REBUY_STORAGE_STATE_ERROR = "empty"
+        return None
+    parsed, error = decode_json_dict_maybe_base64(raw)
+    if not parsed:
+        _REBUY_STORAGE_STATE_ERROR = str(error or "invalid-base64-json")
+        return None
+
+    handle = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8")
+    try:
+        json.dump(parsed, handle, ensure_ascii=False)
+        handle.flush()
+        return handle.name
+    finally:
+        handle.close()
+
+
+def _remove_file_if_exists(path: str | None) -> None:
+    if not path:
+        return
+    try:
+        os.remove(path)
+    except FileNotFoundError:
+        return
+    except Exception:
+        return
 
 
 def _extract_contextual_price(text: str) -> tuple[float | None, str]:
@@ -287,15 +330,26 @@ class RebuyValuator(BaseValuator):
         normalized_name: str,
     ) -> tuple[float | None, str | None, dict[str, Any]]:
         query = product.ean or normalized_name
+        storage_state_path = _load_storage_state_b64()
         payload: dict[str, Any] = {
             "query": query,
             "condition_target": "Come nuovo",
             "adaptive_fallbacks": {},
+            "storage_state": bool(storage_state_path),
         }
+        if _use_storage_state() and storage_state_path is None:
+            payload["storage_state_error"] = _REBUY_STORAGE_STATE_ERROR or "missing"
+            print(
+                "[rebuy] storage_state missing/invalid | "
+                f"reason={payload['storage_state_error']}"
+            )
 
         async with async_playwright() as playwright:
             browser = await playwright.chromium.launch(headless=self.headless)
-            context = await browser.new_context(locale="it-IT")
+            context_kwargs: dict[str, Any] = {"locale": "it-IT"}
+            if storage_state_path:
+                context_kwargs["storage_state"] = storage_state_path
+            context = await browser.new_context(**context_kwargs)
             page = await context.new_page()
             page.set_default_timeout(self.nav_timeout_ms)
             try:
@@ -424,6 +478,7 @@ class RebuyValuator(BaseValuator):
             finally:
                 await context.close()
                 await browser.close()
+                _remove_file_if_exists(storage_state_path)
 
     async def _open_best_result(
         self,
@@ -568,4 +623,10 @@ class RebuyValuator(BaseValuator):
         return parse_eur_price(text), text[:220]
 
 
-__all__ = ["RebuyValuator", "_assess_rebuy_match", "_extract_contextual_price"]
+__all__ = [
+    "RebuyValuator",
+    "_assess_rebuy_match",
+    "_extract_contextual_price",
+    "_load_storage_state_b64",
+    "_remove_file_if_exists",
+]

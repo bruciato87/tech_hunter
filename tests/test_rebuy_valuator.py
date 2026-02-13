@@ -1,6 +1,17 @@
 from __future__ import annotations
 
-from tech_sniper_it.valuators.rebuy import _assess_rebuy_match, _extract_contextual_price
+import base64
+import json
+import os
+
+import pytest
+
+from tech_sniper_it.valuators.rebuy import (
+    _assess_rebuy_match,
+    _extract_contextual_price,
+    _load_storage_state_b64,
+    _remove_file_if_exists,
+)
 
 
 def test_rebuy_extract_contextual_price_prefers_offer_copy() -> None:
@@ -31,3 +42,38 @@ def test_rebuy_assess_match_accepts_specific_product_url() -> None:
         source_url="https://www.rebuy.it/comprare/apple-iphone-14-pro-128gb-nero/123456",
     )
     assert match["ok"] is True
+
+
+def test_rebuy_load_storage_state_b64_valid(monkeypatch: pytest.MonkeyPatch) -> None:
+    payload = {"cookies": [], "origins": []}
+    encoded = base64.b64encode(json.dumps(payload).encode("utf-8")).decode("ascii")
+    monkeypatch.setenv("REBUY_STORAGE_STATE_B64", encoded)
+    path = _load_storage_state_b64()
+    try:
+        assert path is not None
+        assert os.path.exists(path)
+    finally:
+        _remove_file_if_exists(path)
+
+
+def test_rebuy_load_storage_state_b64_invalid(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("REBUY_STORAGE_STATE_B64", "not-base64")
+    assert _load_storage_state_b64() is None
+
+
+def test_rebuy_load_storage_state_b64_accepts_raw_json(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("REBUY_STORAGE_STATE_B64", '{"cookies":[],"origins":[]}')
+    path = _load_storage_state_b64()
+    try:
+        assert path is not None
+        assert os.path.exists(path)
+    finally:
+        _remove_file_if_exists(path)
+
+
+def test_rebuy_load_storage_state_b64_disabled_by_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    payload = {"cookies": [], "origins": []}
+    encoded = base64.b64encode(json.dumps(payload).encode("utf-8")).decode("ascii")
+    monkeypatch.setenv("REBUY_STORAGE_STATE_B64", encoded)
+    monkeypatch.setenv("REBUY_USE_STORAGE_STATE", "false")
+    assert _load_storage_state_b64() is None

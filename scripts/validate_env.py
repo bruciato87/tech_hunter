@@ -280,6 +280,18 @@ def main() -> int:
     except ValueError:
         errors.append("PLAYWRIGHT_NAV_TIMEOUT_MS must be integer.")
 
+    rebuy_use_storage_state = _env_or_default("REBUY_USE_STORAGE_STATE", "true").lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+    rebuy_storage_state = (os.getenv("REBUY_STORAGE_STATE_B64") or "").strip()
+    if rebuy_use_storage_state and rebuy_storage_state:
+        decoded, error = _decode_json_dict_maybe_base64(rebuy_storage_state)
+        if decoded is None:
+            warnings.append(f"REBUY_STORAGE_STATE_B64 is invalid ({error or 'invalid-base64-json'}).")
+
     try:
         mpb_attempts = int(_env_or_default("MPB_MAX_ATTEMPTS", "3"))
         if mpb_attempts < 1:
