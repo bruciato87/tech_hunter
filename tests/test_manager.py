@@ -307,3 +307,59 @@ async def test_manager_quote_verification_accepts_rebuy_specific_product_url() -
     assert decision.best_offer.platform == "rebuy"
     assert decision.best_offer.offer_eur == 220.0
     assert decision.should_notify is True
+
+
+@pytest.mark.asyncio
+async def test_manager_quote_verification_rejects_mpb_generic_search_url() -> None:
+    manager = ManagerUnderTest(
+        valuators=[
+            StaticValuator(
+                "mpb",
+                480.0,
+                source_url="https://www.mpb.com/it-it/cerca?q=canon+eos+r7",
+                raw_payload={
+                    "price_text": "Ti paghiamo 480,00 €",
+                    "price_source": "direct_search",
+                    "match_quality": {"ok": False, "reason": "generic-url"},
+                },
+            )
+        ],
+        ai_balancer=FakeBalancer(gemini_keys=[], openrouter_keys=[]),
+        min_spread_eur=40.0,
+    )
+    product = AmazonProduct(title="Canon EOS R7 Body", price_eur=200.0, category=ProductCategory.PHOTOGRAPHY)
+
+    decision = await manager.evaluate_product(product)
+
+    assert decision.best_offer is None
+    assert decision.should_notify is False
+    assert decision.offers[0].error is not None
+    assert "quote verification failed" in str(decision.offers[0].error)
+
+
+@pytest.mark.asyncio
+async def test_manager_quote_verification_accepts_mpb_specific_sell_url() -> None:
+    manager = ManagerUnderTest(
+        valuators=[
+            StaticValuator(
+                "mpb",
+                480.0,
+                source_url="https://www.mpb.com/it-it/sell/product/canon-eos-r7/12345",
+                raw_payload={
+                    "price_text": "Ti paghiamo 480,00 €",
+                    "price_source": "direct_sell_link",
+                    "match_quality": {"ok": True, "reason": "ok"},
+                },
+            )
+        ],
+        ai_balancer=FakeBalancer(gemini_keys=[], openrouter_keys=[]),
+        min_spread_eur=40.0,
+    )
+    product = AmazonProduct(title="Canon EOS R7 Body", price_eur=200.0, category=ProductCategory.PHOTOGRAPHY)
+
+    decision = await manager.evaluate_product(product)
+
+    assert decision.best_offer is not None
+    assert decision.best_offer.platform == "mpb"
+    assert decision.best_offer.offer_eur == 480.0
+    assert decision.should_notify is True

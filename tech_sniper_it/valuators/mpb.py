@@ -5,8 +5,9 @@ import os
 import re
 import tempfile
 import time
+from difflib import SequenceMatcher
 from typing import Any
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, unquote, urljoin, urlparse
 
 from bs4 import BeautifulSoup
 from playwright.async_api import Error as PlaywrightError
@@ -77,6 +78,41 @@ BLOCKER_HINTS: tuple[str, ...] = (
     "enable javascript and cookies to continue",
     "verify you are human",
 )
+MATCH_STOPWORDS: set[str] = {
+    "amazon",
+    "warehouse",
+    "ricondizionato",
+    "ricondizionata",
+    "renewed",
+    "reconditioned",
+    "used",
+    "usato",
+    "con",
+    "senza",
+    "with",
+    "and",
+    "the",
+    "kit",
+    "bundle",
+    "pack",
+}
+ANCHOR_TOKENS: tuple[str, ...] = (
+    "canon",
+    "nikon",
+    "sony",
+    "fujifilm",
+    "lumix",
+    "panasonic",
+    "dji",
+    "mavic",
+    "avata",
+    "mini",
+    "gopro",
+    "insta360",
+    "steam",
+    "deck",
+)
+CAPACITY_TOKEN_PATTERN = re.compile(r"\b\d{2,4}\s*(?:gb|tb)\b", re.IGNORECASE)
 _MPB_BLOCKED_UNTIL_TS = 0.0
 _MPB_BLOCK_REASON = ""
 _MPB_STORAGE_STATE_ERROR = ""
@@ -210,6 +246,236 @@ def _contains_price_hint(text: str) -> bool:
     return any(hint in lowered for hint in PRICE_HINTS)
 
 
+def _normalize_match_text(value: str | None) -> str:
+    raw = (value or "").lower()
+    raw = re.sub(r"[^a-z0-9+\- ]+", " ", raw)
+    raw = re.sub(r"\s+", " ", raw).strip()
+    return raw
+
+
+def _query_tokens(value: str) -> list[str]:
+    normalized = _normalize_match_text(value)
+    tokens = [item for item in normalized.split(" ") if item]
+    ranked: list[str] = []
+    for token in tokens:
+        if token in MATCH_STOPWORDS:
+            continue
+        if len(token) < 2:
+            continue
+        if token not in ranked:
+            ranked.append(token)
+    return ranked
+
+
+def _capacity_tokens(value: str) -> list[str]:
+    normalized = _normalize_match_text(value).replace(" ", "")
+    return sorted(set(match.group(0).replace(" ", "").lower() for match in CAPACITY_TOKEN_PATTERN.finditer(normalized)))
+
+
+def _trim_query_variant(value: str) -> str:
+    cleaned = re.sub(r"[\[\]\(\)\|,;/]+", " ", value or "")
+    cleaned = re.sub(
+        r"\b(warehouse|ricondizionat[oa]?|renewed|reconditioned|usato|used|senza scatola|con scatola)\b",
+        " ",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    if not cleaned:
+        return ""
+    tokens = cleaned.split(" ")
+    if len(tokens) > 7:
+        cleaned = " ".join(tokens[:7])
+    return cleaned
+
+
+def _build_query_variants(product: AmazonProduct, normalized_name: str) -> list[str]:
+    variants: list[str] = []
+    seen: set[str] = set()
+
+    def _push(raw: str | None) -> None:
+        value = re.sub(r"\s+", " ", (raw or "").strip())
+        if len(value) < 3:
+            return
+        marker = value.casefold()
+        if marker in seen:
+            return
+        seen.add(marker)
+        variants.append(value)
+
+    ean = (product.ean or "").strip()
+    if ean and re.fullmatch(r"[0-9\-\s]{8,20}", ean):
+        _push(ean)
+    _push(normalized_name)
+    _push(_trim_query_variant(normalized_name))
+    _push(_trim_query_variant(product.title))
+    _push(product.title)
+    return variants[:5]
+
+
+def _is_generic_mpb_url(url: str | None) -> bool:
+    path = (urlparse(url or "").path or "").strip("/").lower()
+    if not path:
+        return True
+    if path in {"it-it/sell", "sell", "it-it"}:
+        return True
+    return path.startswith("it-it/cerca")
+
+
+def _assess_mpb_match(
+    *,
+    normalized_name: str,
+    candidate_text: str,
+    source_url: str | None,
+) -> dict[str, Any]:
+    query_norm = _normalize_match_text(normalized_name)
+    parsed_url = urlparse(source_url or "")
+    url_text = " ".join(
+        part
+        for part in (
+            unquote(parsed_url.path or ""),
+            unquote(parsed_url.query or ""),
+        )
+        if part
+    )
+    candidate_norm = _normalize_match_text(f"{candidate_text} {url_text}")
+
+    ratio = SequenceMatcher(None, query_norm, candidate_norm).ratio() if query_norm and candidate_norm else 0.0
+    tokens = _query_tokens(normalized_name)
+    capacities = _capacity_tokens(normalized_name)
+    anchors = [token for token in tokens if token in ANCHOR_TOKENS]
+
+    required_tokens: list[str] = []
+    for item in capacities:
+        if item not in required_tokens:
+            required_tokens.append(item)
+    for item in anchors[:2]:
+        if item not in required_tokens:
+            required_tokens.append(item)
+    for item in tokens:
+        if item not in required_tokens:
+            required_tokens.append(item)
+        if len(required_tokens) >= 6:
+            break
+
+    hit_tokens = [token for token in required_tokens if token and token in candidate_norm]
+    anchor_hits = [token for token in anchors if token in candidate_norm]
+    capacity_hits = [token for token in capacities if token in candidate_norm.replace(" ", "")]
+    token_ratio = (len(hit_tokens) / len(required_tokens)) if required_tokens else 0.0
+    generic_url = _is_generic_mpb_url(source_url)
+
+    score = int((ratio * 100) + (len(hit_tokens) * 14) + (len(anchor_hits) * 8) - (36 if generic_url else 0))
+    if generic_url:
+        return {
+            "ok": False,
+            "reason": "generic-url",
+            "score": score,
+            "ratio": round(ratio, 3),
+            "token_ratio": round(token_ratio, 3),
+            "hit_tokens": hit_tokens,
+            "required_tokens": required_tokens,
+        }
+    if capacities and len(capacity_hits) < len(capacities):
+        return {
+            "ok": False,
+            "reason": "capacity-mismatch",
+            "score": score,
+            "ratio": round(ratio, 3),
+            "token_ratio": round(token_ratio, 3),
+            "hit_tokens": hit_tokens,
+            "required_tokens": required_tokens,
+        }
+    if anchors and not anchor_hits:
+        return {
+            "ok": False,
+            "reason": "anchor-mismatch",
+            "score": score,
+            "ratio": round(ratio, 3),
+            "token_ratio": round(token_ratio, 3),
+            "hit_tokens": hit_tokens,
+            "required_tokens": required_tokens,
+        }
+    if token_ratio < 0.50 and ratio < 0.58:
+        return {
+            "ok": False,
+            "reason": "low-token-similarity",
+            "score": score,
+            "ratio": round(ratio, 3),
+            "token_ratio": round(token_ratio, 3),
+            "hit_tokens": hit_tokens,
+            "required_tokens": required_tokens,
+        }
+    if score < 65:
+        return {
+            "ok": False,
+            "reason": "score-too-low",
+            "score": score,
+            "ratio": round(ratio, 3),
+            "token_ratio": round(token_ratio, 3),
+            "hit_tokens": hit_tokens,
+            "required_tokens": required_tokens,
+        }
+    return {
+        "ok": True,
+        "reason": "ok",
+        "score": score,
+        "ratio": round(ratio, 3),
+        "token_ratio": round(token_ratio, 3),
+        "hit_tokens": hit_tokens,
+        "required_tokens": required_tokens,
+    }
+
+
+def _extract_mpb_sell_link_candidates(
+    *,
+    html: str,
+    base_url: str,
+    normalized_name: str,
+    limit: int = 8,
+) -> list[dict[str, Any]]:
+    soup = BeautifulSoup(html or "", "html.parser")
+    found: list[dict[str, Any]] = []
+    seen_urls: set[str] = set()
+
+    for anchor in soup.select("a[href*='/sell/']"):
+        href = (anchor.get("href") or "").strip()
+        if not href:
+            continue
+        full_url = urljoin(base_url, href)
+        marker = full_url.lower()
+        if marker in seen_urls:
+            continue
+        seen_urls.add(marker)
+        text = anchor.get_text(" ", strip=True)
+        context = " ".join(part for part in (text, href) if part)
+        assessment = _assess_mpb_match(
+            normalized_name=normalized_name,
+            candidate_text=context,
+            source_url=full_url,
+        )
+        ranking = int(assessment.get("score", 0)) + (35 if assessment.get("ok") else 0)
+        found.append(
+            {
+                "url": full_url,
+                "text": text[:220],
+                "href": href,
+                "assessment": assessment,
+                "ranking": ranking,
+            }
+        )
+
+    ranked = sorted(
+        found,
+        key=lambda item: (
+            item.get("ranking", 0),
+            item.get("assessment", {}).get("token_ratio", 0.0),
+            item.get("assessment", {}).get("ratio", 0.0),
+        ),
+        reverse=True,
+    )
+    return ranked[: max(1, limit)]
+
+
 async def _apply_stealth_context(context) -> None:  # noqa: ANN001
     script = """
     Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
@@ -240,6 +506,7 @@ class MPBValuator(BaseValuator):
                 f"MPB temporarily paused after anti-bot challenge ({reason}); retry in ~{blocked_remaining}s."
             )
         max_attempts = max(1, int(_env_or_default("MPB_MAX_ATTEMPTS", "3")))
+        query_candidates = _build_query_variants(product, normalized_name)
         storage_state_path = _load_storage_state_b64()
         if _mpb_require_storage_state() and storage_state_path is None:
             reason = _MPB_STORAGE_STATE_ERROR or "missing"
@@ -247,7 +514,8 @@ class MPBValuator(BaseValuator):
                 f"MPB storage_state missing/invalid ({reason}); set MPB_STORAGE_STATE_B64 or disable MPB_REQUIRE_STORAGE_STATE."
             )
         payload: dict[str, Any] = {
-            "query": normalized_name,
+            "query": query_candidates[0] if query_candidates else normalized_name,
+            "query_candidates": query_candidates,
             "condition_target": "Ottimo",
             "attempts": [],
             "adaptive_fallbacks": {},
@@ -282,178 +550,218 @@ class MPBValuator(BaseValuator):
         async with async_playwright() as playwright:
             browser = await playwright.chromium.launch(headless=self.headless)
             try:
-                for attempt in range(1, max_attempts + 1):
-                    user_agent = DEFAULT_USER_AGENTS[(attempt - 1) % len(DEFAULT_USER_AGENTS)]
-                    context_kwargs: dict[str, Any] = {
-                        "locale": "it-IT",
-                        "user_agent": user_agent,
-                        "extra_http_headers": {
-                            "Accept-Language": "it-IT,it;q=0.9,en;q=0.8",
-                        },
-                    }
-                    if storage_state_path:
-                        context_kwargs["storage_state"] = storage_state_path
-                    context = await browser.new_context(**context_kwargs)
-                    await _apply_stealth_context(context)
-                    page = await context.new_page()
-                    page.set_default_timeout(self.nav_timeout_ms)
-                    try:
-                        await page.goto(self.base_url, wait_until="domcontentloaded")
-                        await self._accept_cookie_if_present(page)
-                        blockers = await self._detect_page_blockers(page)
-                        if blockers:
-                            blocker_hits.extend(blockers)
-                            payload["attempts"].append(
-                                {
-                                    "attempt": attempt,
-                                    "stage": "base_load",
-                                    "status": "blocked",
-                                    "url": page.url,
-                                    "blockers": blockers,
-                                }
-                            )
-                            fallback = await self._direct_search_fallback(
-                                page=page,
-                                attempt=attempt,
-                                normalized_name=normalized_name,
-                                condition_selectors=condition_selectors,
-                                direct_sell_selectors=direct_sell_selectors,
-                                payload=payload,
-                            )
-                            if fallback["offer"] is not None:
-                                return fallback["offer"], fallback["url"], payload
-                            blocker_hits.extend(fallback["blockers"])
-                            continue
-
-                        search_selector = await self._wait_for_search_input(page, selectors=search_selectors, timeout_ms=10000)
-                        semantic_search = False
-                        if search_selector:
-                            await page.locator(search_selector).first.fill(normalized_name)
-                        else:
-                            semantic_search = await self._fill_first_semantic(
-                                page,
-                                value=normalized_name,
-                                keywords=["search", "cerca", "modello", "brand", "prodotto"],
-                                timeout_ms=3500,
-                            )
-                            payload["adaptive_fallbacks"]["search_semantic"] = semantic_search
-
-                        if not search_selector and not semantic_search:
-                            probe = await self._attach_ui_probe(
-                                payload=payload,
-                                page=page,
-                                site=self.platform_name,
-                                stage="search_input_missing",
-                                expected_keywords=["mpb", "sell", "search", "camera"],
-                            )
+                global_attempt = 0
+                for query_index, query in enumerate(query_candidates, start=1):
+                    for attempt in range(1, max_attempts + 1):
+                        global_attempt += 1
+                        user_agent = DEFAULT_USER_AGENTS[(global_attempt - 1) % len(DEFAULT_USER_AGENTS)]
+                        context_kwargs: dict[str, Any] = {
+                            "locale": "it-IT",
+                            "user_agent": user_agent,
+                            "extra_http_headers": {
+                                "Accept-Language": "it-IT,it;q=0.9,en;q=0.8",
+                            },
+                        }
+                        if storage_state_path:
+                            context_kwargs["storage_state"] = storage_state_path
+                        context = await browser.new_context(**context_kwargs)
+                        await _apply_stealth_context(context)
+                        page = await context.new_page()
+                        page.set_default_timeout(self.nav_timeout_ms)
+                        try:
+                            payload["query"] = query
+                            await page.goto(self.base_url, wait_until="domcontentloaded")
+                            await self._accept_cookie_if_present(page)
                             blockers = await self._detect_page_blockers(page)
-                            blockers.extend(_detect_blockers(json.dumps(probe, ensure_ascii=False)))
-                            blocker_hits.extend(blockers)
+                            if blockers:
+                                blocker_hits.extend(blockers)
+                                payload["attempts"].append(
+                                    {
+                                        "attempt": attempt,
+                                        "query_index": query_index,
+                                        "query": query,
+                                        "stage": "base_load",
+                                        "status": "blocked",
+                                        "url": page.url,
+                                        "blockers": blockers,
+                                    }
+                                )
+                                fallback = await self._direct_search_fallback(
+                                    page=page,
+                                    attempt=attempt,
+                                    query=query,
+                                    query_index=query_index,
+                                    normalized_name=normalized_name,
+                                    condition_selectors=condition_selectors,
+                                    direct_sell_selectors=direct_sell_selectors,
+                                    payload=payload,
+                                )
+                                if fallback["offer"] is not None:
+                                    _clear_mpb_temporary_block()
+                                    return fallback["offer"], fallback["url"], payload
+                                blocker_hits.extend(fallback["blockers"])
+                                continue
+
+                            search_selector = await self._wait_for_search_input(
+                                page,
+                                selectors=search_selectors,
+                                timeout_ms=10000,
+                            )
+                            semantic_search = False
+                            if search_selector:
+                                await page.locator(search_selector).first.fill(query)
+                            else:
+                                semantic_search = await self._fill_first_semantic(
+                                    page,
+                                    value=query,
+                                    keywords=["search", "cerca", "modello", "brand", "prodotto"],
+                                    timeout_ms=3500,
+                                )
+                                payload["adaptive_fallbacks"]["search_semantic"] = semantic_search
+
+                            if not search_selector and not semantic_search:
+                                probe = await self._attach_ui_probe(
+                                    payload=payload,
+                                    page=page,
+                                    site=self.platform_name,
+                                    stage="search_input_missing",
+                                    expected_keywords=["mpb", "sell", "search", "camera"],
+                                )
+                                blockers = await self._detect_page_blockers(page)
+                                blockers.extend(_detect_blockers(json.dumps(probe, ensure_ascii=False)))
+                                blocker_hits.extend(blockers)
+                                payload["attempts"].append(
+                                    {
+                                        "attempt": attempt,
+                                        "query_index": query_index,
+                                        "query": query,
+                                        "stage": "search_input",
+                                        "status": "missing",
+                                        "title": await page.title(),
+                                        "blockers": blockers,
+                                        "ui_drift": probe.get("drift_suspected"),
+                                    }
+                                )
+                                fallback = await self._direct_search_fallback(
+                                    page=page,
+                                    attempt=attempt,
+                                    query=query,
+                                    query_index=query_index,
+                                    normalized_name=normalized_name,
+                                    condition_selectors=condition_selectors,
+                                    direct_sell_selectors=direct_sell_selectors,
+                                    payload=payload,
+                                )
+                                if fallback["offer"] is not None:
+                                    _clear_mpb_temporary_block()
+                                    return fallback["offer"], fallback["url"], payload
+                                blocker_hits.extend(fallback["blockers"])
+                                continue
+
+                            await page.wait_for_timeout(1000)
+
+                            clicked_result = await self._click_first(
+                                page,
+                                suggestion_selectors,
+                                timeout_ms=2500,
+                            )
+                            if not clicked_result:
+                                name_tokens = [token for token in re.split(r"\W+", query) if len(token) >= 3][:4]
+                                clicked_result = await self._click_first_semantic(
+                                    page,
+                                    keywords=[*name_tokens, "sell", "camera", "lens"],
+                                    timeout_ms=2500,
+                                    selectors=["a", "button", "[role='option']", "li", "div[role='option']"],
+                                )
+                                payload["adaptive_fallbacks"]["result_semantic"] = clicked_result
+                            else:
+                                payload["adaptive_fallbacks"]["result_semantic"] = False
+
+                            if not clicked_result:
+                                await page.keyboard.press("Enter")
+                            await page.wait_for_timeout(2400)
+                            await page.wait_for_load_state("domcontentloaded")
+
+                            condition_selected = await self._click_first(
+                                page,
+                                condition_selectors,
+                                timeout_ms=5000,
+                            )
+                            if not condition_selected:
+                                condition_selected = await self._click_first_semantic(
+                                    page,
+                                    keywords=["ottimo", "excellent", "grade a", "come nuovo"],
+                                    timeout_ms=2400,
+                                )
+                                payload["adaptive_fallbacks"]["condition_semantic"] = condition_selected
+                            else:
+                                payload["adaptive_fallbacks"]["condition_semantic"] = False
+                            await page.wait_for_timeout(1400)
+
+                            match_text = await self._collect_match_text(page)
+                            match = _assess_mpb_match(
+                                normalized_name=normalized_name,
+                                candidate_text=match_text,
+                                source_url=page.url,
+                            )
+                            payload["match_quality"] = match
+
+                            price, price_text = await self._extract_price(page, payload=payload)
+                            ui_probe = None
+                            if price is None or not match.get("ok"):
+                                if price is None:
+                                    ui_probe = await self._attach_ui_probe(
+                                        payload=payload,
+                                        page=page,
+                                        site=self.platform_name,
+                                        stage="price_missing",
+                                        expected_keywords=["mpb", "offer", "estimate", "€"],
+                                    )
+                                fallback = await self._direct_search_fallback(
+                                    page=page,
+                                    attempt=attempt,
+                                    query=query,
+                                    query_index=query_index,
+                                    normalized_name=normalized_name,
+                                    condition_selectors=condition_selectors,
+                                    direct_sell_selectors=direct_sell_selectors,
+                                    payload=payload,
+                                )
+                                if fallback["offer"] is not None:
+                                    _clear_mpb_temporary_block()
+                                    return fallback["offer"], fallback["url"], payload
+                                blocker_hits.extend(fallback["blockers"])
+
                             payload["attempts"].append(
                                 {
                                     "attempt": attempt,
-                                    "stage": "search_input",
-                                    "status": "missing",
-                                    "title": await page.title(),
-                                    "blockers": blockers,
-                                    "ui_drift": probe.get("drift_suspected"),
+                                    "query_index": query_index,
+                                    "query": query,
+                                    "stage": "valuation",
+                                    "status": (
+                                        "ok"
+                                        if price is not None and match.get("ok")
+                                        else ("low-confidence-match" if price is not None else "price-missing")
+                                    ),
+                                    "condition_selected": condition_selected,
+                                    "semantic_search": semantic_search,
+                                    "result_opened": clicked_result,
+                                    "url": page.url,
+                                    "price_text": price_text,
+                                    "match_quality": match,
+                                    "ui_drift": ui_probe.get("drift_suspected") if ui_probe else False,
                                 }
                             )
-                            fallback = await self._direct_search_fallback(
-                                page=page,
-                                attempt=attempt,
-                                normalized_name=normalized_name,
-                                condition_selectors=condition_selectors,
-                                direct_sell_selectors=direct_sell_selectors,
-                                payload=payload,
-                            )
-                            if fallback["offer"] is not None:
-                                return fallback["offer"], fallback["url"], payload
-                            blocker_hits.extend(fallback["blockers"])
-                            continue
-
-                        await page.wait_for_timeout(1000)
-
-                        clicked_result = await self._click_first(
-                            page,
-                            suggestion_selectors,
-                            timeout_ms=2500,
-                        )
-                        if not clicked_result:
-                            name_tokens = [token for token in re.split(r"\W+", normalized_name) if len(token) >= 3][:4]
-                            clicked_result = await self._click_first_semantic(
-                                page,
-                                keywords=[*name_tokens, "sell", "camera", "lens"],
-                                timeout_ms=2500,
-                                selectors=["a", "button", "[role='option']", "li", "div[role='option']"],
-                            )
-                            payload["adaptive_fallbacks"]["result_semantic"] = clicked_result
-                        else:
-                            payload["adaptive_fallbacks"]["result_semantic"] = False
-
-                        if not clicked_result:
-                            await page.keyboard.press("Enter")
-                        await page.wait_for_timeout(2400)
-                        await page.wait_for_load_state("domcontentloaded")
-
-                        condition_selected = await self._click_first(
-                            page,
-                            condition_selectors,
-                            timeout_ms=5000,
-                        )
-                        if not condition_selected:
-                            condition_selected = await self._click_first_semantic(
-                                page,
-                                keywords=["ottimo", "excellent", "grade a", "come nuovo"],
-                                timeout_ms=2400,
-                            )
-                            payload["adaptive_fallbacks"]["condition_semantic"] = condition_selected
-                        else:
-                            payload["adaptive_fallbacks"]["condition_semantic"] = False
-                        await page.wait_for_timeout(1400)
-
-                        price, price_text = await self._extract_price(page, payload=payload)
-                        ui_probe = None
-                        if price is None:
-                            ui_probe = await self._attach_ui_probe(
-                                payload=payload,
-                                page=page,
-                                site=self.platform_name,
-                                stage="price_missing",
-                                expected_keywords=["mpb", "offer", "estimate", "€"],
-                            )
-                            fallback = await self._direct_search_fallback(
-                                page=page,
-                                attempt=attempt,
-                                normalized_name=normalized_name,
-                                condition_selectors=condition_selectors,
-                                direct_sell_selectors=direct_sell_selectors,
-                                payload=payload,
-                            )
-                            if fallback["offer"] is not None:
-                                return fallback["offer"], fallback["url"], payload
-                            blocker_hits.extend(fallback["blockers"])
-                        payload["attempts"].append(
-                            {
-                                "attempt": attempt,
-                                "stage": "valuation",
-                                "status": "ok" if price is not None else "price-missing",
-                                "condition_selected": condition_selected,
-                                "semantic_search": semantic_search,
-                                "result_opened": clicked_result,
-                                "url": page.url,
-                                "price_text": price_text,
-                                "ui_drift": ui_probe.get("drift_suspected") if ui_probe else False,
-                            }
-                        )
-                        if price is not None:
-                            _clear_mpb_temporary_block()
-                            payload["price_text"] = price_text
-                            payload["condition_selected"] = condition_selected
-                            payload["price_source"] = "sell_flow"
-                            return price, page.url, payload
-                    finally:
-                        await context.close()
+                            if price is not None and match.get("ok"):
+                                _clear_mpb_temporary_block()
+                                payload["query"] = query
+                                payload["query_index"] = query_index
+                                payload["price_text"] = price_text
+                                payload["condition_selected"] = condition_selected
+                                payload["price_source"] = "sell_flow"
+                                return price, page.url, payload
+                        finally:
+                            await context.close()
             finally:
                 await browser.close()
                 _remove_file_if_exists(storage_state_path)
@@ -479,12 +787,14 @@ class MPBValuator(BaseValuator):
         *,
         page: Page,
         attempt: int,
+        query: str,
+        query_index: int,
         normalized_name: str,
         condition_selectors: list[str],
         direct_sell_selectors: list[str],
         payload: dict[str, Any],
     ) -> dict[str, Any]:
-        search_url = f"https://www.mpb.com/it-it/cerca?q={quote_plus(normalized_name)}"
+        search_url = f"https://www.mpb.com/it-it/cerca?q={quote_plus(query)}"
         payload["adaptive_fallbacks"]["direct_search"] = True
         try:
             await page.goto(search_url, wait_until="domcontentloaded")
@@ -498,6 +808,8 @@ class MPBValuator(BaseValuator):
             payload["attempts"].append(
                 {
                     "attempt": attempt,
+                    "query_index": query_index,
+                    "query": query,
                     "stage": "direct_search",
                     "status": "blocked",
                     "url": page.url,
@@ -508,7 +820,7 @@ class MPBValuator(BaseValuator):
 
         opened_sell = await self._click_first(page, direct_sell_selectors, timeout_ms=2500)
         if not opened_sell:
-            name_tokens = [token for token in re.split(r"\W+", normalized_name) if len(token) >= 3][:4]
+            name_tokens = [token for token in re.split(r"\W+", query) if len(token) >= 3][:4]
             opened_sell = await self._click_first_semantic(
                 page,
                 keywords=[*name_tokens, "vendi", "sell", "trade"],
@@ -539,24 +851,187 @@ class MPBValuator(BaseValuator):
             payload["adaptive_fallbacks"]["condition_semantic_direct"] = False
 
         await page.wait_for_timeout(1100)
+        match_text = await self._collect_match_text(page)
+        match = _assess_mpb_match(
+            normalized_name=normalized_name,
+            candidate_text=match_text,
+            source_url=page.url,
+        )
+        payload["match_quality"] = match
         price, price_text = await self._extract_price(page, payload=payload)
         payload["attempts"].append(
             {
                 "attempt": attempt,
+                "query_index": query_index,
+                "query": query,
                 "stage": "direct_search",
-                "status": "ok" if price is not None else "price-missing",
+                "status": (
+                    "ok"
+                    if price is not None and match.get("ok")
+                    else ("low-confidence-match" if price is not None else "price-missing")
+                ),
                 "url": page.url,
                 "opened_sell": opened_sell,
                 "condition_selected": condition_selected,
                 "price_text": price_text,
+                "match_quality": match,
             }
         )
-        if price is not None:
+        if price is not None and match.get("ok"):
             payload["price_text"] = price_text
             payload["condition_selected"] = condition_selected
             payload["price_source"] = "direct_search"
+            payload["query"] = query
+            payload["query_index"] = query_index
             return {"offer": price, "url": page.url, "blockers": []}
-        return {"offer": None, "url": None, "blockers": []}
+        return await self._deep_link_fallback(
+            page=page,
+            attempt=attempt,
+            query=query,
+            query_index=query_index,
+            normalized_name=normalized_name,
+            condition_selectors=condition_selectors,
+            payload=payload,
+        )
+
+    async def _deep_link_fallback(
+        self,
+        *,
+        page: Page,
+        attempt: int,
+        query: str,
+        query_index: int,
+        normalized_name: str,
+        condition_selectors: list[str],
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        payload["adaptive_fallbacks"]["direct_sell_links"] = True
+        try:
+            html = await page.content()
+        except PlaywrightError:
+            return {"offer": None, "url": None, "blockers": []}
+
+        candidates = _extract_mpb_sell_link_candidates(
+            html=html,
+            base_url=page.url,
+            normalized_name=normalized_name,
+            limit=10,
+        )
+        payload["sell_link_candidates"] = [
+            {
+                "url": item["url"],
+                "text": item["text"],
+                "score": item["assessment"].get("score"),
+                "ok": item["assessment"].get("ok"),
+                "reason": item["assessment"].get("reason"),
+            }
+            for item in candidates[:6]
+        ]
+        if not candidates:
+            return {"offer": None, "url": None, "blockers": []}
+
+        link_limit = max(1, int(_env_or_default("MPB_DEEP_LINK_LIMIT", "4")))
+        blockers_acc: list[str] = []
+        for rank, candidate in enumerate(candidates[:link_limit], start=1):
+            candidate_url = str(candidate.get("url") or "").strip()
+            if not candidate_url:
+                continue
+            try:
+                await page.goto(candidate_url, wait_until="domcontentloaded")
+                await page.wait_for_timeout(900)
+                await self._accept_cookie_if_present(page)
+            except PlaywrightError:
+                continue
+
+            blockers = await self._detect_page_blockers(page)
+            if blockers:
+                blockers_acc.extend(blockers)
+                payload["attempts"].append(
+                    {
+                        "attempt": attempt,
+                        "query_index": query_index,
+                        "query": query,
+                        "stage": "direct_sell_link",
+                        "status": "blocked",
+                        "rank": rank,
+                        "url": page.url,
+                        "blockers": blockers,
+                    }
+                )
+                continue
+
+            condition_selected = await self._click_first(
+                page,
+                condition_selectors,
+                timeout_ms=3200,
+            )
+            if not condition_selected:
+                condition_selected = await self._click_first_semantic(
+                    page,
+                    keywords=["ottimo", "excellent", "grade a", "come nuovo"],
+                    timeout_ms=1800,
+                )
+            await page.wait_for_timeout(1000)
+
+            match_text = await self._collect_match_text(page)
+            match = _assess_mpb_match(
+                normalized_name=normalized_name,
+                candidate_text=match_text,
+                source_url=page.url,
+            )
+            price, price_text = await self._extract_price(page, payload=payload)
+            payload["attempts"].append(
+                {
+                    "attempt": attempt,
+                    "query_index": query_index,
+                    "query": query,
+                    "stage": "direct_sell_link",
+                    "status": (
+                        "ok"
+                        if price is not None and match.get("ok")
+                        else ("low-confidence-match" if price is not None else "price-missing")
+                    ),
+                    "rank": rank,
+                    "url": page.url,
+                    "condition_selected": condition_selected,
+                    "price_text": price_text,
+                    "match_quality": match,
+                }
+            )
+            if price is None or not match.get("ok"):
+                continue
+            payload["query"] = query
+            payload["query_index"] = query_index
+            payload["match_quality"] = match
+            payload["price_text"] = price_text
+            payload["condition_selected"] = condition_selected
+            payload["price_source"] = "direct_sell_link"
+            return {"offer": price, "url": page.url, "blockers": blockers_acc}
+
+        return {"offer": None, "url": None, "blockers": blockers_acc}
+
+    async def _collect_match_text(self, page: Page) -> str:
+        chunks: list[str] = []
+        try:
+            chunks.append(await page.title())
+        except PlaywrightError:
+            pass
+        for selector in ("h1", "h2", "[data-testid*='title' i]", "main"):
+            try:
+                locator = page.locator(selector)
+                count = min(await locator.count(), 3)
+            except PlaywrightError:
+                continue
+            for index in range(count):
+                try:
+                    text = await locator.nth(index).inner_text(timeout=900)
+                except PlaywrightError:
+                    continue
+                cleaned = re.sub(r"\s+", " ", text).strip()
+                if cleaned:
+                    chunks.append(cleaned[:280])
+        chunks.append(unquote(urlparse(page.url).path))
+        return " ".join(chunks)
 
     async def _wait_for_search_input(self, page: Page, selectors: list[str], timeout_ms: int = 10000) -> str | None:
         elapsed = 0
