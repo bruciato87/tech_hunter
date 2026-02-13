@@ -626,6 +626,7 @@ async def test_run_status_command_includes_emojis(monkeypatch: pytest.MonkeyPatc
     assert "🤖 Tech_Sniper_IT status:" in text
     assert "⚙️ worker: online" in text
     assert "🎯 threshold spread netto: 40.00 EUR" in text
+    assert "🧭 strategy profile: balanced" in text
     assert "🧠 ai: gemini=on, openrouter=off" in text
     assert "🗄️ supabase: on" in text
     assert "💬 telegram alerts default chat: on" in text

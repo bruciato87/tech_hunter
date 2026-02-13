@@ -120,32 +120,24 @@ def main() -> int:
         float(_env_or_default("MIN_SPREAD_EUR", "40"))
     except ValueError:
         errors.append("MIN_SPREAD_EUR must be numeric.")
-    try:
-        operating_cost = float(_env_or_default("SPREAD_OPERATING_COST_EUR", "0"))
-        if operating_cost < 0:
-            errors.append("SPREAD_OPERATING_COST_EUR must be >= 0.")
-    except ValueError:
-        errors.append("SPREAD_OPERATING_COST_EUR must be numeric.")
-
-    for env_name, default in (
-        ("RISK_BUFFER_ACCEPTABLE_EUR", "26"),
-        ("RISK_BUFFER_GOOD_EUR", "14"),
-        ("RISK_BUFFER_VERY_GOOD_EUR", "9"),
-        ("RISK_BUFFER_LIKE_NEW_EUR", "5"),
-        ("RISK_BUFFER_UNKNOWN_EUR", "0"),
-    ):
-        try:
-            value = float(_env_or_default(env_name, default))
-            if value < 0:
-                errors.append(f"{env_name} must be >= 0.")
-        except ValueError:
-            errors.append(f"{env_name} must be numeric.")
-    try:
-        factor = float(_env_or_default("RISK_BUFFER_PACKAGING_ONLY_FACTOR", "0.45"))
-        if factor <= 0 or factor > 1:
-            errors.append("RISK_BUFFER_PACKAGING_ONLY_FACTOR must be > 0 and <= 1.")
-    except ValueError:
-        errors.append("RISK_BUFFER_PACKAGING_ONLY_FACTOR must be numeric.")
+    strategy_profile = _env_or_default("STRATEGY_PROFILE", "balanced").strip().lower()
+    if strategy_profile not in {"conservative", "balanced", "aggressive"}:
+        errors.append("STRATEGY_PROFILE must be one of: conservative, balanced, aggressive.")
+    legacy_strategy_envs = (
+        "SPREAD_OPERATING_COST_EUR",
+        "RISK_BUFFER_ACCEPTABLE_EUR",
+        "RISK_BUFFER_GOOD_EUR",
+        "RISK_BUFFER_VERY_GOOD_EUR",
+        "RISK_BUFFER_LIKE_NEW_EUR",
+        "RISK_BUFFER_UNKNOWN_EUR",
+        "RISK_BUFFER_PACKAGING_ONLY_FACTOR",
+    )
+    legacy_strategy_set = [name for name in legacy_strategy_envs if (os.getenv(name) or "").strip()]
+    if legacy_strategy_set:
+        warnings.append(
+            "Legacy spread/risk vars are ignored when STRATEGY_PROFILE is used: "
+            + ", ".join(legacy_strategy_set)
+        )
 
     try:
         int(_env_or_default("MAX_PARALLEL_PRODUCTS", "3"))

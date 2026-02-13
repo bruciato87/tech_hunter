@@ -127,8 +127,33 @@ async def test_manager_handles_all_invalid_offers() -> None:
 
 @pytest.mark.asyncio
 async def test_manager_applies_condition_risk_and_operating_cost(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("RISK_BUFFER_ACCEPTABLE_EUR", "20")
-    monkeypatch.setenv("SPREAD_OPERATING_COST_EUR", "5")
+    monkeypatch.setenv("STRATEGY_PROFILE", "conservative")
+    manager = ManagerUnderTest(
+        valuators=[StaticValuator("rebuy", 640.0)],
+        ai_balancer=FakeBalancer(gemini_keys=[], openrouter_keys=[]),
+        min_spread_eur=95.0,
+    )
+    product = AmazonProduct(
+        title="Apple iPhone 14 Pro 128GB",
+        price_eur=500.0,
+        category=ProductCategory.APPLE_PHONE,
+        amazon_condition="acceptable",
+        amazon_condition_confidence=1.0,
+    )
+
+    decision = await manager.evaluate_product(product)
+
+    assert decision.spread_gross_eur == 140.0
+    assert decision.operating_cost_eur == 8.0
+    assert decision.risk_buffer_eur == 34.0
+    assert decision.spread_eur == 98.0
+    assert decision.should_notify is True
+    assert decision.strategy_profile == "conservative"
+
+
+@pytest.mark.asyncio
+async def test_manager_invalid_profile_falls_back_to_balanced(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("STRATEGY_PROFILE", "invalid-profile")
     manager = ManagerUnderTest(
         valuators=[StaticValuator("rebuy", 640.0)],
         ai_balancer=FakeBalancer(gemini_keys=[], openrouter_keys=[]),
@@ -144,11 +169,10 @@ async def test_manager_applies_condition_risk_and_operating_cost(monkeypatch: py
 
     decision = await manager.evaluate_product(product)
 
-    assert decision.spread_gross_eur == 140.0
-    assert decision.operating_cost_eur == 5.0
-    assert decision.risk_buffer_eur == 20.0
-    assert decision.spread_eur == 115.0
-    assert decision.should_notify is True
+    assert decision.operating_cost_eur == 0.0
+    assert decision.risk_buffer_eur == 26.0
+    assert decision.spread_eur == 114.0
+    assert decision.strategy_profile == "balanced"
 
 
 def test_manager_build_valuators_routes_new_categories() -> None:

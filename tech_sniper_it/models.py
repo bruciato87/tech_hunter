@@ -156,6 +156,7 @@ class ArbitrageDecision:
     spread_gross_eur: float | None = None
     operating_cost_eur: float = 0.0
     risk_buffer_eur: float = 0.0
+    strategy_profile: str | None = None
     ai_provider: str | None = None
     ai_model: str | None = None
     ai_mode: str | None = None

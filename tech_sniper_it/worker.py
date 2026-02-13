@@ -14,7 +14,7 @@ from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 from telegram import Bot
 
-from tech_sniper_it.manager import build_default_manager
+from tech_sniper_it.manager import build_default_manager, get_strategy_profile_snapshot
 from tech_sniper_it.models import AmazonProduct, ProductCategory, to_legacy_storage_category
 from tech_sniper_it.sources import apply_cart_net_pricing, fetch_amazon_warehouse_products
 from tech_sniper_it.utils import infer_amazon_warehouse_condition
@@ -1700,6 +1700,7 @@ async def _save_non_profitable_decisions(manager, decisions: list) -> int:  # no
 
 
 def _format_scan_summary(decisions: list, threshold: float) -> str:
+    strategy = get_strategy_profile_snapshot()
     profitable = [item for item in decisions if item.should_notify and item.spread_eur is not None]
     best_spread = max((item.spread_eur for item in decisions if item.spread_eur is not None), default=None)
     gemini_count, openrouter_count, heuristic_count = _ai_usage_stats(decisions)
@@ -1711,6 +1712,7 @@ def _format_scan_summary(decisions: list, threshold: float) -> str:
         "━━━━━━━━━━━━━━━━━━━━",
         "🔎 Scan completata",
         "💡 Formula spread netto: offerta reseller - prezzo Amazon - costi operativi - buffer rischio",
+        f"🧭 Profilo strategia: {strategy.get('profile', 'balanced')}",
         f"📦 Prodotti analizzati: {len(decisions)}",
         f"🎯 Soglia spread: {threshold:.2f} EUR",
         f"✅ Opportunita sopra soglia: {len(profitable)}",
@@ -1767,7 +1769,13 @@ def _format_scan_summary(decisions: list, threshold: float) -> str:
 
 async def _run_scan_command(payload: dict[str, Any]) -> int:
     manager = build_default_manager()
+    strategy = get_strategy_profile_snapshot()
     print("[scan] Starting worker scan command.")
+    print(
+        "[scan] Strategy profile -> "
+        f"profile={strategy.get('profile')} operating_cost={strategy.get('operating_cost_eur')} "
+        f"packaging_factor={strategy.get('packaging_only_factor')}"
+    )
     strategy_getter = getattr(getattr(manager, "ai_balancer", None), "get_strategy_snapshot", None)
     if callable(strategy_getter):
         try:
@@ -1971,6 +1979,7 @@ async def _run_scan_command(payload: dict[str, Any]) -> int:
 
 async def _run_status_command(payload: dict[str, Any]) -> int:
     manager = build_default_manager()
+    strategy = get_strategy_profile_snapshot()
     chat_id = _telegram_target_chat(payload)
     gemini_present = bool(os.getenv("GEMINI_API_KEYS", "").strip())
     openrouter_present = bool(os.getenv("OPENROUTER_API_KEYS", "").strip())
@@ -1979,6 +1988,7 @@ async def _run_status_command(payload: dict[str, Any]) -> int:
         "🤖 Tech_Sniper_IT status:",
         "⚙️ worker: online",
         f"🎯 threshold spread netto: {manager.min_spread_eur:.2f} EUR",
+        f"🧭 strategy profile: {strategy.get('profile', 'balanced')}",
         f"🧠 ai: gemini={'on' if gemini_present else 'off'}, openrouter={'on' if openrouter_present else 'off'}",
         f"🗄️ supabase: {'on' if manager.storage else 'off'}",
         f"💬 telegram alerts default chat: {'on' if manager.notifier else 'off'}",

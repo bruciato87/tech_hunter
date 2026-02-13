@@ -331,7 +331,7 @@ def test_validate_env_fails_on_invalid_cart_pricing_allow_delta(tmp_path: Path) 
     assert "AMAZON_WAREHOUSE_CART_PRICING_ALLOW_DELTA must be boolean." in result.stdout
 
 
-def test_validate_env_fails_on_negative_spread_operating_cost(tmp_path: Path) -> None:
+def test_validate_env_fails_on_invalid_strategy_profile(tmp_path: Path) -> None:
     result = _run_validate_env(
         tmp_path,
         {
@@ -339,14 +339,14 @@ def test_validate_env_fails_on_negative_spread_operating_cost(tmp_path: Path) ->
             "MIN_SPREAD_EUR": "40",
             "MAX_PARALLEL_PRODUCTS": "2",
             "PLAYWRIGHT_NAV_TIMEOUT_MS": "45000",
-            "SPREAD_OPERATING_COST_EUR": "-1",
+            "STRATEGY_PROFILE": "invalid",
         },
     )
     assert result.returncode == 1
-    assert "SPREAD_OPERATING_COST_EUR must be >= 0." in result.stdout
+    assert "STRATEGY_PROFILE must be one of: conservative, balanced, aggressive." in result.stdout
 
 
-def test_validate_env_fails_on_invalid_risk_buffer_factor(tmp_path: Path) -> None:
+def test_validate_env_warns_on_legacy_strategy_vars(tmp_path: Path) -> None:
     result = _run_validate_env(
         tmp_path,
         {
@@ -354,8 +354,9 @@ def test_validate_env_fails_on_invalid_risk_buffer_factor(tmp_path: Path) -> Non
             "MIN_SPREAD_EUR": "40",
             "MAX_PARALLEL_PRODUCTS": "2",
             "PLAYWRIGHT_NAV_TIMEOUT_MS": "45000",
-            "RISK_BUFFER_PACKAGING_ONLY_FACTOR": "1.5",
+            "SPREAD_OPERATING_COST_EUR": "2",
+            "RISK_BUFFER_ACCEPTABLE_EUR": "18",
         },
     )
-    assert result.returncode == 1
-    assert "RISK_BUFFER_PACKAGING_ONLY_FACTOR must be > 0 and <= 1." in result.stdout
+    assert result.returncode == 0
+    assert "Legacy spread/risk vars are ignored when STRATEGY_PROFILE is used" in result.stdout

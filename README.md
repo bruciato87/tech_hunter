@@ -16,6 +16,8 @@ Serverless-friendly arbitrage worker for Amazon Warehouse IT -> recommerce valua
   - Rebuy: `Come nuovo`
 - Net spread formula:
   - `spread_net = best_offer - amazon_price - operating_cost - risk_buffer(condition)`
+- Strategy profile:
+  - `STRATEGY_PROFILE=conservative|balanced|aggressive` (risk/cost parameters come from internal profile defaults)
 - If `spread_net > MIN_SPREAD_EUR` (default `40`) -> save to Supabase + Telegram notification.
 
 ## Quick Start
@@ -65,13 +67,7 @@ python -m tech_sniper_it.worker
 - `OPENROUTER_MODEL_NOT_FOUND_COOLDOWN_SECONDS` (default: `86400`)
 - `OPENROUTER_MODEL_TRANSIENT_COOLDOWN_SECONDS` (default: `120`)
 - `MIN_SPREAD_EUR` (default: `40`)
-- `SPREAD_OPERATING_COST_EUR` (default: `0`, flat cost deducted from spread before threshold check)
-- `RISK_BUFFER_ACCEPTABLE_EUR` (default: `26`)
-- `RISK_BUFFER_GOOD_EUR` (default: `14`)
-- `RISK_BUFFER_VERY_GOOD_EUR` (default: `9`)
-- `RISK_BUFFER_LIKE_NEW_EUR` (default: `5`)
-- `RISK_BUFFER_UNKNOWN_EUR` (default: `0`)
-- `RISK_BUFFER_PACKAGING_ONLY_FACTOR` (default: `0.45`, reduces risk buffer when condition suggests packaging-only defects)
+- `STRATEGY_PROFILE` (default: `balanced`, one of `conservative|balanced|aggressive`; sets operating cost + risk buffers internally)
 - `MAX_PARALLEL_PRODUCTS` (default: `3`)
 - `SCAN_TARGET_PRODUCTS` (default: `12`)
 - `SCAN_CANDIDATE_MULTIPLIER` (default: `4`)
