@@ -162,7 +162,7 @@ def _classify_openrouter_error(exc: Exception) -> tuple[str, int | None]:
 
 
 class SmartAIBalancer:
-    """Rotates Gemini free keys first, then falls back to OpenRouter keys."""
+    """Uses OpenRouter free-tier model routing first, then heuristic fallback."""
 
     def __init__(
         self,
@@ -179,7 +179,8 @@ class SmartAIBalancer:
         openrouter_transient_cooldown_seconds: int | None = None,
         timeout_seconds: float = 25.0,
     ) -> None:
-        self.gemini_keys = list(gemini_keys or _split_csv(os.getenv("GEMINI_API_KEYS")))
+        # Gemini is intentionally disabled in runtime routing.
+        self.gemini_keys = []
         self.openrouter_keys = list(openrouter_keys or _split_csv(os.getenv("OPENROUTER_API_KEYS")))
         self.gemini_model = gemini_model or _env_or_default("GEMINI_MODEL", "gemini-2.0-flash")
         self.openrouter_model = openrouter_model or _env_or_default("OPENROUTER_MODEL", "openrouter/auto")
@@ -221,7 +222,7 @@ class SmartAIBalancer:
             "OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1/chat/completions"
         )
         self.timeout = timeout_seconds
-        self._gemini_cycle = itertools.cycle(self.gemini_keys) if self.gemini_keys else None
+        self._gemini_cycle = None
         self._openrouter_cycle = itertools.cycle(self.openrouter_keys) if self.openrouter_keys else None
         self._openrouter_model_stats: dict[str, dict[str, Any]] = {
             model: {
@@ -253,7 +254,6 @@ class SmartAIBalancer:
         print(
             "[ai] normalize request | "
             f"title='{_short_title(cache_key)}' | "
-            f"gemini_keys={len(self.gemini_keys)} model={self.gemini_model} | "
             f"openrouter_keys={len(self.openrouter_keys)} model={self.openrouter_model}"
         )
         cached = self._cache.get(cache_key)
@@ -276,43 +276,6 @@ class SmartAIBalancer:
             "Rimuovi colore, aggettivi marketing, stato e testo promozionale. "
             "Rispondi SOLO con il nome pulito."
         )
-
-        if self._gemini_cycle:
-            for attempt in range(1, len(self.gemini_keys) + 1):
-                api_key = next(self._gemini_cycle)
-                print(
-                    "[ai] attempt | "
-                    f"provider=gemini model={self.gemini_model} "
-                    f"attempt={attempt}/{len(self.gemini_keys)} key={_mask_secret(api_key)}"
-                )
-                try:
-                    response = await self._call_gemini(api_key, prompt, title)
-                    cleaned = self._sanitize_result(response)
-                    if cleaned:
-                        usage = {
-                            "provider": "gemini",
-                            "model": self.gemini_model,
-                            "mode": "live",
-                            "ai_used": True,
-                        }
-                        self._cache[cache_key] = (cleaned, usage)
-                        self._last_usage = usage
-                        print(
-                            "[ai] selected | "
-                            f"provider=gemini model={self.gemini_model} normalized='{cleaned}'"
-                        )
-                        return cleaned, usage
-                    print(
-                        "[ai] empty response | "
-                        f"provider=gemini model={self.gemini_model} attempt={attempt}"
-                    )
-                except Exception as exc:
-                    print(
-                        "[ai] failed | "
-                        f"provider=gemini model={self.gemini_model} attempt={attempt} "
-                        f"error={_short_error(exc)}"
-                    )
-                    continue
 
         if self._openrouter_cycle:
             for attempt in range(1, len(self.openrouter_keys) + 1):
@@ -431,44 +394,19 @@ class SmartAIBalancer:
             for model, state in self._openrouter_model_stats.items()
         }
         return {
-            "gemini_keys": len(self.gemini_keys),
-            "gemini_model": self.gemini_model,
+            "gemini_enabled": False,
             "openrouter_keys": len(self.openrouter_keys),
             "openrouter_model_requested": self.openrouter_model,
             "openrouter_free_models": list(self.openrouter_free_models),
             "openrouter_model_pool": list(self.openrouter_model_pool),
             "openrouter_max_models_per_request": self.openrouter_max_models_per_request,
             "openrouter_selection_mode": "power-first-free-with-availability",
-            "order": "gemini->openrouter(power-first-free)->heuristic",
+            "order": "openrouter(power-first-free)->heuristic",
             "openrouter_stats": stats_snapshot,
         }
 
     async def _call_gemini(self, api_key: str, prompt: str, title: str) -> str:
-        url = (
-            "https://generativelanguage.googleapis.com/v1beta/models/"
-            f"{self.gemini_model}:generateContent?key={api_key}"
-        )
-        payload = {
-            "contents": [
-                {
-                    "parts": [
-                        {"text": f"{prompt}\n\nTitolo: {title}"},
-                    ]
-                }
-            ],
-            "generationConfig": {"temperature": 0.1, "maxOutputTokens": 64},
-        }
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            response = await client.post(url, json=payload)
-            response.raise_for_status()
-            data = response.json()
-        candidates = data.get("candidates", [])
-        if not candidates:
-            return ""
-        parts = candidates[0].get("content", {}).get("parts", [])
-        if not parts:
-            return ""
-        return parts[0].get("text", "").strip()
+        raise RuntimeError("Gemini routing disabled; use OpenRouter.")
 
     async def _call_openrouter(
         self,

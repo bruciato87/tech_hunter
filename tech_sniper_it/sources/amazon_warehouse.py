@@ -668,6 +668,10 @@ def _cart_pricing_allow_delta_non_empty() -> bool:
     return _is_truthy_env("AMAZON_WAREHOUSE_CART_PRICING_ALLOW_DELTA", "true")
 
 
+def _cart_pricing_force_empty_after_host() -> bool:
+    return _is_truthy_env("AMAZON_WAREHOUSE_CART_PRICING_FORCE_EMPTY_AFTER_HOST", "true")
+
+
 def _retry_delay_for_attempt(base_ms: int, attempt: int) -> int:
     multiplier = max(1, 2 ** max(0, attempt - 1))
     jitter = random.randint(0, 250)
@@ -1215,10 +1219,15 @@ async def _cleanup_cart_asins(page, *, host: str, asins: list[str]) -> dict[str,
             deduped.append(normalized)
 
     for asin in deduped:
-        try:
-            ok = await _remove_asin_from_cart(page, host=host, asin=asin)
-        except Exception:
-            ok = False
+        ok = False
+        for attempt in range(1, 4):
+            try:
+                ok = await _remove_asin_from_cart(page, host=host, asin=asin)
+            except Exception:
+                ok = False
+            if ok:
+                break
+            await page.wait_for_timeout(250 * attempt)
         if ok:
             removed_asins.append(asin)
         else:
@@ -1228,6 +1237,54 @@ async def _cleanup_cart_asins(page, *, host: str, asins: list[str]) -> dict[str,
         "removed": len(failed_asins) == 0,
         "removed_asins": removed_asins,
         "failed_asins": failed_asins,
+    }
+
+
+async def _force_empty_cart(page, *, host: str, max_rounds: int = 5) -> dict[str, Any]:  # noqa: ANN001
+    removed_total: list[str] = []
+    failed_total: list[str] = []
+    final_summary: dict[str, Any] | None = None
+
+    for _ in range(max_rounds):
+        try:
+            summary = await _read_cart_summary(page, host=host, asin=None)
+        except Exception:
+            break
+        final_summary = summary
+        current_asins = [str(item).strip().upper() for item in (summary.get("cart_asins") or []) if str(item).strip()]
+        if bool(summary.get("is_empty")) and not current_asins:
+            break
+        if not current_asins:
+            break
+        cleanup = await _cleanup_cart_asins(page, host=host, asins=current_asins)
+        removed_round = [str(item).strip().upper() for item in (cleanup.get("removed_asins") or []) if str(item).strip()]
+        failed_round = [str(item).strip().upper() for item in (cleanup.get("failed_asins") or []) if str(item).strip()]
+        for asin in removed_round:
+            if asin not in removed_total:
+                removed_total.append(asin)
+        for asin in failed_round:
+            if asin not in failed_total:
+                failed_total.append(asin)
+        if not removed_round:
+            break
+
+    if final_summary is None or not bool(final_summary.get("is_empty")):
+        try:
+            final_summary = await _read_cart_summary(page, host=host, asin=None)
+        except Exception:
+            final_summary = final_summary or {}
+
+    remaining_asins = [
+        str(item).strip().upper()
+        for item in ((final_summary or {}).get("cart_asins") or [])
+        if str(item).strip()
+    ]
+    empty = bool((final_summary or {}).get("is_empty")) and not remaining_asins
+    return {
+        "empty": empty,
+        "removed_asins": removed_total,
+        "failed_asins": failed_total,
+        "remaining_asins": remaining_asins,
     }
 
 
@@ -1370,8 +1427,24 @@ async def _resolve_cart_net_price(
                     cart_empty_after = bool(final_summary.get("is_empty"))
                     result["cart_empty_after_cleanup"] = cart_empty_after
                     if not cart_empty_after:
-                        removed = False
-                        result["removed"] = False
+                        forced = await _force_empty_cart(page, host=host, max_rounds=4)
+                        result["forced_cleanup"] = forced
+                        cart_empty_after = bool(forced.get("empty"))
+                        result["cart_empty_after_cleanup"] = cart_empty_after
+                        if cart_empty_after:
+                            forced_removed = list(forced.get("removed_asins") or [])
+                            merged_removed = list(dict.fromkeys([*result["removed_asins"], *forced_removed]))
+                            result["removed_asins"] = merged_removed
+                            result["failed_remove_asins"] = [
+                                item
+                                for item in list(dict.fromkeys(result["failed_remove_asins"]))
+                                if item not in merged_removed
+                            ]
+                            removed = True
+                            result["removed"] = True
+                        else:
+                            removed = False
+                            result["removed"] = False
                 except Exception:
                     result["cart_empty_after_cleanup"] = None
             if not removed and result.get("reason") == "ok":
@@ -1498,6 +1571,22 @@ async def apply_cart_net_pricing(
                                 f"cleanup_asins={pricing.get('cleanup_asins') or []} "
                                 f"failed_remove_asins={pricing.get('failed_remove_asins') or []} "
                                 f"cart_empty_after_cleanup={pricing.get('cart_empty_after_cleanup')}"
+                            )
+
+                    if _cart_pricing_force_empty_after_host():
+                        try:
+                            final_cleanup = await _force_empty_cart(page, host=host, max_rounds=5)
+                            print(
+                                "[warehouse/cart] Host cleanup summary | "
+                                f"host={host} empty={final_cleanup.get('empty')} "
+                                f"removed_asins={final_cleanup.get('removed_asins') or []} "
+                                f"failed_asins={final_cleanup.get('failed_asins') or []} "
+                                f"remaining_asins={final_cleanup.get('remaining_asins') or []}"
+                            )
+                        except Exception as exc:
+                            print(
+                                "[warehouse/cart] Host cleanup error | "
+                                f"host={host} error={type(exc).__name__}: {exc}"
                             )
                 finally:
                     if context is not None:

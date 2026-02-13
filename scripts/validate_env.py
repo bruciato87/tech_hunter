@@ -125,10 +125,11 @@ def main() -> int:
     errors: list[str] = []
     warnings: list[str] = []
 
-    gemini_keys = _split_csv(os.getenv("GEMINI_API_KEYS"))
     openrouter_keys = _split_csv(os.getenv("OPENROUTER_API_KEYS"))
-    if not gemini_keys and not openrouter_keys:
-        errors.append("Set at least one AI provider key: GEMINI_API_KEYS or OPENROUTER_API_KEYS.")
+    if not openrouter_keys:
+        errors.append("Set OPENROUTER_API_KEYS (Gemini routing is disabled).")
+    if _split_csv(os.getenv("GEMINI_API_KEYS")):
+        warnings.append("GEMINI_API_KEYS is configured but ignored (Gemini routing disabled).")
 
     supabase_url = os.getenv("SUPABASE_URL")
     supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
@@ -216,6 +217,12 @@ def main() -> int:
         float(_env_or_default("SCAN_DYNAMIC_TREND_MIN_SCORE", "-35"))
     except ValueError:
         errors.append("SCAN_DYNAMIC_TREND_MIN_SCORE must be numeric.")
+    try:
+        refill_batch_multiplier = int(_env_or_default("SCAN_RESELLER_REFILL_BATCH_MULTIPLIER", "2"))
+        if refill_batch_multiplier < 1:
+            errors.append("SCAN_RESELLER_REFILL_BATCH_MULTIPLIER must be >= 1.")
+    except ValueError:
+        errors.append("SCAN_RESELLER_REFILL_BATCH_MULTIPLIER must be integer.")
 
     try:
         exclude_min_keep = int(_env_or_default("EXCLUDE_MIN_KEEP", "4"))

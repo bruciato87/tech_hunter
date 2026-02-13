@@ -474,6 +474,7 @@ class RebuyValuator(BaseValuator):
                         expected_keywords=["rebuy", "vendi", "offerta", "€"],
                     )
                     raise RuntimeError("Rebuy price not found after adaptive fallbacks.")
+                payload["price_source"] = str(payload.get("price_source") or "dom")
                 return price, page.url, payload
             finally:
                 await context.close()

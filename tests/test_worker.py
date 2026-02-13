@@ -31,6 +31,7 @@ from tech_sniper_it.worker import (
     _save_non_profitable_decisions,
     _safe_error_details,
     _send_telegram_message,
+    _split_complete_quote_decisions,
     load_products,
     run_worker,
 )
@@ -179,6 +180,71 @@ def test_offer_log_payload_includes_ui_probe_summary() -> None:
     assert payload["ui_drift"] is True
     assert payload["ui_probe_count"] == 2
     assert payload["adaptive_fallbacks"] == {"search_semantic": True}
+
+
+def test_split_complete_quote_decisions_rejects_missing_required_platform_quotes() -> None:
+    product = AmazonProduct(
+        title="Apple iPhone 14 Pro 128GB",
+        price_eur=500.0,
+        category=ProductCategory.APPLE_PHONE,
+    )
+    complete = type(
+        "Decision",
+        (),
+        {
+            "product": product,
+            "offers": [
+                type(
+                    "Offer",
+                    (),
+                    {
+                        "platform": "trenddevice",
+                        "offer_eur": 620.0,
+                        "error": None,
+                        "source_url": "https://www.trendevice.com/vendi/valutazione/iphone-14-pro-128",
+                        "raw_payload": {"price_source": "dom", "quote_verification": {"ok": True}},
+                    },
+                )(),
+                type(
+                    "Offer",
+                    (),
+                    {
+                        "platform": "rebuy",
+                        "offer_eur": 590.0,
+                        "error": None,
+                        "source_url": "https://www.rebuy.it/comprare/apple-iphone-14-pro-128gb-nero/123",
+                        "raw_payload": {"price_source": "dom", "quote_verification": {"ok": True}},
+                    },
+                )(),
+            ],
+        },
+    )()
+    incomplete = type(
+        "Decision",
+        (),
+        {
+            "product": product,
+            "offers": [
+                type(
+                    "Offer",
+                    (),
+                    {
+                        "platform": "rebuy",
+                        "offer_eur": 590.0,
+                        "error": None,
+                        "source_url": "https://www.rebuy.it/comprare/apple-iphone-14-pro-128gb-nero/123",
+                        "raw_payload": {"price_source": "dom", "quote_verification": {"ok": True}},
+                    },
+                )()
+            ],
+        },
+    )()
+
+    accepted, rejected = _split_complete_quote_decisions([complete, incomplete])
+
+    assert len(accepted) == 1
+    assert len(rejected) == 1
+    assert rejected[0][1] == ["trenddevice"]
 
 
 def test_format_scan_summary_includes_ui_drift_counter() -> None:
@@ -475,12 +541,12 @@ def test_ai_usage_helpers() -> None:
     decision = type(
         "D",
         (),
-        {"ai_provider": "gemini", "ai_model": "gemini-2.0-flash", "ai_mode": "live"},
+        {"ai_provider": "openrouter", "ai_model": "perplexity/sonar", "ai_mode": "live"},
     )()
     label = _ai_usage_label(decision)
-    assert "gemini" in label
+    assert "openrouter" in label
     counts = _ai_usage_stats([decision, type("D2", (), {"ai_provider": "heuristic"})()])
-    assert counts == (1, 0, 1)
+    assert counts == (1, 1)
 
 
 def test_format_scan_summary() -> None:
@@ -614,7 +680,6 @@ async def test_run_status_command_includes_emojis(monkeypatch: pytest.MonkeyPatc
 
     monkeypatch.setattr("tech_sniper_it.worker.build_default_manager", lambda: DummyManager())
     monkeypatch.setattr("tech_sniper_it.worker._send_telegram_message", fake_send)
-    monkeypatch.setenv("GEMINI_API_KEYS", "k1")
     monkeypatch.delenv("OPENROUTER_API_KEYS", raising=False)
 
     exit_code = await _run_status_command({"chat_id": "123"})
@@ -627,7 +692,7 @@ async def test_run_status_command_includes_emojis(monkeypatch: pytest.MonkeyPatc
     assert "⚙️ worker: online" in text
     assert "🎯 threshold spread netto: 40.00 EUR" in text
     assert "🧭 strategy profile: balanced" in text
-    assert "🧠 ai: gemini=on, openrouter=off" in text
+    assert "🧠 ai: openrouter=off" in text
     assert "🗄️ supabase: on" in text
     assert "💬 telegram alerts default chat: on" in text
     assert "📌 last opportunity: none" in text

@@ -514,6 +514,52 @@ def _required_platforms_for_category(category: ProductCategory) -> tuple[str, ..
     return CATEGORY_REQUIRED_PLATFORMS.get(category, ("rebuy",))
 
 
+def _offer_has_real_reseller_quote(offer) -> bool:  # noqa: ANN001
+    if offer is None:
+        return False
+    if getattr(offer, "offer_eur", None) is None:
+        return False
+    if getattr(offer, "error", None):
+        return False
+    platform = str(getattr(offer, "platform", "") or "").strip().lower()
+    payload = getattr(offer, "raw_payload", {}) or {}
+    if not isinstance(payload, dict):
+        payload = {}
+    if platform in {"rebuy", "trenddevice", "mpb"}:
+        quote_verification = payload.get("quote_verification")
+        if isinstance(quote_verification, dict) and quote_verification.get("ok") is False:
+            return False
+        source_url = str(getattr(offer, "source_url", "") or "").strip()
+        price_source = str(payload.get("price_source", "") or "").strip()
+        if not source_url or not price_source:
+            return False
+    return True
+
+
+def _missing_required_reseller_quotes(decision) -> list[str]:  # noqa: ANN001
+    required = _required_platforms_for_category(getattr(decision.product, "category", ProductCategory.GENERAL_TECH))
+    valid_platforms: set[str] = set()
+    for offer in getattr(decision, "offers", []):
+        platform = str(getattr(offer, "platform", "") or "").strip().lower()
+        if not platform:
+            continue
+        if _offer_has_real_reseller_quote(offer):
+            valid_platforms.add(platform)
+    return [platform for platform in required if platform not in valid_platforms]
+
+
+def _split_complete_quote_decisions(decisions: list) -> tuple[list, list[tuple[Any, list[str]]]]:  # noqa: ANN001
+    accepted: list[Any] = []
+    rejected: list[tuple[Any, list[str]]] = []
+    for decision in decisions:
+        missing = _missing_required_reseller_quotes(decision)
+        if missing:
+            rejected.append((decision, missing))
+        else:
+            accepted.append(decision)
+    return accepted, rejected
+
+
 def _liquidity_bonus(title: str) -> float:
     lowered = (title or "").lower()
     score = 0.0
@@ -953,19 +999,16 @@ def _ai_usage_label(decision) -> str:  # noqa: ANN001
     return f"provider={provider} | model=rule-based | mode={mode}"
 
 
-def _ai_usage_stats(decisions: list) -> tuple[int, int, int]:  # noqa: ANN001
-    gemini = 0
+def _ai_usage_stats(decisions: list) -> tuple[int, int]:  # noqa: ANN001
     openrouter = 0
     heuristic = 0
     for decision in decisions:
         provider = str(getattr(decision, "ai_provider", "")).lower()
-        if provider == "gemini":
-            gemini += 1
-        elif provider == "openrouter":
+        if provider == "openrouter":
             openrouter += 1
         else:
             heuristic += 1
-    return gemini, openrouter, heuristic
+    return openrouter, heuristic
 
 
 def _ai_model_overview(decisions: list) -> str:  # noqa: ANN001
@@ -1703,8 +1746,8 @@ def _format_scan_summary(decisions: list, threshold: float) -> str:
     strategy = get_strategy_profile_snapshot()
     profitable = [item for item in decisions if item.should_notify and item.spread_eur is not None]
     best_spread = max((item.spread_eur for item in decisions if item.spread_eur is not None), default=None)
-    gemini_count, openrouter_count, heuristic_count = _ai_usage_stats(decisions)
-    ai_live_count = gemini_count + openrouter_count
+    openrouter_count, heuristic_count = _ai_usage_stats(decisions)
+    ai_live_count = openrouter_count
     ai_models = _ai_model_overview(decisions)
     ui_drift_count, ui_drift_total = _ui_drift_stats(decisions)
     lines = [
@@ -1714,7 +1757,7 @@ def _format_scan_summary(decisions: list, threshold: float) -> str:
         f"🧭 Profilo strategia: {strategy.get('profile', 'balanced')}",
         f"📦 Analizzati: {len(decisions)} | ✅ Over soglia: {len(profitable)} | 🗑️ Scartati: {len(decisions) - len(profitable)}",
         f"🎯 Soglia spread netto: {threshold:.2f} EUR",
-        f"🧠 AI usata: {ai_live_count}/{len(decisions)} | gemini={gemini_count} openrouter={openrouter_count} fallback={heuristic_count}",
+        f"🧠 AI usata: {ai_live_count}/{len(decisions)} | openrouter={openrouter_count} fallback={heuristic_count}",
         f"🧠 Modelli AI: {ai_models}",
         f"🧩 UI drift rilevati: {ui_drift_count}/{ui_drift_total}",
         f"🏁 Miglior spread trovato: {_format_signed_eur(best_spread)}",
@@ -1889,8 +1932,12 @@ async def _run_scan_command(payload: dict[str, Any]) -> int:
         for row in preview_rows:
             print(f"[scan]   {row}")
 
+    evaluation_products = products
+    overflow_products: list[AmazonProduct] = []
     if len(products) > scan_target_products:
         selected = _select_balanced_candidates(products, scan_target_products)
+        selected_markers = {id(item) for item in selected}
+        overflow_products = [item for item in products if id(item) not in selected_markers]
         selected_region_counts = _region_counts(selected)
         total_region_counts = _region_counts(products)
         print(
@@ -1898,29 +1945,21 @@ async def _run_scan_command(payload: dict[str, Any]) -> int:
             f"target={scan_target_products} budget={candidate_budget} selected={len(selected)} "
             f"total_after_filter={len(products)} total_regions={total_region_counts} selected_regions={selected_region_counts}"
         )
-        products = selected
+        evaluation_products = selected
 
-    if not products:
+    if not evaluation_products:
         message = "Nessun candidato disponibile dopo i filtri di esclusione storica."
         print(message)
         if payload.get("source") in {"telegram", "vercel_scan_api", "manual_debug"}:
             await _send_telegram_message(message, command_chat)
         return 0
 
-    cart_pricing_stats = await apply_cart_net_pricing(
-        products,
-        headless=headless,
-        nav_timeout_ms=nav_timeout_ms,
-    )
-    print(
-        "[scan] Cart net pricing stage | "
-        f"checked={cart_pricing_stats.get('checked', 0)} "
-        f"updated={cart_pricing_stats.get('updated', 0)} "
-        f"skipped={cart_pricing_stats.get('skipped', 0)}"
-    )
-
     max_parallel_products = int(_env_or_default("MAX_PARALLEL_PRODUCTS", "3"))
-    print(f"[scan] Loaded products: {len(products)} | max_parallel_products={max_parallel_products}")
+    print(f"[scan] Loaded products: {len(evaluation_products)} | max_parallel_products={max_parallel_products}")
+    enforce_complete_quotes = _is_truthy_env("SCAN_REQUIRE_COMPLETE_RESELLER_QUOTES", "true") and str(
+        payload.get("source", "")
+    ).lower() != "manual_debug"
+    refill_batch_multiplier = max(1, int(_env_or_default("SCAN_RESELLER_REFILL_BATCH_MULTIPLIER", "2")))
     send_individual_alerts = _is_truthy_env("SCAN_TELEGRAM_INDIVIDUAL_ALERTS", "false")
     original_notifier = getattr(manager, "notifier", None)
     notifier_disabled = False
@@ -1928,8 +1967,74 @@ async def _run_scan_command(payload: dict[str, Any]) -> int:
         print("[scan] Individual Telegram alerts disabled for scan; using consolidated report only.")
         manager.notifier = None
         notifier_disabled = True
+
+    async def _evaluate_batch(batch_products: list[AmazonProduct], *, stage_label: str) -> list[Any]:
+        if not batch_products:
+            return []
+        cart_pricing_stats = await apply_cart_net_pricing(
+            batch_products,
+            headless=headless,
+            nav_timeout_ms=nav_timeout_ms,
+        )
+        print(
+            "[scan] Cart net pricing stage | "
+            f"stage={stage_label} checked={cart_pricing_stats.get('checked', 0)} "
+            f"updated={cart_pricing_stats.get('updated', 0)} "
+            f"skipped={cart_pricing_stats.get('skipped', 0)}"
+        )
+        return await manager.evaluate_many(batch_products, max_parallel_products=max_parallel_products)
+
     try:
-        decisions = await manager.evaluate_many(products, max_parallel_products=max_parallel_products)
+        primary_decisions = await _evaluate_batch(evaluation_products, stage_label="primary")
+        if not enforce_complete_quotes:
+            decisions = primary_decisions
+        else:
+            decisions, rejected = _split_complete_quote_decisions(primary_decisions)
+            if rejected:
+                print(
+                    "[scan] Real quote coverage filter | "
+                    f"accepted={len(decisions)} rejected={len(rejected)} target={len(evaluation_products)}"
+                )
+                for decision, missing in rejected[:8]:
+                    print(
+                        "[scan] Incomplete reseller quote -> "
+                        f"title='{_safe_text(getattr(decision.product, 'title', ''), max_len=90)}' "
+                        f"missing={missing}"
+                    )
+                if len(rejected) > 8:
+                    print(f"[scan] Incomplete reseller quote -> ... and {len(rejected) - 8} more.")
+
+            target_complete = len(evaluation_products)
+            refill_round = 0
+            while len(decisions) < target_complete and overflow_products:
+                refill_round += 1
+                missing_slots = target_complete - len(decisions)
+                batch_size = min(
+                    len(overflow_products),
+                    max(missing_slots, missing_slots * refill_batch_multiplier),
+                )
+                refill_batch = overflow_products[:batch_size]
+                del overflow_products[:batch_size]
+                print(
+                    "[scan] Refill batch | "
+                    f"round={refill_round} size={len(refill_batch)} "
+                    f"missing_slots={missing_slots} remaining_overflow={len(overflow_products)}"
+                )
+                refill_decisions = await _evaluate_batch(refill_batch, stage_label=f"refill-{refill_round}")
+                accepted_refill, rejected_refill = _split_complete_quote_decisions(refill_decisions)
+                decisions.extend(accepted_refill)
+                if rejected_refill:
+                    print(
+                        "[scan] Refill coverage | "
+                        f"accepted={len(accepted_refill)} rejected={len(rejected_refill)}"
+                    )
+            if len(decisions) > target_complete:
+                decisions = decisions[:target_complete]
+            if len(decisions) < target_complete:
+                print(
+                    "[scan] Real quote coverage incomplete after refill | "
+                    f"collected={len(decisions)} target={target_complete}"
+                )
     finally:
         if notifier_disabled:
             manager.notifier = original_notifier
@@ -1985,7 +2090,6 @@ async def _run_status_command(payload: dict[str, Any]) -> int:
     manager = build_default_manager()
     strategy = get_strategy_profile_snapshot()
     chat_id = _telegram_target_chat(payload)
-    gemini_present = bool(os.getenv("GEMINI_API_KEYS", "").strip())
     openrouter_present = bool(os.getenv("OPENROUTER_API_KEYS", "").strip())
 
     lines = [
@@ -1993,7 +2097,7 @@ async def _run_status_command(payload: dict[str, Any]) -> int:
         "⚙️ worker: online",
         f"🎯 threshold spread netto: {manager.min_spread_eur:.2f} EUR",
         f"🧭 strategy profile: {strategy.get('profile', 'balanced')}",
-        f"🧠 ai: gemini={'on' if gemini_present else 'off'}, openrouter={'on' if openrouter_present else 'off'}",
+        f"🧠 ai: openrouter={'on' if openrouter_present else 'off'}",
         f"🗄️ supabase: {'on' if manager.storage else 'off'}",
         f"💬 telegram alerts default chat: {'on' if manager.notifier else 'off'}",
     ]

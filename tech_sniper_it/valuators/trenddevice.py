@@ -1485,6 +1485,7 @@ class TrendDeviceValuator(BaseValuator):
                         expected_keywords=["offerta", "valutazione", "ricevi", "€"],
                     )
                     raise RuntimeError(f"TrendDevice price not found after wizard ({reason})")
+                payload["price_source"] = str(payload.get("price_source") or "dom")
                 self._validate_match_or_raise(
                     product=product,
                     normalized_name=normalized_name,

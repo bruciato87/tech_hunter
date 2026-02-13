@@ -25,14 +25,14 @@ def _run_validate_env(tmp_path: Path, extra_env: dict[str, str]) -> subprocess.C
 def test_validate_env_fails_without_ai_keys(tmp_path: Path) -> None:
     result = _run_validate_env(tmp_path, {})
     assert result.returncode == 1
-    assert "Set at least one AI provider key" in result.stdout
+    assert "Set OPENROUTER_API_KEYS (Gemini routing is disabled)." in result.stdout
 
 
 def test_validate_env_passes_with_minimal_valid_config(tmp_path: Path) -> None:
     result = _run_validate_env(
         tmp_path,
         {
-            "GEMINI_API_KEYS": "k1",
+            "OPENROUTER_API_KEYS": "k1",
             "MIN_SPREAD_EUR": "80",
             "MAX_PARALLEL_PRODUCTS": "3",
             "PLAYWRIGHT_NAV_TIMEOUT_MS": "45000",
@@ -46,7 +46,7 @@ def test_validate_env_warns_on_invalid_selector_override(tmp_path: Path) -> None
     result = _run_validate_env(
         tmp_path,
         {
-            "GEMINI_API_KEYS": "k1",
+            "OPENROUTER_API_KEYS": "k1",
             "MIN_SPREAD_EUR": "40",
             "MAX_PARALLEL_PRODUCTS": "2",
             "PLAYWRIGHT_NAV_TIMEOUT_MS": "45000",
@@ -76,7 +76,7 @@ def test_validate_env_warns_on_invalid_trenddevice_storage_state(tmp_path: Path)
     result = _run_validate_env(
         tmp_path,
         {
-            "GEMINI_API_KEYS": "k1",
+            "OPENROUTER_API_KEYS": "k1",
             "MIN_SPREAD_EUR": "40",
             "MAX_PARALLEL_PRODUCTS": "2",
             "PLAYWRIGHT_NAV_TIMEOUT_MS": "45000",
@@ -92,7 +92,7 @@ def test_validate_env_warns_on_invalid_mpb_storage_state(tmp_path: Path) -> None
     result = _run_validate_env(
         tmp_path,
         {
-            "GEMINI_API_KEYS": "k1",
+            "OPENROUTER_API_KEYS": "k1",
             "MIN_SPREAD_EUR": "40",
             "MAX_PARALLEL_PRODUCTS": "2",
             "PLAYWRIGHT_NAV_TIMEOUT_MS": "45000",
@@ -108,7 +108,7 @@ def test_validate_env_warns_on_invalid_rebuy_storage_state(tmp_path: Path) -> No
     result = _run_validate_env(
         tmp_path,
         {
-            "GEMINI_API_KEYS": "k1",
+            "OPENROUTER_API_KEYS": "k1",
             "MIN_SPREAD_EUR": "40",
             "MAX_PARALLEL_PRODUCTS": "2",
             "PLAYWRIGHT_NAV_TIMEOUT_MS": "45000",
@@ -124,7 +124,7 @@ def test_validate_env_warns_on_invalid_amazon_marketplace_storage_state(tmp_path
     result = _run_validate_env(
         tmp_path,
         {
-            "GEMINI_API_KEYS": "k1",
+            "OPENROUTER_API_KEYS": "k1",
             "MIN_SPREAD_EUR": "40",
             "MAX_PARALLEL_PRODUCTS": "2",
             "PLAYWRIGHT_NAV_TIMEOUT_MS": "45000",
@@ -140,7 +140,7 @@ def test_validate_env_fails_on_invalid_mpb_max_attempts(tmp_path: Path) -> None:
     result = _run_validate_env(
         tmp_path,
         {
-            "GEMINI_API_KEYS": "k1",
+            "OPENROUTER_API_KEYS": "k1",
             "MIN_SPREAD_EUR": "40",
             "MAX_PARALLEL_PRODUCTS": "2",
             "PLAYWRIGHT_NAV_TIMEOUT_MS": "45000",
@@ -230,7 +230,7 @@ def test_validate_env_fails_on_invalid_cart_pricing_max_items(tmp_path: Path) ->
     result = _run_validate_env(
         tmp_path,
         {
-            "GEMINI_API_KEYS": "k1",
+            "OPENROUTER_API_KEYS": "k1",
             "MIN_SPREAD_EUR": "40",
             "MAX_PARALLEL_PRODUCTS": "2",
             "PLAYWRIGHT_NAV_TIMEOUT_MS": "45000",
@@ -245,7 +245,7 @@ def test_validate_env_warns_when_cart_pricing_enabled_without_storage_state(tmp_
     result = _run_validate_env(
         tmp_path,
         {
-            "GEMINI_API_KEYS": "k1",
+            "OPENROUTER_API_KEYS": "k1",
             "MIN_SPREAD_EUR": "40",
             "MAX_PARALLEL_PRODUCTS": "2",
             "PLAYWRIGHT_NAV_TIMEOUT_MS": "45000",
@@ -261,7 +261,7 @@ def test_validate_env_fails_on_invalid_non_profitable_save_parallel(tmp_path: Pa
     result = _run_validate_env(
         tmp_path,
         {
-            "GEMINI_API_KEYS": "k1",
+            "OPENROUTER_API_KEYS": "k1",
             "MIN_SPREAD_EUR": "40",
             "MAX_PARALLEL_PRODUCTS": "2",
             "PLAYWRIGHT_NAV_TIMEOUT_MS": "45000",
@@ -276,7 +276,7 @@ def test_validate_env_fails_on_invalid_supabase_write_attempts(tmp_path: Path) -
     result = _run_validate_env(
         tmp_path,
         {
-            "GEMINI_API_KEYS": "k1",
+            "OPENROUTER_API_KEYS": "k1",
             "MIN_SPREAD_EUR": "40",
             "MAX_PARALLEL_PRODUCTS": "2",
             "PLAYWRIGHT_NAV_TIMEOUT_MS": "45000",
@@ -291,7 +291,7 @@ def test_validate_env_fails_on_invalid_mpb_block_cooldown(tmp_path: Path) -> Non
     result = _run_validate_env(
         tmp_path,
         {
-            "GEMINI_API_KEYS": "k1",
+            "OPENROUTER_API_KEYS": "k1",
             "MIN_SPREAD_EUR": "40",
             "MAX_PARALLEL_PRODUCTS": "2",
             "PLAYWRIGHT_NAV_TIMEOUT_MS": "45000",
@@ -306,7 +306,7 @@ def test_validate_env_fails_on_invalid_valuator_parallel_limit(tmp_path: Path) -
     result = _run_validate_env(
         tmp_path,
         {
-            "GEMINI_API_KEYS": "k1",
+            "OPENROUTER_API_KEYS": "k1",
             "MIN_SPREAD_EUR": "40",
             "MAX_PARALLEL_PRODUCTS": "2",
             "PLAYWRIGHT_NAV_TIMEOUT_MS": "45000",
@@ -321,7 +321,7 @@ def test_validate_env_warns_when_mpb_requires_storage_state_without_value(tmp_pa
     result = _run_validate_env(
         tmp_path,
         {
-            "GEMINI_API_KEYS": "k1",
+            "OPENROUTER_API_KEYS": "k1",
             "MIN_SPREAD_EUR": "40",
             "MAX_PARALLEL_PRODUCTS": "2",
             "PLAYWRIGHT_NAV_TIMEOUT_MS": "45000",
@@ -336,7 +336,7 @@ def test_validate_env_fails_on_invalid_cart_pricing_allow_delta(tmp_path: Path) 
     result = _run_validate_env(
         tmp_path,
         {
-            "GEMINI_API_KEYS": "k1",
+            "OPENROUTER_API_KEYS": "k1",
             "MIN_SPREAD_EUR": "40",
             "MAX_PARALLEL_PRODUCTS": "2",
             "PLAYWRIGHT_NAV_TIMEOUT_MS": "45000",
@@ -351,7 +351,7 @@ def test_validate_env_fails_on_invalid_strategy_profile(tmp_path: Path) -> None:
     result = _run_validate_env(
         tmp_path,
         {
-            "GEMINI_API_KEYS": "k1",
+            "OPENROUTER_API_KEYS": "k1",
             "MIN_SPREAD_EUR": "40",
             "MAX_PARALLEL_PRODUCTS": "2",
             "PLAYWRIGHT_NAV_TIMEOUT_MS": "45000",
@@ -366,7 +366,7 @@ def test_validate_env_warns_on_legacy_strategy_vars(tmp_path: Path) -> None:
     result = _run_validate_env(
         tmp_path,
         {
-            "GEMINI_API_KEYS": "k1",
+            "OPENROUTER_API_KEYS": "k1",
             "MIN_SPREAD_EUR": "40",
             "MAX_PARALLEL_PRODUCTS": "2",
             "PLAYWRIGHT_NAV_TIMEOUT_MS": "45000",

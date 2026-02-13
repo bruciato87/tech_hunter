@@ -57,8 +57,6 @@ python -m tech_sniper_it.worker
 - `SUPABASE_WRITE_RETRY_DELAY_MS` (default: `250`, base backoff for Supabase write retry)
 - `TELEGRAM_BOT_TOKEN`
 - `TELEGRAM_CHAT_ID`
-- `GEMINI_API_KEYS` (comma-separated)
-- `GEMINI_MODEL` (default: `gemini-2.0-flash`)
 - `OPENROUTER_API_KEYS` (comma-separated)
 - `OPENROUTER_MODEL` (default: `openrouter/auto`)
 - `OPENROUTER_BASE_URL` (default: `https://openrouter.ai/api/v1/chat/completions`)
@@ -78,6 +76,8 @@ python -m tech_sniper_it.worker
 - `SCAN_DYNAMIC_QUERY_LIMIT` (default: `12`, max auto-generated Amazon Warehouse queries per scan)
 - `SCAN_DYNAMIC_EXPLORATION_RATIO` (default: `0.35`, share of rotating exploration queries vs historical trend queries)
 - `SCAN_DYNAMIC_TREND_MIN_SCORE` (default: `-35`, minimum trend score required for history-driven query inclusion)
+- `SCAN_REQUIRE_COMPLETE_RESELLER_QUOTES` (default: `true`, keeps only decisions with real quotes from all required reseller strategies for that category)
+- `SCAN_RESELLER_REFILL_BATCH_MULTIPLIER` (default: `2`, evaluates extra candidates when quote-complete decisions are missing)
 - `EXCLUDE_MIN_KEEP` (default: `4`, re-includes a small slice of excluded URLs to avoid 0/1-product scans)
 - `EXCLUDE_LOOKBACK_DAYS` (default: `1`)
 - `EXCLUDE_DAILY_RESET` (default: `true`, reset exclusion cache at day boundary)
@@ -131,6 +131,7 @@ python -m tech_sniper_it.worker
 - `AMAZON_WAREHOUSE_CART_PRICING_MAX_ITEMS` (default: `4`, max candidates per scan validated via cart)
 - `AMAZON_WAREHOUSE_CART_PRICING_REQUIRE_EMPTY_CART` (default: `true`, skip cart validation unless cart is empty to avoid side effects)
 - `AMAZON_WAREHOUSE_CART_PRICING_ALLOW_DELTA` (default: `true`, when cart is not empty computes candidate net price from before/after cart delta)
+- `AMAZON_WAREHOUSE_CART_PRICING_FORCE_EMPTY_AFTER_HOST` (default: `true`, hard-cleanup cart at end of each host session)
 - `AMAZON_WAREHOUSE_DEBUG_ON_EMPTY` (default: `true`, saves diagnostic dump on zero parsed results)
 - `AMAZON_WAREHOUSE_DEBUG_DIR` (default: `/tmp/tech_sniper_it_debug`)
 
@@ -141,6 +142,8 @@ Cart promo validator behavior:
 - if item removal fails, the cart price is discarded to prevent persistent cart pollution.
 
 ### AI Free-Tier Selection Logic
+
+Gemini routing is disabled in runtime (OpenRouter-only + heuristic fallback).
 
 When `OPENROUTER_MODEL=openrouter/auto`, the balancer does not rely blindly on auto-routing.
 It ranks models from `OPENROUTER_FREE_MODELS` (power-first), then skips temporarily unavailable models based on runtime errors:
@@ -340,7 +343,7 @@ Store all production keys only in GitHub Secrets, never in tracked files.
 
 - `SUPABASE_SERVICE_ROLE_KEY`
 - `TELEGRAM_BOT_TOKEN`
-- `GEMINI_API_KEYS` or `OPENROUTER_API_KEYS` (at least one provider)
+- `OPENROUTER_API_KEYS`
 - `AMAZON_WAREHOUSE_PROXY_URLS` (required for real anti-bot resilient warehouse autoscan)
 
 Optional secrets:
@@ -370,7 +373,6 @@ Optional secrets:
 - `TRENDDEVICE_EMAIL_GATE_WAIT_MS`
 - `MPB_MAX_ATTEMPTS`
 - `MPB_USE_STORAGE_STATE`
-- `GEMINI_MODEL`
 - `OPENROUTER_MODEL`
 - `OPENROUTER_BASE_URL`
 - `OPENROUTER_FREE_MODELS`
@@ -385,6 +387,8 @@ Optional secrets:
 - `SCAN_DYNAMIC_QUERY_LIMIT`
 - `SCAN_DYNAMIC_EXPLORATION_RATIO`
 - `SCAN_DYNAMIC_TREND_MIN_SCORE`
+- `SCAN_REQUIRE_COMPLETE_RESELLER_QUOTES`
+- `SCAN_RESELLER_REFILL_BATCH_MULTIPLIER`
 - `EXCLUDE_MIN_KEEP`
 - `EXCLUDE_LOOKBACK_DAYS`
 - `EXCLUDE_DAILY_RESET`
