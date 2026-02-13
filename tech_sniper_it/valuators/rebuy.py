@@ -594,6 +594,8 @@ def _assess_rebuy_match(
     score_floor = 72
     if not generic_url and (query_anchors or capacities):
         score_floor = 62
+    if not generic_url and token_ratio >= 0.6:
+        score_floor = min(score_floor, 54)
     if path.startswith("vendere/p/"):
         score_floor = min(score_floor, 58)
     if score < score_floor:
@@ -783,8 +785,9 @@ class RebuyValuator(BaseValuator):
                         step_body = await page.inner_text("body", timeout=1600)
                     except PlaywrightError:
                         step_body = ""
+                    step_compact = re.sub(r"\s+", " ", step_body).strip()
                     payload.setdefault("wizard_states", []).append(
-                        {"attempt": step_attempt, "state": _rebuy_wizard_state(step_body)}
+                        {"attempt": step_attempt, "state": _rebuy_wizard_state(step_body), "excerpt": step_compact[:140]}
                     )
                     price, price_text = await self._extract_price(page, payload=payload)
                     if price is not None:
@@ -840,6 +843,13 @@ class RebuyValuator(BaseValuator):
                                 "[data-testid*='option' i]",
                             ],
                             timeout_ms=2200,
+                        )
+                    if not progressed:
+                        progressed = await self._click_first_semantic(
+                            page,
+                            keywords=["vendi", "valuta", "continua", "inizia", "start"],
+                            selectors=["button", "[role='button']", "a", "label", "div"],
+                            timeout_ms=1800,
                         )
                     if progressed:
                         payload.setdefault("wizard", []).append({"step": "auto", "attempt": step_attempt, "action": "progress"})
@@ -986,7 +996,10 @@ class RebuyValuator(BaseValuator):
                 step_body = await page.inner_text("body", timeout=1600)
             except PlaywrightError:
                 step_body = ""
-            payload.setdefault("wizard_states", []).append({"attempt": step_attempt, "state": _rebuy_wizard_state(step_body)})
+            step_compact = re.sub(r"\s+", " ", step_body).strip()
+            payload.setdefault("wizard_states", []).append(
+                {"attempt": step_attempt, "state": _rebuy_wizard_state(step_body), "excerpt": step_compact[:140]}
+            )
             price, price_text = await self._extract_price(page, payload=payload)
             if price is not None:
                 break
@@ -1039,6 +1052,13 @@ class RebuyValuator(BaseValuator):
                         "[data-testid*='option' i]",
                     ],
                     timeout_ms=2200,
+                )
+            if not progressed:
+                progressed = await self._click_first_semantic(
+                    page,
+                    keywords=["vendi", "valuta", "continua", "inizia", "start"],
+                    selectors=["button", "[role='button']", "a", "label", "div"],
+                    timeout_ms=1800,
                 )
             if not progressed:
                 await page.wait_for_timeout(1800)
