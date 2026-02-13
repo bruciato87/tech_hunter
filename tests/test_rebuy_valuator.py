@@ -66,6 +66,26 @@ def test_rebuy_assess_match_accepts_specific_sell_flow_url_without_capacity_toke
     assert match["ok"] is True
 
 
+def test_rebuy_assess_match_rejects_watch_ultra_unversioned_vs_ultra_3() -> None:
+    match = _assess_rebuy_match(
+        normalized_name="Apple Watch Ultra GPS + Cellular 49mm",
+        candidate_text="Apple Watch Ultra 3 49 mm cassa in titanio",
+        source_url="https://www.rebuy.it/vendere/smartwatch/apple-watch-ultra-3-49-mm-cassa-in-titanio-nero-wifi-plus-cellulare_21513678",
+    )
+    assert match["ok"] is False
+    assert match["reason"] == "model-generation-mismatch"
+
+
+def test_rebuy_assess_match_rejects_iphone_generation_mismatch() -> None:
+    match = _assess_rebuy_match(
+        normalized_name="Apple iPhone 14 Pro 128GB",
+        candidate_text="Apple iPhone 15 Pro 128GB",
+        source_url="https://www.rebuy.it/vendere/p/apple-iphone-15-pro/12345678",
+    )
+    assert match["ok"] is False
+    assert match["reason"] == "model-generation-mismatch"
+
+
 def test_rebuy_assess_match_rejects_explicit_capacity_conflict() -> None:
     match = _assess_rebuy_match(
         normalized_name='Apple iPad Air 13" M3 256GB',
