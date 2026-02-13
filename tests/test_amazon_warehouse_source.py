@@ -11,6 +11,7 @@ from tech_sniper_it.sources.amazon_warehouse import (
     _detect_page_barriers,
     _expand_marketplaces,
     _extract_products_from_html,
+    _parse_cart_summary,
     _load_storage_state_paths,
     _parse_proxy_entry,
     _parse_user_agent_list,
@@ -178,6 +179,55 @@ def test_extract_products_from_html_does_not_double_count_implied_list_discount(
     assert item["list_price_eur"] == 849.0
     assert "extra_discount_pct" not in item
     assert item["price_eur"] == 679.0
+
+
+def test_parse_cart_summary_extracts_subtotal_promo_and_total() -> None:
+    html = """
+    <html>
+      <body>
+        <div class="sc-list-item" data-asin="B0ABCDE123">
+          <span class="sc-product-price">699,00 €</span>
+        </div>
+        <div id="sc-subtotal-amount-activecart">
+          <span class="a-price"><span class="a-offscreen">699,00 €</span></span>
+        </div>
+        <div id="sc-subtotal-discount">
+          <span class="a-offscreen">-70,00 €</span>
+        </div>
+        <div id="subtotals-marketplace-table">
+          <span class="grand-total-price"><span class="a-offscreen">629,00 €</span></span>
+        </div>
+      </body>
+    </html>
+    """
+    summary = _parse_cart_summary(html, "B0ABCDE123")
+    assert summary["target_in_cart"] is True
+    assert summary["target_row_price"] == 699.0
+    assert summary["subtotal_price"] == 699.0
+    assert summary["promo_discount_eur"] == 70.0
+    assert summary["total_price"] == 629.0
+
+
+def test_parse_cart_summary_falls_back_to_subtotal_minus_promo_when_total_missing() -> None:
+    html = """
+    <html>
+      <body>
+        <div class="sc-list-item" data-asin="B0ABCDE123">
+          <span class="sc-product-price">499,00 €</span>
+        </div>
+        <div id="sc-subtotal-amount-activecart">
+          <span class="a-price"><span class="a-offscreen">499,00 €</span></span>
+        </div>
+        <div id="sc-subtotal-discount">
+          <span class="a-offscreen">30,00 €</span>
+        </div>
+      </body>
+    </html>
+    """
+    summary = _parse_cart_summary(html, "B0ABCDE123")
+    assert summary["subtotal_price"] == 499.0
+    assert summary["promo_discount_eur"] == 30.0
+    assert summary["total_price"] == 469.0
 
 
 def test_detect_page_barriers_flags_captcha_and_consent() -> None:

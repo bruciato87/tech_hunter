@@ -208,3 +208,34 @@ def test_validate_env_fails_on_invalid_exclude_lookback_days(tmp_path: Path) -> 
     )
     assert result.returncode == 1
     assert "EXCLUDE_LOOKBACK_DAYS must be >= 1." in result.stdout
+
+
+def test_validate_env_fails_on_invalid_cart_pricing_max_items(tmp_path: Path) -> None:
+    result = _run_validate_env(
+        tmp_path,
+        {
+            "GEMINI_API_KEYS": "k1",
+            "MIN_SPREAD_EUR": "40",
+            "MAX_PARALLEL_PRODUCTS": "2",
+            "PLAYWRIGHT_NAV_TIMEOUT_MS": "45000",
+            "AMAZON_WAREHOUSE_CART_PRICING_MAX_ITEMS": "0",
+        },
+    )
+    assert result.returncode == 1
+    assert "AMAZON_WAREHOUSE_CART_PRICING_MAX_ITEMS must be >= 1." in result.stdout
+
+
+def test_validate_env_warns_when_cart_pricing_enabled_without_storage_state(tmp_path: Path) -> None:
+    result = _run_validate_env(
+        tmp_path,
+        {
+            "GEMINI_API_KEYS": "k1",
+            "MIN_SPREAD_EUR": "40",
+            "MAX_PARALLEL_PRODUCTS": "2",
+            "PLAYWRIGHT_NAV_TIMEOUT_MS": "45000",
+            "AMAZON_WAREHOUSE_CART_PRICING_ENABLED": "true",
+            "AMAZON_WAREHOUSE_USE_STORAGE_STATE": "true",
+        },
+    )
+    assert result.returncode == 0
+    assert "AMAZON_WAREHOUSE_CART_PRICING_ENABLED=true but no AMAZON_WAREHOUSE_STORAGE_STATE_B64*" in result.stdout

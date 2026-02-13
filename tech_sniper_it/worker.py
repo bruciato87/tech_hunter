@@ -16,7 +16,7 @@ from telegram import Bot
 
 from tech_sniper_it.manager import build_default_manager
 from tech_sniper_it.models import AmazonProduct, ProductCategory
-from tech_sniper_it.sources import fetch_amazon_warehouse_products
+from tech_sniper_it.sources import apply_cart_net_pricing, fetch_amazon_warehouse_products
 
 
 MAX_LAST_LIMIT = 10
@@ -1579,6 +1579,8 @@ async def _run_scan_command(payload: dict[str, Any]) -> int:
     scoring_context = await _build_prioritization_context(manager)
     products = load_products(_load_github_event_data())
     command_chat = _telegram_target_chat(payload)
+    headless = _env_or_default("HEADLESS", "true").lower() != "false"
+    nav_timeout_ms = int(_env_or_default("PLAYWRIGHT_NAV_TIMEOUT_MS", "45000"))
     scan_target_products = max(1, int(_env_or_default("SCAN_TARGET_PRODUCTS", _env_or_default("AMAZON_WAREHOUSE_MAX_PRODUCTS", "12"))))
     candidate_multiplier = max(1, int(_env_or_default("SCAN_CANDIDATE_MULTIPLIER", "4")))
     candidate_budget = scan_target_products * candidate_multiplier
@@ -1603,8 +1605,8 @@ async def _run_scan_command(payload: dict[str, Any]) -> int:
                 for index, query in enumerate(query_preview, start=1):
                     print(f"[scan]   q{index}: {query}")
             fetch_kwargs = {
-                "headless": _env_or_default("HEADLESS", "true").lower() != "false",
-                "nav_timeout_ms": int(_env_or_default("PLAYWRIGHT_NAV_TIMEOUT_MS", "45000")),
+                "headless": headless,
+                "nav_timeout_ms": nav_timeout_ms,
                 "max_products": candidate_budget,
                 "search_queries": dynamic_queries,
             }
@@ -1704,6 +1706,19 @@ async def _run_scan_command(payload: dict[str, Any]) -> int:
         if payload.get("source") in {"telegram", "vercel_scan_api", "manual_debug"}:
             await _send_telegram_message(message, command_chat)
         return 0
+
+    cart_pricing_stats = await apply_cart_net_pricing(
+        products,
+        headless=headless,
+        nav_timeout_ms=nav_timeout_ms,
+    )
+    if cart_pricing_stats.get("checked", 0):
+        print(
+            "[scan] Cart net pricing applied | "
+            f"checked={cart_pricing_stats.get('checked', 0)} "
+            f"updated={cart_pricing_stats.get('updated', 0)} "
+            f"skipped={cart_pricing_stats.get('skipped', 0)}"
+        )
 
     max_parallel_products = int(_env_or_default("MAX_PARALLEL_PRODUCTS", "3"))
     print(f"[scan] Loaded products: {len(products)} | max_parallel_products={max_parallel_products}")

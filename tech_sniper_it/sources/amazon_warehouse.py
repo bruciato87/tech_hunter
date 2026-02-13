@@ -154,6 +154,87 @@ SIGNIN_MARKERS: tuple[str, ...] = (
     "id=\"ap_password\"",
     "id='ap_password'",
 )
+ADD_TO_CART_SELECTORS: tuple[str, ...] = (
+    "#add-to-cart-button",
+    "input#add-to-cart-button",
+    "input[name='submit.add-to-cart']",
+    "button[name='submit.add-to-cart']",
+    "input[name='submit.add-to-cart.v2']",
+    "button#add-to-cart-button",
+)
+CART_ROW_SELECTORS: tuple[str, ...] = (
+    "div.sc-list-item[data-asin]",
+    "div[data-asin][data-name='Active Items']",
+    "div[data-asin][data-itemid]",
+)
+CART_DELETE_SELECTORS: tuple[str, ...] = (
+    "input[value='Delete']",
+    "input[value='Elimina']",
+    "input[value='Löschen']",
+    "input[value='Supprimer']",
+    "input[value='Eliminar']",
+    "button[data-action='delete']",
+    "[data-action='delete'] input",
+    "input[name='submit.delete']",
+    "a[data-feature-id='item-delete-button']",
+)
+CART_SUBTOTAL_SELECTORS: tuple[str, ...] = (
+    "#sc-subtotal-amount-activecart .a-price .a-offscreen",
+    "#sc-subtotal-amount-activecart .a-size-medium.a-color-base",
+    "#sc-subtotal-amount-buybox .a-price .a-offscreen",
+    "#sc-subtotal-amount-buybox .a-size-medium.a-color-base",
+    "#sc-subtotal-amount-buybox",
+)
+CART_PROMO_DISCOUNT_SELECTORS: tuple[str, ...] = (
+    "#sc-subtotal-discount .a-offscreen",
+    "#sc-subtotal-discount .a-size-medium.a-color-base",
+    "#subtotals-marketplace-table [id*='discount' i] .a-offscreen",
+    "#subtotals-marketplace-table [class*='discount' i] .a-offscreen",
+    "[data-testid*='discount' i] .a-offscreen",
+)
+CART_TOTAL_SELECTORS: tuple[str, ...] = (
+    "#subtotals-marketplace-table .grand-total-price .a-offscreen",
+    "#subtotals-marketplace-table .grand-total-price",
+    "#sc-subtotal-amount-buybox .a-price .a-offscreen",
+    "#sc-subtotal-amount-buybox .a-size-medium.a-color-base",
+    "[data-testid*='grand-total' i] .a-offscreen",
+    "[data-testid*='order-total' i] .a-offscreen",
+)
+CART_SUBTOTAL_HINTS: tuple[str, ...] = (
+    "subtotale",
+    "subtotal",
+    "zwischensumme",
+    "sous-total",
+)
+CART_PROMO_HINTS: tuple[str, ...] = (
+    "promozion",
+    "sconto",
+    "coupon",
+    "rispar",
+    "discount",
+    "promotion",
+    "rabatt",
+    "gutschein",
+    "économ",
+    "ahorro",
+)
+CART_TOTAL_HINTS: tuple[str, ...] = (
+    "totale ordine",
+    "totale",
+    "order total",
+    "total",
+    "gesamt",
+    "montant total",
+    "importe total",
+)
+CART_EMPTY_HINTS: tuple[str, ...] = (
+    "il tuo carrello amazon è vuoto",
+    "your amazon cart is empty",
+    "your basket is empty",
+    "ihr einkaufswagen ist leer",
+    "votre panier amazon est vide",
+    "tu cesta de amazon está vacía",
+)
 
 
 def _split_csv(value: str | None) -> list[str]:
@@ -566,6 +647,23 @@ def _use_storage_state() -> bool:
     return _is_truthy_env("AMAZON_WAREHOUSE_USE_STORAGE_STATE", "true")
 
 
+def _cart_pricing_enabled() -> bool:
+    return _is_truthy_env("AMAZON_WAREHOUSE_CART_PRICING_ENABLED", "false")
+
+
+def _cart_pricing_max_items(default_target: int) -> int:
+    raw = _env_or_default("AMAZON_WAREHOUSE_CART_PRICING_MAX_ITEMS", str(default_target))
+    try:
+        value = int(raw)
+    except ValueError:
+        value = default_target
+    return max(1, min(value, max(1, default_target)))
+
+
+def _cart_pricing_require_empty_cart() -> bool:
+    return _is_truthy_env("AMAZON_WAREHOUSE_CART_PRICING_REQUIRE_EMPTY_CART", "true")
+
+
 def _retry_delay_for_attempt(base_ms: int, attempt: int) -> int:
     multiplier = max(1, 2 ** max(0, attempt - 1))
     jitter = random.randint(0, 250)
@@ -671,6 +769,12 @@ def _shorten(text: str | None, limit: int = 64) -> str:
     if len(value) <= limit:
         return value
     return f"{value[: limit - 3]}..."
+
+
+def _format_money(value: Any) -> str:
+    if not isinstance(value, (int, float)):
+        return "n/d"
+    return f"{float(value):.2f}"
 
 
 def _should_fail_fast(barriers: list[str], *, proxy_pool_size: int, fail_fast: bool) -> bool:
@@ -800,6 +904,423 @@ async def _accept_cookie_if_present(page) -> None:  # noqa: ANN001
                 return
         except PlaywrightError:
             continue
+
+
+def _extract_asin_from_url(url: str | None) -> str | None:
+    raw = (url or "").strip()
+    if not raw:
+        return None
+    match = re.search(r"/(?:dp|gp/product)/([A-Z0-9]{10})", raw, flags=re.IGNORECASE)
+    if not match:
+        return None
+    return match.group(1).upper()
+
+
+def _cart_url_for_host(host: str) -> str:
+    return f"https://{host}/gp/cart/view.html?ref_=nav_cart"
+
+
+def _collect_cart_rows(soup: BeautifulSoup) -> list[Any]:
+    rows: list[Any] = []
+    seen: set[int] = set()
+    for selector in CART_ROW_SELECTORS:
+        for row in soup.select(selector):
+            marker = id(row)
+            if marker in seen:
+                continue
+            asin = (row.get("data-asin") or "").strip().upper()
+            if not asin:
+                continue
+            seen.add(marker)
+            rows.append(row)
+    return rows
+
+
+def _extract_row_price(row: Any) -> float | None:
+    selectors = (
+        ".sc-product-price",
+        ".a-price .a-offscreen",
+        ".sc-price",
+    )
+    for selector in selectors:
+        node = row.select_one(selector)
+        if not node:
+            continue
+        price = parse_eur_price(node.get_text(" ", strip=True))
+        if price is not None:
+            return price
+    return parse_eur_price(row.get_text(" ", strip=True))
+
+
+def _extract_price_by_selectors(soup: BeautifulSoup, selectors: tuple[str, ...]) -> float | None:
+    for selector in selectors:
+        node = soup.select_one(selector)
+        if not node:
+            continue
+        value = parse_eur_price(node.get_text(" ", strip=True))
+        if isinstance(value, (int, float)) and value > 0:
+            return round(float(value), 2)
+    return None
+
+
+def _extract_labeled_price_from_text(text: str, hints: tuple[str, ...]) -> float | None:
+    if not text:
+        return None
+    lowered = text.lower()
+    values: list[float] = []
+    for match in EUR_AMOUNT_PATTERN.finditer(text):
+        snippet = lowered[max(0, match.start() - 80) : min(len(lowered), match.end() + 80)]
+        if hints and not any(hint in snippet for hint in hints):
+            continue
+        value = parse_eur_price(match.group(0))
+        if value is None or value <= 0:
+            continue
+        values.append(round(float(value), 2))
+    if not values:
+        return None
+    return max(values)
+
+
+def _parse_cart_summary(html: str, asin: str | None) -> dict[str, Any]:
+    soup = BeautifulSoup(html, "html.parser")
+    rows = _collect_cart_rows(soup)
+    full_text = soup.get_text(" ", strip=True)
+    lowered = full_text.lower()
+    is_empty = (len(rows) == 0) or any(hint in lowered for hint in CART_EMPTY_HINTS)
+
+    subtotal = _extract_price_by_selectors(soup, CART_SUBTOTAL_SELECTORS)
+    if subtotal is None:
+        subtotal = _extract_labeled_price_from_text(full_text, CART_SUBTOTAL_HINTS)
+
+    promo_discount = _extract_price_by_selectors(soup, CART_PROMO_DISCOUNT_SELECTORS)
+    if promo_discount is None:
+        promo_discount = _extract_labeled_price_from_text(full_text, CART_PROMO_HINTS)
+
+    total_price = _extract_price_by_selectors(soup, CART_TOTAL_SELECTORS)
+    if total_price is None:
+        total_price = _extract_labeled_price_from_text(full_text, CART_TOTAL_HINTS)
+    if (
+        total_price is None
+        and isinstance(subtotal, (int, float))
+        and isinstance(promo_discount, (int, float))
+        and subtotal > promo_discount
+    ):
+        total_price = round(float(subtotal) - float(promo_discount), 2)
+
+    target_in_cart = False
+    target_row_price: float | None = None
+    target_row_count = 0
+    asin_normalized = (asin or "").strip().upper()
+    for row in rows:
+        row_asin = (row.get("data-asin") or "").strip().upper()
+        if not asin_normalized or row_asin != asin_normalized:
+            continue
+        target_in_cart = True
+        target_row_count += 1
+        row_price = _extract_row_price(row)
+        if row_price is not None:
+            target_row_price = row_price
+            break
+
+    return {
+        "row_count": len(rows),
+        "is_empty": is_empty,
+        "target_in_cart": target_in_cart,
+        "target_row_price": target_row_price,
+        "target_row_count": target_row_count,
+        "subtotal_price": subtotal,
+        "promo_discount_eur": promo_discount,
+        "total_price": total_price,
+    }
+
+
+async def _read_cart_summary(page, *, host: str, asin: str | None) -> dict[str, Any]:  # noqa: ANN001
+    cart_url = _cart_url_for_host(host)
+    await page.goto(cart_url, wait_until="domcontentloaded")
+    await _accept_cookie_if_present(page)
+    await page.wait_for_timeout(900)
+    html = await page.content()
+    title = await page.title()
+    summary = _parse_cart_summary(html, asin)
+    summary["barriers"] = _detect_page_barriers(html, title)
+    summary["url"] = page.url
+    return summary
+
+
+async def _click_add_to_cart(page) -> bool:  # noqa: ANN001
+    for selector in ADD_TO_CART_SELECTORS:
+        try:
+            locator = page.locator(selector).first
+            if not await locator.count():
+                continue
+            await locator.wait_for(state="visible", timeout=1400)
+            await locator.click(timeout=1800)
+            return True
+        except PlaywrightError:
+            continue
+    return False
+
+
+async def _remove_asin_from_cart(page, *, host: str, asin: str) -> bool:  # noqa: ANN001
+    try:
+        await page.goto(_cart_url_for_host(host), wait_until="domcontentloaded")
+        await page.wait_for_timeout(800)
+    except Exception:
+        return False
+
+    row_locator = page.locator(
+        f"div.sc-list-item[data-asin='{asin}'], div[data-asin='{asin}'][data-name='Active Items']"
+    ).first
+    try:
+        if not await row_locator.count():
+            return True
+    except PlaywrightError:
+        return False
+
+    clicked = False
+    for selector in CART_DELETE_SELECTORS:
+        try:
+            target = row_locator.locator(selector).first
+            if not await target.count():
+                continue
+            if await target.is_visible(timeout=800):
+                await target.click(timeout=1500)
+                clicked = True
+                break
+        except PlaywrightError:
+            continue
+
+    if not clicked:
+        return False
+
+    await page.wait_for_timeout(1400)
+    try:
+        await page.goto(_cart_url_for_host(host), wait_until="domcontentloaded")
+        await page.wait_for_timeout(800)
+        row_check = page.locator(
+            f"div.sc-list-item[data-asin='{asin}'], div[data-asin='{asin}'][data-name='Active Items']"
+        ).first
+        return not await row_check.count()
+    except PlaywrightError:
+        return False
+
+
+async def _resolve_cart_net_price(
+    page,
+    *,
+    host: str,
+    product_url: str,
+    require_empty_cart: bool,
+) -> dict[str, Any]:  # noqa: ANN001
+    asin = _extract_asin_from_url(product_url)
+    result: dict[str, Any] = {
+        "asin": asin,
+        "net_price_eur": None,
+        "removed": False,
+        "added": False,
+        "subtotal_price": None,
+        "promo_discount_eur": None,
+        "total_price": None,
+        "reason": None,
+    }
+    if not asin:
+        result["reason"] = "missing-asin"
+        return result
+
+    before = await _read_cart_summary(page, host=host, asin=asin)
+    barriers = set(before.get("barriers", []))
+    if {"signin", "captcha", "sorry-page"} & barriers:
+        result["reason"] = "cart-unavailable"
+        return result
+    if require_empty_cart and not before.get("is_empty"):
+        result["reason"] = "cart-not-empty"
+        return result
+    if before.get("target_in_cart"):
+        result["reason"] = "target-already-in-cart"
+        return result
+
+    added = False
+    try:
+        await page.goto(product_url, wait_until="domcontentloaded")
+        await _accept_cookie_if_present(page)
+        await page.wait_for_timeout(1100)
+        html = await page.content()
+        title = await page.title()
+        product_barriers = set(_detect_page_barriers(html, title))
+        if {"signin", "captcha", "sorry-page"} & product_barriers:
+            result["reason"] = "product-page-blocked"
+            return result
+        add_ok = await _click_add_to_cart(page)
+        if not add_ok:
+            result["reason"] = "add-to-cart-unavailable"
+            return result
+        added = True
+        result["added"] = True
+        await page.wait_for_timeout(1700)
+
+        after = await _read_cart_summary(page, host=host, asin=asin)
+        if not after.get("target_in_cart"):
+            result["reason"] = "not-found-in-cart-after-add"
+            return result
+        subtotal = after.get("subtotal_price")
+        promo_discount = after.get("promo_discount_eur")
+        total_price = after.get("total_price")
+        row_price = after.get("target_row_price")
+        result["subtotal_price"] = subtotal
+        result["promo_discount_eur"] = promo_discount
+        result["total_price"] = total_price
+        net_price: float | None = None
+        if isinstance(total_price, (int, float)) and total_price > 0:
+            net_price = float(total_price)
+        elif (
+            isinstance(subtotal, (int, float))
+            and isinstance(promo_discount, (int, float))
+            and subtotal > promo_discount
+        ):
+            net_price = float(subtotal) - float(promo_discount)
+        elif require_empty_cart and before.get("is_empty") and isinstance(subtotal, (int, float)) and subtotal > 0:
+            net_price = float(subtotal)
+        elif isinstance(row_price, (int, float)) and row_price > 0:
+            net_price = float(row_price)
+        elif isinstance(subtotal, (int, float)) and subtotal > 0:
+            net_price = float(subtotal)
+        if net_price is None:
+            result["reason"] = "net-price-not-found"
+            return result
+        result["net_price_eur"] = round(net_price, 2)
+        result["reason"] = "ok"
+        return result
+    finally:
+        if added:
+            removed = await _remove_asin_from_cart(page, host=host, asin=asin)
+            result["removed"] = removed
+            if not removed and result.get("reason") == "ok":
+                result["net_price_eur"] = None
+                result["reason"] = "remove-failed"
+
+
+async def apply_cart_net_pricing(
+    products: list[Any],
+    *,
+    headless: bool = True,
+    nav_timeout_ms: int = 45000,
+) -> dict[str, int]:
+    if not _cart_pricing_enabled():
+        return {"checked": 0, "updated": 0, "skipped": 0}
+    if not products:
+        return {"checked": 0, "updated": 0, "skipped": 0}
+
+    use_storage_state = _use_storage_state()
+    storage_state_paths = _load_storage_state_paths() if use_storage_state else {}
+    if not storage_state_paths:
+        print("[warehouse/cart] Pricing validator skipped: storage_state unavailable.")
+        return {"checked": 0, "updated": 0, "skipped": len(products)}
+
+    require_empty_cart = _cart_pricing_require_empty_cart()
+    candidates: list[tuple[Any, str, str]] = []
+    seen_urls: set[str] = set()
+    for product in products:
+        raw_url = str(getattr(product, "url", "") or "").strip()
+        if not raw_url or raw_url in seen_urls:
+            continue
+        parsed = urlparse(raw_url if raw_url.startswith(("http://", "https://")) else f"https://{raw_url}")
+        host = (parsed.netloc or "").lower()
+        if host not in MARKETPLACE_FROM_HOST:
+            continue
+        seen_urls.add(raw_url)
+        candidates.append((product, host, raw_url))
+
+    if not candidates:
+        return {"checked": 0, "updated": 0, "skipped": len(products)}
+
+    max_items = _cart_pricing_max_items(len(candidates))
+    candidates = candidates[:max_items]
+    checked = 0
+    updated = 0
+    skipped = 0
+
+    grouped: dict[str, list[tuple[Any, str]]] = {}
+    for product, host, raw_url in candidates:
+        grouped.setdefault(host, []).append((product, raw_url))
+
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=headless)
+        try:
+            for host, rows in grouped.items():
+                storage_state_path = _storage_state_for_host(storage_state_paths, host)
+                if not storage_state_path:
+                    skipped += len(rows)
+                    print(f"[warehouse/cart] Skip host={host}: missing storage state.")
+                    continue
+                locale = {
+                    "www.amazon.it": "it-IT",
+                    "www.amazon.de": "de-DE",
+                    "www.amazon.fr": "fr-FR",
+                    "www.amazon.es": "es-ES",
+                }.get(host, "it-IT")
+                accept_language = ACCEPT_LANGUAGE_BY_HOST.get(host, "it-IT,it;q=0.9,en;q=0.8")
+                context = None
+                try:
+                    context = await browser.new_context(
+                        locale=locale,
+                        storage_state=storage_state_path,
+                        extra_http_headers={"Accept-Language": accept_language},
+                    )
+                    await _apply_stealth_context(context, host=host)
+                    page = await context.new_page()
+                    page.set_default_timeout(nav_timeout_ms)
+
+                    for product, raw_url in rows:
+                        checked += 1
+                        old_price = float(getattr(product, "price_eur", 0.0))
+                        try:
+                            pricing = await _resolve_cart_net_price(
+                                page,
+                                host=host,
+                                product_url=raw_url,
+                                require_empty_cart=require_empty_cart,
+                            )
+                        except Exception as exc:
+                            skipped += 1
+                            print(
+                                f"[warehouse/cart] Validation error host={host} url={raw_url}: "
+                                f"{type(exc).__name__}: {exc}"
+                            )
+                            continue
+
+                        new_price = pricing.get("net_price_eur")
+                        if isinstance(new_price, (int, float)) and float(new_price) > 0:
+                            setattr(product, "price_eur", round(float(new_price), 2))
+                            updated += 1
+                            print(
+                                "[warehouse/cart] Net price resolved | "
+                                f"host={host} asin={pricing.get('asin')} old={old_price:.2f} new={float(new_price):.2f} "
+                                f"subtotal={_format_money(pricing.get('subtotal_price'))} "
+                                f"promo_discount={_format_money(pricing.get('promo_discount_eur'))} "
+                                f"total={_format_money(pricing.get('total_price'))} "
+                                f"removed={pricing.get('removed')}"
+                            )
+                        else:
+                            skipped += 1
+                            print(
+                                "[warehouse/cart] Net price unavailable | "
+                                f"host={host} asin={pricing.get('asin')} reason={pricing.get('reason')} "
+                                f"subtotal={_format_money(pricing.get('subtotal_price'))} "
+                                f"promo_discount={_format_money(pricing.get('promo_discount_eur'))} "
+                                f"total={_format_money(pricing.get('total_price'))} "
+                                f"removed={pricing.get('removed')}"
+                            )
+                finally:
+                    if context is not None:
+                        await context.close()
+        finally:
+            await browser.close()
+
+    print(
+        "[warehouse/cart] Pricing validator summary | "
+        f"checked={checked} updated={updated} skipped={skipped} require_empty_cart={require_empty_cart}"
+    )
+    return {"checked": checked, "updated": updated, "skipped": skipped}
 
 
 async def fetch_amazon_warehouse_products(
@@ -1038,6 +1559,7 @@ async def fetch_amazon_warehouse_products(
 
 __all__ = [
     "fetch_amazon_warehouse_products",
+    "apply_cart_net_pricing",
     "_canonical_amazon_url",
     "_extract_products_from_html",
     "_per_marketplace_limit",

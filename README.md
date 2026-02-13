@@ -107,8 +107,16 @@ python -m tech_sniper_it.worker
 - `AMAZON_WAREHOUSE_STORAGE_STATE_B64_DE` (optional domain-specific session for `amazon.de`)
 - `AMAZON_WAREHOUSE_STORAGE_STATE_B64_FR` (optional domain-specific session for `amazon.fr`)
 - `AMAZON_WAREHOUSE_STORAGE_STATE_B64_ES` (optional domain-specific session for `amazon.es`)
+- `AMAZON_WAREHOUSE_CART_PRICING_ENABLED` (default: `false`, validates real cart net price in authenticated session)
+- `AMAZON_WAREHOUSE_CART_PRICING_MAX_ITEMS` (default: `4`, max candidates per scan validated via cart)
+- `AMAZON_WAREHOUSE_CART_PRICING_REQUIRE_EMPTY_CART` (default: `true`, skip cart validation unless cart is empty to avoid side effects)
 - `AMAZON_WAREHOUSE_DEBUG_ON_EMPTY` (default: `true`, saves diagnostic dump on zero parsed results)
 - `AMAZON_WAREHOUSE_DEBUG_DIR` (default: `/tmp/tech_sniper_it_debug`)
+
+Cart promo validator behavior:
+
+- when enabled, the worker adds the candidate to cart, reads subtotal/promo/total, and removes that same item immediately.
+- if item removal fails, the cart price is discarded to prevent persistent cart pollution.
 
 ### AI Free-Tier Selection Logic
 

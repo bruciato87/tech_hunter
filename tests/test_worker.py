@@ -727,6 +727,62 @@ async def test_run_scan_command_sends_summary_for_manual_debug(monkeypatch: pyte
 
 
 @pytest.mark.asyncio
+async def test_run_scan_command_applies_cart_net_pricing_before_valuation(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {"cart_called": False, "evaluated_price": None}
+
+    class DummyDecision:
+        def __init__(self) -> None:
+            self.product = type("P", (), {"title": "iPhone", "price_eur": 579.0, "url": None})()
+            self.normalized_name = "iPhone 14 Pro 128GB"
+            self.best_offer = type("B", (), {"offer_eur": 600.0, "platform": "rebuy", "source_url": None})()
+            self.spread_eur = 21.0
+            self.should_notify = False
+            self.ai_provider = "heuristic"
+            self.ai_model = None
+            self.ai_mode = "fallback"
+            self.offers = []
+
+    class DummyManager:
+        min_spread_eur = 40.0
+
+        async def evaluate_many(self, products, max_parallel_products=3):  # noqa: ANN001, ANN201
+            captured["evaluated_price"] = products[0].price_eur
+            return [DummyDecision()]
+
+    async def fake_send(_text: str, _chat_id: str | None) -> None:
+        return None
+
+    async def fake_apply_cart_net_pricing(products, *, headless: bool, nav_timeout_ms: int):  # noqa: ANN201
+        captured["cart_called"] = True
+        assert headless is True
+        assert nav_timeout_ms == 45000
+        products[0].price_eur = 579.0
+        return {"checked": 1, "updated": 1, "skipped": 0}
+
+    monkeypatch.setattr("tech_sniper_it.worker.build_default_manager", lambda: DummyManager())
+    monkeypatch.setattr("tech_sniper_it.worker._load_github_event_data", lambda: {})
+    monkeypatch.setattr(
+        "tech_sniper_it.worker.load_products",
+        lambda event_data=None: [
+            AmazonProduct(
+                title="Apple iPhone 14 Pro 128GB",
+                price_eur=649.0,
+                category=ProductCategory.APPLE_PHONE,
+                url="https://www.amazon.it/dp/B0TEST1234",
+            )
+        ],
+    )
+    monkeypatch.setattr("tech_sniper_it.worker.apply_cart_net_pricing", fake_apply_cart_net_pricing)
+    monkeypatch.setattr("tech_sniper_it.worker._send_telegram_message", fake_send)
+
+    exit_code = await _run_scan_command({"source": "manual_debug"})
+
+    assert exit_code == 0
+    assert captured["cart_called"] is True
+    assert captured["evaluated_price"] == 579.0
+
+
+@pytest.mark.asyncio
 async def test_run_scan_command_uses_warehouse_fallback_when_no_input(monkeypatch: pytest.MonkeyPatch) -> None:
     sent_messages = []
 

@@ -371,6 +371,30 @@ def main() -> int:
             except Exception:
                 warnings.append(f"{env_name} is not valid base64 JSON.")
 
+        cart_pricing_enabled = _env_or_default("AMAZON_WAREHOUSE_CART_PRICING_ENABLED", "false").lower() not in {
+            "0",
+            "false",
+            "no",
+            "off",
+        }
+        try:
+            cart_pricing_max_items = int(_env_or_default("AMAZON_WAREHOUSE_CART_PRICING_MAX_ITEMS", "4"))
+            if cart_pricing_max_items < 1:
+                errors.append("AMAZON_WAREHOUSE_CART_PRICING_MAX_ITEMS must be >= 1.")
+        except ValueError:
+            errors.append("AMAZON_WAREHOUSE_CART_PRICING_MAX_ITEMS must be integer.")
+
+        if cart_pricing_enabled and not use_storage_state:
+            warnings.append(
+                "AMAZON_WAREHOUSE_CART_PRICING_ENABLED=true but AMAZON_WAREHOUSE_USE_STORAGE_STATE=false."
+            )
+        if cart_pricing_enabled and use_storage_state:
+            has_storage_state = any((os.getenv(env_name) or "").strip() for env_name in storage_state_envs)
+            if not has_storage_state:
+                warnings.append(
+                    "AMAZON_WAREHOUSE_CART_PRICING_ENABLED=true but no AMAZON_WAREHOUSE_STORAGE_STATE_B64* is configured."
+                )
+
     if errors:
         print("Environment validation failed:")
         for error in errors:
