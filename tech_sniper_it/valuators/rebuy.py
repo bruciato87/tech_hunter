@@ -6,7 +6,7 @@ import re
 import tempfile
 from difflib import SequenceMatcher
 from typing import Any
-from urllib.parse import unquote, urlparse
+from urllib.parse import unquote, urljoin, urlparse
 
 from bs4 import BeautifulSoup
 from playwright.async_api import Error as PlaywrightError
@@ -77,9 +77,25 @@ CAPACITY_TOKEN_PATTERN = re.compile(r"\b\d{2,4}\s*(?:gb|tb)\b", re.IGNORECASE)
 _REBUY_STORAGE_STATE_ERROR = ""
 
 
+def _env_or_default(name: str, default: str) -> str:
+    value = os.getenv(name)
+    if value and value.strip():
+        return value.strip()
+    return default
+
+
 def _use_storage_state() -> bool:
     raw = (os.getenv("REBUY_USE_STORAGE_STATE") or "true").strip().lower()
     return raw not in {"0", "false", "no", "off"}
+
+
+def _rebuy_deep_link_limit() -> int:
+    raw = (_env_or_default("REBUY_DEEP_LINK_LIMIT", "4") or "").strip()
+    try:
+        value = int(raw) if raw else 4
+    except ValueError:
+        value = 4
+    return max(1, min(value, 10))
 
 
 def _load_storage_state_b64() -> str | None:
@@ -142,6 +158,64 @@ def _extract_contextual_price(text: str) -> tuple[float | None, str]:
     if score <= 0:
         return None, ""
     return value, snippet
+
+
+def _extract_rebuy_product_link_candidates(
+    *,
+    html: str,
+    base_url: str,
+    normalized_name: str,
+    limit: int = 10,
+) -> list[dict[str, Any]]:
+    soup = BeautifulSoup(html or "", "html.parser")
+    found: list[dict[str, Any]] = []
+    seen_urls: set[str] = set()
+
+    for anchor in soup.select("a[href]"):
+        href = (anchor.get("href") or "").strip()
+        if not href:
+            continue
+        href_lower = href.lower()
+        if "/comprare/" not in href_lower and "/vendi" not in href_lower:
+            continue
+        if "/comprare/search" in href_lower:
+            continue
+        full_url = urljoin(base_url, href)
+        marker = full_url.lower()
+        if marker in seen_urls:
+            continue
+        seen_urls.add(marker)
+        text = anchor.get_text(" ", strip=True)
+        context = " ".join(part for part in (text, href) if part)
+        assessment = _assess_rebuy_match(
+            normalized_name=normalized_name,
+            candidate_text=context,
+            source_url=full_url,
+        )
+        # We use the assessment only for ranking: final match is validated after navigation.
+        ranking = int(assessment.get("score", 0)) + (35 if assessment.get("ok") else 0)
+        if assessment.get("reason") in {"generic-search-url", "generic-category-url"}:
+            ranking -= 80
+        found.append(
+            {
+                "url": full_url,
+                "text": text[:220],
+                "href": href,
+                "assessment": assessment,
+                "ranking": ranking,
+            }
+        )
+
+    ranked = sorted(
+        found,
+        key=lambda item: (
+            item.get("ranking", 0),
+            item.get("assessment", {}).get("token_ratio", 0.0),
+            item.get("assessment", {}).get("ratio", 0.0),
+        ),
+        reverse=True,
+    )
+    return ranked[: max(1, limit)]
 
 
 def _normalize_match_text(value: str | None) -> str:
@@ -397,6 +471,9 @@ class RebuyValuator(BaseValuator):
                 await page.keyboard.press("Enter")
                 await page.wait_for_timeout(2200)
 
+                deep_opened = await self._open_best_result_deep_link(page, normalized_name, payload=payload)
+                payload["adaptive_fallbacks"]["deep_link_opened"] = deep_opened
+
                 result_selectors = self._selector_candidates(
                     site=self.platform_name,
                     slot="result_open",
@@ -409,7 +486,7 @@ class RebuyValuator(BaseValuator):
                     ],
                     payload=payload,
                 )
-                opened = await self._open_best_result(page, result_selectors, normalized_name, payload=payload)
+                opened = deep_opened or await self._open_best_result(page, result_selectors, normalized_name, payload=payload)
                 if not opened:
                     opened = await self._click_first(page, result_selectors, timeout_ms=10000)
                 if not opened:
@@ -459,6 +536,16 @@ class RebuyValuator(BaseValuator):
                 payload["match_quality"] = match
                 if not match.get("ok"):
                     reason = match.get("reason", "low-confidence")
+                    if reason in {"generic-search-url", "generic-category-url"}:
+                        rescue = await self._deep_link_rescue(
+                            page=page,
+                            normalized_name=normalized_name,
+                            condition_selectors=condition_selectors,
+                            payload=payload,
+                        )
+                        if rescue["offer"] is not None:
+                            payload["price_source"] = "deep_link_rescue"
+                            return rescue["offer"], rescue["url"], payload
                     raise RuntimeError(
                         f"Rebuy low-confidence match ({reason}); discarded to prevent false-positive."
                     )
@@ -480,6 +567,96 @@ class RebuyValuator(BaseValuator):
                 await context.close()
                 await browser.close()
                 _remove_file_if_exists(storage_state_path)
+
+    async def _open_best_result_deep_link(self, page: Page, normalized_name: str, *, payload: dict[str, Any]) -> bool:
+        try:
+            html = await page.content()
+        except PlaywrightError:
+            return False
+
+        candidates = _extract_rebuy_product_link_candidates(
+            html=html,
+            base_url=page.url,
+            normalized_name=normalized_name,
+            limit=12,
+        )
+        payload["deep_link_candidates"] = [
+            {
+                "url": item["url"],
+                "text": item["text"],
+                "score": item["assessment"].get("score"),
+                "ok": item["assessment"].get("ok"),
+                "reason": item["assessment"].get("reason"),
+            }
+            for item in candidates[:6]
+        ]
+        if not candidates:
+            return False
+
+        limit = _rebuy_deep_link_limit()
+        for rank, candidate in enumerate(candidates[:limit], start=1):
+            url = str(candidate.get("url") or "").strip()
+            if not url:
+                continue
+            if _is_generic_rebuy_url(url) or _is_search_rebuy_url(url):
+                continue
+            try:
+                await page.goto(url, wait_until="domcontentloaded")
+                await page.wait_for_timeout(900)
+            except PlaywrightError:
+                continue
+            payload["deep_link_pick"] = {
+                "rank": rank,
+                "url": url,
+                "assessment": candidate.get("assessment"),
+                "text": candidate.get("text"),
+            }
+            print(
+                "[rebuy] Deep-link navigation | "
+                f"rank={rank}/{limit} url='{url}' score={candidate.get('assessment', {}).get('score')}"
+            )
+            return True
+        return False
+
+    async def _deep_link_rescue(
+        self,
+        *,
+        page: Page,
+        normalized_name: str,
+        condition_selectors: list[str],
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        payload["adaptive_fallbacks"]["deep_link_rescue"] = True
+        opened = await self._open_best_result_deep_link(page, normalized_name, payload=payload)
+        if not opened:
+            return {"offer": None, "url": None}
+
+        condition_selected = await self._click_first(page, condition_selectors, timeout_ms=5000)
+        if not condition_selected:
+            condition_selected = await self._click_first_semantic(
+                page,
+                keywords=["come nuovo", "grade a", "ottimo", "excellent"],
+                timeout_ms=2600,
+            )
+        payload["condition_selected"] = condition_selected
+        await page.wait_for_timeout(1400)
+
+        match_text = await self._collect_match_text(page)
+        match = _assess_rebuy_match(
+            normalized_name=normalized_name,
+            candidate_text=match_text,
+            source_url=page.url,
+        )
+        payload["match_quality"] = match
+        if not match.get("ok"):
+            return {"offer": None, "url": None}
+
+        price, price_text = await self._extract_price(page, payload=payload)
+        payload["price_text"] = price_text
+        if price is None:
+            return {"offer": None, "url": None}
+        payload["price_source"] = "deep_link_rescue_dom"
+        return {"offer": price, "url": page.url}
 
     async def _open_best_result(
         self,
@@ -542,7 +719,12 @@ class RebuyValuator(BaseValuator):
             for row in ranked[:4]
         ]
 
-        for row in ranked[:4]:
+        # Prefer non-generic candidates for first click attempt.
+        primary = [row for row in ranked if row.get("assessment", {}).get("reason") not in {"generic-search-url", "generic-category-url"}]
+        if not primary:
+            primary = ranked
+
+        for row in primary[:4]:
             node = page.locator(row["selector"]).nth(int(row["index"]))
             try:
                 await node.click(timeout=2800)

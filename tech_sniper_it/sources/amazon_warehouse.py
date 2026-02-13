@@ -170,12 +170,15 @@ CART_ROW_SELECTORS: tuple[str, ...] = (
 CART_DELETE_SELECTORS: tuple[str, ...] = (
     "input[value='Delete']",
     "input[value='Elimina']",
+    "input[value='Rimuovi']",
     "input[value='Löschen']",
     "input[value='Supprimer']",
     "input[value='Eliminar']",
     "button[data-action='delete']",
     "[data-action='delete'] input",
+    "[data-action='delete'] a",
     "input[name='submit.delete']",
+    "input[name^='submit.delete']",
     "a[data-feature-id='item-delete-button']",
 )
 CART_SUBTOTAL_SELECTORS: tuple[str, ...] = (
@@ -1166,10 +1169,13 @@ async def _remove_asin_from_cart(page, *, host: str, asin: str) -> bool:  # noqa
             target = row_locator.locator(selector).first
             if not await target.count():
                 continue
-            if await target.is_visible(timeout=800):
-                await target.click(timeout=1500)
-                clicked = True
-                break
+            try:
+                await target.scroll_into_view_if_needed(timeout=800)
+            except PlaywrightError:
+                pass
+            await target.click(timeout=1800, force=True)
+            clicked = True
+            break
         except PlaywrightError:
             continue
 
@@ -1177,8 +1183,12 @@ async def _remove_asin_from_cart(page, *, host: str, asin: str) -> bool:  # noqa
         remove_pattern = re.compile(r"(delete|remove|elimina|löschen|supprimer|eliminar)", re.IGNORECASE)
         try:
             target = row_locator.get_by_role("button", name=remove_pattern).first
-            if await target.count() and await target.is_visible(timeout=800):
-                await target.click(timeout=1800)
+            if await target.count():
+                try:
+                    await target.scroll_into_view_if_needed(timeout=800)
+                except PlaywrightError:
+                    pass
+                await target.click(timeout=1800, force=True)
                 clicked = True
         except PlaywrightError:
             pass
@@ -1266,7 +1276,32 @@ async def _force_empty_cart(page, *, host: str, max_rounds: int = 5) -> dict[str
             if asin not in failed_total:
                 failed_total.append(asin)
         if not removed_round:
-            break
+            # Fallback: if row-targeted deletion fails (UI drift), try deleting the first visible cart item
+            # to make progress and re-evaluate. This is only used inside force-empty cart logic.
+            progress = False
+            try:
+                generic = page.locator(
+                    ",".join(
+                        [
+                            "input[name^='submit.delete']",
+                            "[data-action='delete'] input",
+                            "[data-action='delete'] a",
+                            "a[data-feature-id='item-delete-button']",
+                        ]
+                    )
+                ).first
+                if await generic.count():
+                    try:
+                        await generic.scroll_into_view_if_needed(timeout=800)
+                    except PlaywrightError:
+                        pass
+                    await generic.click(timeout=1800, force=True)
+                    await page.wait_for_timeout(900)
+                    progress = True
+            except Exception:
+                progress = False
+            if not progress:
+                break
 
     if final_summary is None or not bool(final_summary.get("is_empty")):
         try:

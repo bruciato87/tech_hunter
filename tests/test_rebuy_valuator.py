@@ -9,6 +9,7 @@ import pytest
 from tech_sniper_it.valuators.rebuy import (
     _assess_rebuy_match,
     _extract_contextual_price,
+    _extract_rebuy_product_link_candidates,
     _load_storage_state_b64,
     _remove_file_if_exists,
 )
@@ -87,3 +88,21 @@ def test_rebuy_load_storage_state_b64_disabled_by_env(monkeypatch: pytest.Monkey
     monkeypatch.setenv("REBUY_STORAGE_STATE_B64", encoded)
     monkeypatch.setenv("REBUY_USE_STORAGE_STATE", "false")
     assert _load_storage_state_b64() is None
+
+
+def test_extract_rebuy_product_link_candidates_prefers_specific_product_urls() -> None:
+    html = """
+    <html><body>
+      <a href="/comprare/search?q=Valve%20Steam%20Deck%20OLED%201TB">Search</a>
+      <a href="/comprare/apple">Apple category</a>
+      <a href="/comprare/valve-steam-deck-oled-1tb/123456">Valve Steam Deck OLED 1TB</a>
+      <a href="/comprare/valve-steam-deck/999999">Valve Steam Deck</a>
+    </body></html>
+    """
+    candidates = _extract_rebuy_product_link_candidates(
+        html=html,
+        base_url="https://www.rebuy.it/comprare/search?q=Valve%20Steam%20Deck%20OLED%201TB",
+        normalized_name="Valve Steam Deck OLED 1TB",
+    )
+    assert candidates
+    assert "steam-deck-oled-1tb" in candidates[0]["url"]

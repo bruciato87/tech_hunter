@@ -1426,6 +1426,31 @@ class TrendDeviceValuator(BaseValuator):
                             reset_after_model += 1
                             if reset_after_model >= 3:
                                 payload["wizard_end_reason"] = "model-selection-reset"
+                                await _drain_response_tasks()
+                                price, price_text = await self._extract_price(page, payload=payload)
+                                if price is not None:
+                                    payload["price_source"] = "dom-pre-reset"
+                                    payload["price_text"] = price_text
+                                    self._validate_match_or_raise(
+                                        product=product,
+                                        normalized_name=normalized_name,
+                                        source_url=page.url,
+                                        price_text=price_text,
+                                        payload=payload,
+                                    )
+                                    return price, page.url, payload
+                                network_price, network_snippet = _pick_best_network_candidate(network_price_candidates)
+                                if network_price is not None:
+                                    payload["price_source"] = "network-pre-reset"
+                                    payload["price_text"] = network_snippet
+                                    self._validate_match_or_raise(
+                                        product=product,
+                                        normalized_name=normalized_name,
+                                        source_url=page.url,
+                                        price_text=network_snippet,
+                                        payload=payload,
+                                    )
+                                    return network_price, page.url, payload
                                 raise RuntimeError("TrendDevice wizard reset after model selection (catalog route unavailable).")
 
                     chosen = _pick_wizard_option(
