@@ -14,14 +14,17 @@ from tech_sniper_it.valuators.mpb import (
     _contains_price_hint,
     _detect_blockers,
     _env_or_default,
+    _extract_mpb_api_models,
     _extract_mpb_sell_link_candidates,
     _extract_prices_from_json_blob,
     _extract_contextual_price,
     _load_storage_state_b64,
     _mark_mpb_temporarily_blocked,
+    _mpb_api_market,
     _mpb_block_remaining_seconds,
     _mpb_require_storage_state,
     _pick_best_mpb_network_candidate,
+    _rank_mpb_api_models,
     _remove_file_if_exists,
 )
 
@@ -82,6 +85,12 @@ def test_detect_blockers_cloudflare_and_turnstile() -> None:
     assert "turnstile" in markers
 
 
+def test_detect_blockers_ignores_passive_turnstile_settings_flags() -> None:
+    markers = _detect_blockers('{"turnstile":{"enabled":false},"cloudflareImageResizeEnabled":false}')
+    assert "turnstile" not in markers
+    assert "cloudflare" not in markers
+
+
 def test_extract_contextual_price_prefers_offer_context() -> None:
     text = "Spedizione 20 €. Ti paghiamo 412,99 € con valutazione immediata."
     value, snippet = _extract_contextual_price(text)
@@ -114,6 +123,13 @@ def test_mpb_require_storage_state_defaults_true(monkeypatch: pytest.MonkeyPatch
     assert _mpb_require_storage_state() is True
     monkeypatch.setenv("MPB_REQUIRE_STORAGE_STATE", "false")
     assert _mpb_require_storage_state() is False
+
+
+def test_mpb_api_market_fallbacks_to_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MPB_API_MARKET", "xx")
+    assert _mpb_api_market() == "it"
+    monkeypatch.setenv("MPB_API_MARKET", "de")
+    assert _mpb_api_market() == "de"
 
 
 def test_build_query_variants_prioritizes_ean_and_normalized_name() -> None:
@@ -235,3 +251,47 @@ def test_pick_best_mpb_network_candidate_skips_user_profile_endpoint() -> None:
     value, snippet = _pick_best_mpb_network_candidate(candidates, normalized_name="Canon EOS R7 Body")
     assert value == 500.0
     assert "canon eos r7" in snippet.lower()
+
+
+def test_extract_mpb_api_models_parses_nested_values() -> None:
+    payload = {
+        "results": [
+            {
+                "model_id": {"values": ["69474"]},
+                "model_name": {"values": ["Canon EOS R6"]},
+                "model_url_segment": {"values": ["canon-eos-r6"]},
+                "model_description": {"values": ["Mirrorless"]},
+            },
+            {"foo": "bar"},
+        ]
+    }
+    models = _extract_mpb_api_models(payload)
+    assert models == [
+        {
+            "model_id": "69474",
+            "model_name": "Canon EOS R6",
+            "model_url_segment": "canon-eos-r6",
+            "model_description": "Mirrorless",
+        }
+    ]
+
+
+def test_rank_mpb_api_models_prefers_higher_similarity() -> None:
+    models = [
+        {
+            "model_id": "111",
+            "model_name": "Canon EOS R6",
+            "model_url_segment": "canon-eos-r6",
+            "model_description": "Mirrorless camera",
+        },
+        {
+            "model_id": "222",
+            "model_name": "Sony A7 IV",
+            "model_url_segment": "sony-a7-iv",
+            "model_description": "Mirrorless camera",
+        },
+    ]
+    ranked = _rank_mpb_api_models(models, normalized_name="Canon EOS R6")
+    assert ranked
+    assert ranked[0]["model_id"] == "111"
+    assert ranked[0]["assessment"]["ok"] is True

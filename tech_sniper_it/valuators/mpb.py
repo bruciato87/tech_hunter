@@ -8,7 +8,7 @@ import tempfile
 import time
 from difflib import SequenceMatcher
 from typing import Any
-from urllib.parse import quote_plus, unquote, urljoin, urlparse
+from urllib.parse import quote_plus, unquote, urlencode, urljoin, urlparse
 
 from bs4 import BeautifulSoup
 from playwright.async_api import Error as PlaywrightError
@@ -72,12 +72,26 @@ PRICE_HINTS: tuple[str, ...] = (
 )
 BLOCKER_HINTS: tuple[str, ...] = (
     "ci siamo quasi",
-    "turnstile",
-    "cloudflare",
     "just a moment",
+    "security check",
+    "attention required",
     "challenge-platform",
+    "cf-chl",
     "enable javascript and cookies to continue",
     "verify you are human",
+)
+BLOCKER_VENDOR_HINTS: tuple[str, ...] = (
+    "turnstile",
+    "cloudflare",
+)
+BLOCKER_VENDOR_CONTEXT_HINTS: tuple[str, ...] = (
+    "challenge",
+    "security check",
+    "just a moment",
+    "verify you are human",
+    "cf-chl",
+    "attention required",
+    "captcha",
 )
 MATCH_STOPWORDS: set[str] = {
     "amazon",
@@ -137,6 +151,59 @@ MPB_NETWORK_BLOCKERS: tuple[str, ...] = (
     "sconto",
     "public api v2 user me",
 )
+MPB_API_ACCEPT_HEADER = "application/json, text/plain, */*"
+MPB_API_PURCHASE_PRICE_PATH_TEMPLATE = "https://www.mpb.com/public-api/v1/models/purchase-price/{model_id}/{condition}/"
+MPB_API_MODEL_QUERY_FIELDS: tuple[str, ...] = (
+    "model_id",
+    "model_name",
+    "model_url_segment",
+    "model_description",
+)
+MPB_API_MODEL_MARKET_MAP: dict[str, str] = {
+    "it": "EU",
+    "de": "EU",
+    "fr": "EU",
+    "es": "EU",
+    "eu": "EU",
+    "uk": "UK",
+    "gb": "UK",
+}
+MPB_API_CONTENT_LANGUAGE_MAP: dict[str, str] = {
+    "it": "it_IT",
+    "de": "de_DE",
+    "fr": "fr_FR",
+    "es": "es_ES",
+    "uk": "en_GB",
+    "gb": "en_GB",
+    "eu": "en_GB",
+}
+MPB_API_ACCEPT_LANGUAGE_MAP: dict[str, str] = {
+    "it": "it-IT,it;q=0.9,en;q=0.8",
+    "de": "de-DE,de;q=0.9,en;q=0.8",
+    "fr": "fr-FR,fr;q=0.9,en;q=0.8",
+    "es": "es-ES,es;q=0.9,en;q=0.8",
+    "uk": "en-GB,en;q=0.9",
+    "gb": "en-GB,en;q=0.9",
+    "eu": "en-GB,en;q=0.9",
+}
+MPB_API_LOCALE_SEGMENT_MAP: dict[str, str] = {
+    "it": "it-it",
+    "de": "de-de",
+    "fr": "fr-fr",
+    "es": "es-es",
+    "uk": "en-uk",
+    "gb": "en-uk",
+    "eu": "it-it",
+}
+MPB_API_SEARCH_PATH_MAP: dict[str, str] = {
+    "it": "cerca",
+    "de": "suche",
+    "fr": "recherche",
+    "es": "buscar",
+    "uk": "search",
+    "gb": "search",
+    "eu": "cerca",
+}
 _MPB_BLOCKED_UNTIL_TS = 0.0
 _MPB_BLOCK_REASON = ""
 _MPB_STORAGE_STATE_ERROR = ""
@@ -235,7 +302,138 @@ def _detect_blockers(*chunks: str) -> list[str]:
     for hint in BLOCKER_HINTS:
         if hint in lowered:
             markers.append(hint)
+    for vendor in BLOCKER_VENDOR_HINTS:
+        if vendor not in lowered:
+            continue
+        if any(context in lowered for context in BLOCKER_VENDOR_CONTEXT_HINTS):
+            markers.append(vendor)
     return markers
+
+
+def _mpb_api_purchase_price_enabled() -> bool:
+    return _env_or_default("MPB_API_PURCHASE_PRICE_ENABLED", "true").lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+
+
+def _mpb_api_market() -> str:
+    raw = _env_or_default("MPB_API_MARKET", "it").strip().lower()
+    if raw in MPB_API_MODEL_MARKET_MAP:
+        return raw
+    return "it"
+
+
+def _mpb_api_condition() -> str:
+    raw = _env_or_default("MPB_API_CONDITION", "excellent").strip().lower()
+    if raw in {"excellent", "good", "new"}:
+        return raw
+    return "excellent"
+
+
+def _mpb_api_model_market(market: str) -> str:
+    return MPB_API_MODEL_MARKET_MAP.get((market or "").strip().lower(), "EU")
+
+
+def _mpb_api_content_language(market: str) -> str:
+    return MPB_API_CONTENT_LANGUAGE_MAP.get((market or "").strip().lower(), "it_IT")
+
+
+def _mpb_api_accept_language(market: str) -> str:
+    return MPB_API_ACCEPT_LANGUAGE_MAP.get((market or "").strip().lower(), "it-IT,it;q=0.9,en;q=0.8")
+
+
+def _mpb_api_locale_segment(market: str) -> str:
+    return MPB_API_LOCALE_SEGMENT_MAP.get((market or "").strip().lower(), "it-it")
+
+
+def _mpb_api_search_path(market: str) -> str:
+    return MPB_API_SEARCH_PATH_MAP.get((market or "").strip().lower(), "cerca")
+
+
+def _extract_nested_values(raw: Any) -> list[str]:
+    if isinstance(raw, dict):
+        values = raw.get("values")
+        if isinstance(values, list):
+            return [str(item).strip() for item in values if str(item).strip()]
+    if isinstance(raw, list):
+        return [str(item).strip() for item in raw if str(item).strip()]
+    if isinstance(raw, (str, int, float)):
+        value = str(raw).strip()
+        if value:
+            return [value]
+    return []
+
+
+def _extract_mpb_api_models(blob: Any) -> list[dict[str, str]]:
+    if not isinstance(blob, dict):
+        return []
+    rows = blob.get("results")
+    if not isinstance(rows, list):
+        return []
+    extracted: list[dict[str, str]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        model_ids = _extract_nested_values(row.get("model_id"))
+        names = _extract_nested_values(row.get("model_name"))
+        slugs = _extract_nested_values(row.get("model_url_segment"))
+        descriptions = _extract_nested_values(row.get("model_description"))
+        if not model_ids or not names:
+            continue
+        extracted.append(
+            {
+                "model_id": model_ids[0],
+                "model_name": names[0],
+                "model_url_segment": slugs[0] if slugs else "",
+                "model_description": descriptions[0] if descriptions else "",
+            }
+        )
+    return extracted
+
+
+def _rank_mpb_api_models(
+    models: list[dict[str, str]],
+    *,
+    normalized_name: str,
+) -> list[dict[str, Any]]:
+    ranked: list[dict[str, Any]] = []
+    for model in models:
+        model_id = str(model.get("model_id") or "").strip()
+        model_name = str(model.get("model_name") or "").strip()
+        if not model_id or not model_name:
+            continue
+        slug = str(model.get("model_url_segment") or "").strip().strip("/")
+        description = str(model.get("model_description") or "").strip()
+        candidate_text = " ".join(part for part in (model_name, slug.replace("-", " "), description[:180]) if part)
+        synthetic_url = f"https://www.mpb.com/it-it/sell/product/{slug}/{model_id}" if slug else f"https://www.mpb.com/it-it/sell/{model_id}"
+        assessment = _assess_mpb_match(
+            normalized_name=normalized_name,
+            candidate_text=candidate_text,
+            source_url=synthetic_url,
+        )
+        ranking = int(assessment.get("score", 0)) + (26 if assessment.get("ok") else 0)
+        ranked.append(
+            {
+                "model_id": model_id,
+                "model_name": model_name,
+                "model_url_segment": slug,
+                "model_description": description,
+                "assessment": assessment,
+                "ranking": ranking,
+            }
+        )
+    return sorted(
+        ranked,
+        key=lambda item: (
+            int(item.get("ranking", 0)),
+            item.get("assessment", {}).get("token_ratio", 0.0),
+            item.get("assessment", {}).get("ratio", 0.0),
+        ),
+        reverse=True,
+    )
 
 
 def _extract_contextual_price(text: str) -> tuple[float | None, str]:
@@ -622,6 +820,260 @@ class MPBValuator(BaseValuator):
     condition_label = "ottimo"
     base_url = "https://www.mpb.com/it-it/sell"
 
+    async def _api_fetch_json(
+        self,
+        page: Page,
+        *,
+        url: str,
+        headers: dict[str, str],
+    ) -> dict[str, Any]:
+        result = await page.evaluate(
+            """
+            async ({url, headers}) => {
+              try {
+                const response = await fetch(url, {
+                  method: "GET",
+                  credentials: "include",
+                  headers: headers || {},
+                });
+                const text = await response.text();
+                let parsed = null;
+                try {
+                  parsed = JSON.parse(text);
+                } catch (_error) {
+                  parsed = null;
+                }
+                return {
+                  ok: response.ok,
+                  status: response.status,
+                  text: (text || "").slice(0, 1800),
+                  json: parsed,
+                };
+              } catch (error) {
+                return {
+                  ok: false,
+                  status: 0,
+                  error: String(error),
+                };
+              }
+            }
+            """,
+            {"url": url, "headers": headers},
+        )
+        if not isinstance(result, dict):
+            return {"ok": False, "status": 0, "error": "invalid-fetch-result"}
+        return result
+
+    async def _api_search_models(
+        self,
+        page: Page,
+        *,
+        query: str,
+        model_market: str,
+        content_language: str,
+        rows: int,
+    ) -> dict[str, Any]:
+        params: list[tuple[str, str]] = [
+            ("query", query),
+            ("filter_query[model_market]", model_market),
+            ("filter_query[object_type]", "model"),
+            ("rows", str(rows)),
+            ("start", "0"),
+            ("minimum_match", "70%"),
+        ]
+        for field_name in MPB_API_MODEL_QUERY_FIELDS:
+            params.append(("field_list", field_name))
+        query_string = urlencode(params, doseq=True)
+        url = f"https://www.mpb.com/search-service/product/query/?{query_string}"
+        return await self._api_fetch_json(
+            page,
+            url=url,
+            headers={
+                "accept": MPB_API_ACCEPT_HEADER,
+                "content-language": content_language,
+            },
+        )
+
+    async def _api_purchase_price(
+        self,
+        page: Page,
+        *,
+        model_id: str,
+        market: str,
+        content_language: str,
+        condition: str,
+    ) -> dict[str, Any]:
+        safe_model_id = re.sub(r"[^0-9]", "", model_id)
+        if not safe_model_id:
+            return {"ok": False, "status": 0, "error": "invalid-model-id"}
+        url = MPB_API_PURCHASE_PRICE_PATH_TEMPLATE.format(model_id=safe_model_id, condition=condition)
+        return await self._api_fetch_json(
+            page,
+            url=url,
+            headers={
+                "accept": MPB_API_ACCEPT_HEADER,
+                "content-language": content_language,
+                "X-Market": market,
+            },
+        )
+
+    async def _fetch_offer_via_purchase_price_api(
+        self,
+        *,
+        normalized_name: str,
+        query_candidates: list[str],
+        payload: dict[str, Any],
+        user_agent: str,
+    ) -> tuple[float | None, str | None]:
+        market = _mpb_api_market()
+        model_market = _mpb_api_model_market(market)
+        content_language = _mpb_api_content_language(market)
+        accept_language = _mpb_api_accept_language(market)
+        locale_segment = _mpb_api_locale_segment(market)
+        search_path = _mpb_api_search_path(market)
+        condition = _mpb_api_condition()
+        query_limit = max(1, int(_env_or_default("MPB_API_QUERY_LIMIT", "4")))
+        model_limit = max(1, int(_env_or_default("MPB_API_MODEL_LIMIT", "6")))
+        rows = max(6, min(28, int(_env_or_default("MPB_API_SEARCH_ROWS", "16"))))
+
+        api_payload: dict[str, Any] = {
+            "market": market,
+            "model_market": model_market,
+            "condition": condition,
+            "query_limit": query_limit,
+            "model_limit": model_limit,
+            "rows": rows,
+            "queries": [],
+        }
+        payload["api_purchase_price"] = api_payload
+
+        async with async_playwright() as playwright:
+            browser = await playwright.chromium.launch(headless=self.headless)
+            try:
+                context = await browser.new_context(
+                    locale=accept_language.split(",")[0].strip(),
+                    user_agent=user_agent,
+                    extra_http_headers={"Accept-Language": accept_language},
+                )
+                await _apply_stealth_context(context)
+                page = await context.new_page()
+                page.set_default_timeout(self.nav_timeout_ms)
+
+                bootstrap_query = quote_plus(query_candidates[0] if query_candidates else normalized_name)
+                bootstrap_url = f"https://www.mpb.com/{locale_segment}/{search_path}?q={bootstrap_query}"
+                await page.goto(bootstrap_url, wait_until="domcontentloaded")
+                await self._accept_cookie_if_present(page)
+                page_blockers = await self._detect_page_blockers(page)
+                if page_blockers:
+                    api_payload["blockers"] = page_blockers
+
+                for query in query_candidates[:query_limit]:
+                    query_item: dict[str, Any] = {"query": query, "status": "pending"}
+                    api_payload["queries"].append(query_item)
+                    search_response = await self._api_search_models(
+                        page,
+                        query=query,
+                        model_market=model_market,
+                        content_language=content_language,
+                        rows=rows,
+                    )
+                    query_item["search_status"] = int(search_response.get("status", 0) or 0)
+                    if int(search_response.get("status", 0) or 0) != 200:
+                        query_item["status"] = "search-error"
+                        query_item["search_error"] = str(search_response.get("error") or search_response.get("text") or "")[:220]
+                        continue
+
+                    models = _extract_mpb_api_models(search_response.get("json"))
+                    ranked_models = _rank_mpb_api_models(models, normalized_name=normalized_name)
+                    query_item["models_found"] = len(models)
+                    query_item["models_ranked"] = len(ranked_models)
+                    if not ranked_models:
+                        query_item["status"] = "no-models"
+                        continue
+
+                    query_item["top_models"] = [
+                        {
+                            "model_id": item.get("model_id"),
+                            "model_name": item.get("model_name"),
+                            "score": item.get("assessment", {}).get("score"),
+                            "reason": item.get("assessment", {}).get("reason"),
+                            "ok": item.get("assessment", {}).get("ok"),
+                        }
+                        for item in ranked_models[:4]
+                    ]
+
+                    for model in ranked_models[:model_limit]:
+                        assessment = model.get("assessment", {})
+                        score = int(assessment.get("score", 0) or 0)
+                        token_ratio = float(assessment.get("token_ratio", 0.0) or 0.0)
+                        ratio = float(assessment.get("ratio", 0.0) or 0.0)
+                        if not assessment.get("ok") and not (
+                            score >= 54
+                            and (token_ratio >= 0.60 or ratio >= 0.62)
+                        ):
+                            continue
+                        model_id = str(model.get("model_id") or "").strip()
+                        if not model_id:
+                            continue
+                        price_response = await self._api_purchase_price(
+                            page,
+                            model_id=model_id,
+                            market=market,
+                            content_language=content_language,
+                            condition=condition,
+                        )
+                        price_status = int(price_response.get("status", 0) or 0)
+                        query_item.setdefault("price_checks", []).append(
+                            {
+                                "model_id": model_id,
+                                "model_name": model.get("model_name"),
+                                "status": price_status,
+                            }
+                        )
+                        if price_status != 200:
+                            continue
+                        price_blob = price_response.get("json")
+                        if not isinstance(price_blob, dict):
+                            continue
+                        raw_price = price_blob.get("purchase_value")
+                        try:
+                            purchase_value = float(raw_price)
+                        except (TypeError, ValueError):
+                            purchase_value = 0.0
+                        if purchase_value <= 0:
+                            continue
+                        currency = str(price_blob.get("currency") or "EUR").strip().upper()
+                        if currency != "EUR":
+                            continue
+
+                        model_name = str(model.get("model_name") or "").strip()
+                        if not model_name:
+                            model_name = normalized_name
+                        source_url = f"https://www.mpb.com/{locale_segment}/{search_path}?q={quote_plus(model_name)}"
+                        query_item["status"] = "ok"
+                        payload["price_text"] = (
+                            f"purchase_value={purchase_value:.2f} {currency} "
+                            f"condition={price_blob.get('condition_option', {}).get('value', condition)}"
+                        )
+                        payload["price_source"] = "api_purchase_price"
+                        payload["match_quality"] = assessment
+                        payload["query"] = query
+                        payload["query_index"] = (query_candidates.index(query) + 1) if query in query_candidates else 1
+                        payload["api_purchase_price_result"] = {
+                            "model_id": model_id,
+                            "model_name": model_name,
+                            "model_url_segment": model.get("model_url_segment"),
+                            "condition": condition,
+                            "currency": currency,
+                            "purchase_value": round(purchase_value, 2),
+                        }
+                        return round(purchase_value, 2), source_url
+
+                    query_item["status"] = "no-price"
+            finally:
+                await browser.close()
+        return None, None
+
     async def _fetch_offer(
         self,
         product: AmazonProduct,
@@ -636,20 +1088,13 @@ class MPBValuator(BaseValuator):
             )
         max_attempts = max(1, int(_env_or_default("MPB_MAX_ATTEMPTS", "3")))
         query_candidates = _build_query_variants(product, normalized_name)
-        storage_state_path = _load_storage_state_b64()
-        if _mpb_require_storage_state() and storage_state_path is None:
-            reason = _MPB_STORAGE_STATE_ERROR or "missing"
-            raise ValuatorRuntimeError(
-                f"MPB storage_state missing/invalid ({reason}); set MPB_STORAGE_STATE_B64 or disable MPB_REQUIRE_STORAGE_STATE.",
-                payload={"storage_state": False, "storage_state_error": reason},
-            )
         payload: dict[str, Any] = {
             "query": query_candidates[0] if query_candidates else normalized_name,
             "query_candidates": query_candidates,
             "condition_target": "Ottimo",
             "attempts": [],
             "adaptive_fallbacks": {},
-            "storage_state": bool(storage_state_path),
+            "storage_state": False,
         }
         rotate_user_agent = _env_or_default("MPB_ROTATE_USER_AGENT", "true").strip().lower() not in {
             "0",
@@ -658,6 +1103,37 @@ class MPBValuator(BaseValuator):
             "off",
         }
         sticky_user_agent = _env_or_default("MPB_USER_AGENT", DEFAULT_USER_AGENTS[1]).strip() or DEFAULT_USER_AGENTS[1]
+        api_enabled = _mpb_api_purchase_price_enabled()
+        payload["api_purchase_price_enabled"] = api_enabled
+        if api_enabled:
+            try:
+                api_offer, api_source = await self._fetch_offer_via_purchase_price_api(
+                    normalized_name=normalized_name,
+                    query_candidates=query_candidates,
+                    payload=payload,
+                    user_agent=sticky_user_agent,
+                )
+            except Exception as exc:
+                payload["api_purchase_price_error"] = str(exc)
+                api_offer, api_source = None, None
+            if api_offer is not None:
+                _clear_mpb_temporary_block()
+                return api_offer, api_source, payload
+
+        storage_state_path = _load_storage_state_b64()
+        payload["storage_state"] = bool(storage_state_path)
+        if _mpb_require_storage_state() and storage_state_path is None:
+            reason = _MPB_STORAGE_STATE_ERROR or "missing"
+            raise ValuatorRuntimeError(
+                f"MPB storage_state missing/invalid ({reason}); set MPB_STORAGE_STATE_B64 or disable MPB_REQUIRE_STORAGE_STATE.",
+                payload={
+                    "storage_state": False,
+                    "storage_state_error": reason,
+                    "api_purchase_price_enabled": api_enabled,
+                    "api_purchase_price": payload.get("api_purchase_price"),
+                    "api_purchase_price_error": payload.get("api_purchase_price_error"),
+                },
+            )
         payload["user_agent_strategy"] = {
             "rotate": rotate_user_agent and not bool(storage_state_path),
             "sticky_with_storage_state": bool(storage_state_path),
