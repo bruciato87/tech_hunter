@@ -18,6 +18,7 @@ from tech_sniper_it.worker import (
     _dedupe_products,
     _detect_outage_optional_platforms,
     _exclude_non_profitable_candidates,
+    _filter_predicted_candidates,
     _filter_non_core_device_candidates,
     _format_scan_summary,
     _format_smoke_summary,
@@ -455,6 +456,66 @@ def test_prioritize_products_prefers_expected_spread_with_scoring_context() -> N
     }
     ordered = _prioritize_products([camera, iphone], scoring_context=context)
     assert ordered[0].title == "Apple iPhone 15 Pro 128GB"
+
+
+def test_filter_predicted_candidates_drops_low_score_items(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SCAN_MIN_EXPECTED_SPREAD_EUR", "40")
+    monkeypatch.setenv("SCAN_MIN_CANDIDATE_SCORE", "25")
+    context = {
+        "enabled": True,
+        "exact_offer_median": {
+            "apple iphone 14 128gb": 730.0,
+            "garmin forerunner 955": 200.0,
+        },
+        "exact_confidence": {
+            "apple iphone 14 128gb": 0.9,
+            "garmin forerunner 955": 0.9,
+        },
+        "category_offer_median": {},
+        "category_spread_median": {},
+        "platform_health": {
+            "rebuy": {"rate": 0.9, "samples": 20},
+            "trenddevice": {"rate": 0.9, "samples": 20},
+        },
+    }
+    iphone = AmazonProduct(
+        title="Apple iPhone 14 128GB",
+        price_eur=620.0,
+        category=ProductCategory.APPLE_PHONE,
+    )
+    garmin = AmazonProduct(
+        title="Garmin Forerunner 955",
+        price_eur=449.0,
+        category=ProductCategory.SMARTWATCH,
+    )
+    kept, dropped = _filter_predicted_candidates(
+        [iphone, garmin],
+        scoring_context=context,
+        min_keep=1,
+    )
+    assert len(kept) == 1
+    assert kept[0].title == "Apple iPhone 14 128GB"
+    assert len(dropped) == 1
+
+
+def test_filter_predicted_candidates_respects_min_keep(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SCAN_MIN_EXPECTED_SPREAD_EUR", "80")
+    monkeypatch.setenv("SCAN_MIN_CANDIDATE_SCORE", "80")
+    context = {
+        "enabled": True,
+        "exact_offer_median": {},
+        "exact_confidence": {},
+        "category_offer_median": {
+            ProductCategory.SMARTWATCH.value: 120.0,
+            ProductCategory.APPLE_PHONE.value: 200.0,
+        },
+        "category_spread_median": {},
+        "platform_health": {"rebuy": {"rate": 0.7, "samples": 20}},
+    }
+    p1 = AmazonProduct(title="Apple iPhone 14 128GB", price_eur=650.0, category=ProductCategory.APPLE_PHONE)
+    p2 = AmazonProduct(title="Garmin Forerunner 955", price_eur=420.0, category=ProductCategory.SMARTWATCH)
+    kept, _dropped = _filter_predicted_candidates([p1, p2], scoring_context=context, min_keep=2)
+    assert len(kept) == 2
 
 
 def test_build_dynamic_warehouse_queries_prefers_trend_models(monkeypatch: pytest.MonkeyPatch) -> None:

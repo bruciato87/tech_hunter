@@ -1570,6 +1570,64 @@ def _prioritize_products(
     return [item for item, _score in rows]
 
 
+def _filter_predicted_candidates(
+    products: list[AmazonProduct],
+    *,
+    scoring_context: dict[str, Any],
+    min_keep: int,
+) -> tuple[list[AmazonProduct], list[str]]:
+    if not products or not scoring_context.get("enabled"):
+        return products, []
+
+    min_expected_spread = _to_float(_env_or_default("SCAN_MIN_EXPECTED_SPREAD_EUR", "15"))
+    min_candidate_score = _to_float(_env_or_default("SCAN_MIN_CANDIDATE_SCORE", "0"))
+    spread_floor = float(min_expected_spread) if min_expected_spread is not None else 15.0
+    score_floor = float(min_candidate_score) if min_candidate_score is not None else 0.0
+
+    scored: list[tuple[AmazonProduct, dict[str, Any]]] = [
+        (item, _score_product_candidate(item, scoring_context))
+        for item in products
+    ]
+    kept: list[tuple[AmazonProduct, dict[str, Any]]] = []
+    dropped_logs: list[str] = []
+    for item, row in scored:
+        expected_spread = _to_float(row.get("expected_spread"))
+        score = _to_float(row.get("score")) or 0.0
+        if expected_spread is None:
+            kept.append((item, row))
+            continue
+        if expected_spread >= spread_floor and score >= score_floor:
+            kept.append((item, row))
+            continue
+        dropped_logs.append(
+            f"title='{_safe_text(item.title, max_len=90)}' score={score:.2f} spread_est={expected_spread:.2f}"
+        )
+
+    if len(kept) < max(1, min_keep):
+        ranked = sorted(
+            scored,
+            key=lambda pair: (
+                _to_float(pair[1].get("score")) or -9999.0,
+                _to_float(pair[1].get("expected_spread")) or -9999.0,
+            ),
+            reverse=True,
+        )
+        refill: list[tuple[AmazonProduct, dict[str, Any]]] = []
+        seen_ids = {id(item) for item, _ in kept}
+        for item, row in ranked:
+            marker = id(item)
+            if marker in seen_ids:
+                continue
+            refill.append((item, row))
+            seen_ids.add(marker)
+            if len(kept) + len(refill) >= max(1, min_keep):
+                break
+        kept.extend(refill)
+
+    final_items = [item for item, _ in kept]
+    return final_items, dropped_logs
+
+
 def _priority_preview(products: list[AmazonProduct], scoring_context: dict[str, Any], limit: int = 8) -> list[str]:
     preview: list[str] = []
     top = products[: max(0, limit)]
@@ -2020,6 +2078,23 @@ async def _run_scan_command(payload: dict[str, Any]) -> int:
         print("[scan] Scoring context disabled; using legacy priority.")
 
     products = _prioritize_products(products, scoring_context=scoring_context)
+    predicted_min_keep_default = max(4, scan_target_products // 2)
+    predicted_min_keep = max(2, int(_env_or_default("SCAN_PREDICTED_MIN_KEEP", str(predicted_min_keep_default))))
+    products, predicted_drops = _filter_predicted_candidates(
+        products,
+        scoring_context=scoring_context,
+        min_keep=predicted_min_keep,
+    )
+    if predicted_drops:
+        print(
+            "[scan] Predicted-profit filter applied | "
+            f"dropped={len(predicted_drops)} kept={len(products)} "
+            f"thresholds={{spread>={_env_or_default('SCAN_MIN_EXPECTED_SPREAD_EUR', '15')}, score>={_env_or_default('SCAN_MIN_CANDIDATE_SCORE', '0')}}}"
+        )
+        for row in predicted_drops[:5]:
+            print(f"[scan] Predicted drop -> {row}")
+        if len(predicted_drops) > 5:
+            print(f"[scan] Predicted drop -> ... and {len(predicted_drops) - 5} more.")
     preview_rows = _priority_preview(products, scoring_context, limit=min(len(products), 8))
     if preview_rows:
         print("[scan] Priority preview:")

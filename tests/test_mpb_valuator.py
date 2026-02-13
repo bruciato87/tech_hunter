@@ -23,6 +23,8 @@ from tech_sniper_it.valuators.mpb import (
     _mpb_api_market,
     _mpb_block_remaining_seconds,
     _mpb_require_storage_state,
+    _mpb_skip_ui_on_api_block,
+    _mpb_total_time_budget_seconds,
     _pick_best_mpb_network_candidate,
     _rank_mpb_api_models,
     _remove_file_if_exists,
@@ -123,6 +125,22 @@ def test_mpb_require_storage_state_defaults_true(monkeypatch: pytest.MonkeyPatch
     assert _mpb_require_storage_state() is True
     monkeypatch.setenv("MPB_REQUIRE_STORAGE_STATE", "false")
     assert _mpb_require_storage_state() is False
+
+
+def test_mpb_skip_ui_on_api_block_defaults_true(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("MPB_SKIP_UI_ON_API_BLOCK", raising=False)
+    assert _mpb_skip_ui_on_api_block() is True
+    monkeypatch.setenv("MPB_SKIP_UI_ON_API_BLOCK", "false")
+    assert _mpb_skip_ui_on_api_block() is False
+
+
+def test_mpb_total_time_budget_seconds_bounds(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MPB_TOTAL_TIME_BUDGET_SECONDS", "2")
+    assert _mpb_total_time_budget_seconds() == 8.0
+    monkeypatch.setenv("MPB_TOTAL_TIME_BUDGET_SECONDS", "25")
+    assert _mpb_total_time_budget_seconds() == 25.0
+    monkeypatch.setenv("MPB_TOTAL_TIME_BUDGET_SECONDS", "999")
+    assert _mpb_total_time_budget_seconds() == 90.0
 
 
 def test_mpb_api_market_fallbacks_to_it(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -285,6 +285,24 @@ def _mpb_require_storage_state() -> bool:
     }
 
 
+def _mpb_skip_ui_on_api_block() -> bool:
+    return _env_or_default("MPB_SKIP_UI_ON_API_BLOCK", "true").lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+
+
+def _mpb_total_time_budget_seconds() -> float:
+    raw = (os.getenv("MPB_TOTAL_TIME_BUDGET_SECONDS") or "").strip()
+    try:
+        value = float(raw) if raw else 20.0
+    except ValueError:
+        value = 20.0
+    return max(8.0, min(value, 90.0))
+
+
 def _remove_file_if_exists(path: str | None) -> None:
     if not path:
         return
@@ -862,6 +880,11 @@ class MPBValuator(BaseValuator):
         )
         if not isinstance(result, dict):
             return {"ok": False, "status": 0, "error": "invalid-fetch-result"}
+        response_text = str(result.get("text") or "")
+        if response_text:
+            blockers = _detect_blockers(response_text)
+            if blockers:
+                result["blockers"] = blockers[:12]
         return result
 
     async def _api_search_models(
@@ -949,6 +972,8 @@ class MPBValuator(BaseValuator):
             "queries": [],
         }
         payload["api_purchase_price"] = api_payload
+        api_blockers: list[str] = []
+        blocked_hard = False
 
         async with async_playwright() as playwright:
             browser = await playwright.chromium.launch(headless=self.headless)
@@ -969,6 +994,10 @@ class MPBValuator(BaseValuator):
                 page_blockers = await self._detect_page_blockers(page)
                 if page_blockers:
                     api_payload["blockers"] = page_blockers
+                    api_payload["blocked"] = True
+                    api_blockers.extend(page_blockers)
+                    if _mpb_skip_ui_on_api_block():
+                        return None, None
 
                 for query in query_candidates[:query_limit]:
                     if time.monotonic() > deadline:
@@ -985,8 +1014,22 @@ class MPBValuator(BaseValuator):
                     )
                     query_item["search_status"] = int(search_response.get("status", 0) or 0)
                     if int(search_response.get("status", 0) or 0) != 200:
-                        query_item["status"] = "search-error"
+                        blockers = [str(item).strip() for item in (search_response.get("blockers") or []) if str(item).strip()]
+                        if blockers:
+                            query_item["status"] = "search-blocked"
+                            query_item["blockers"] = blockers[:8]
+                            api_payload["blocked"] = True
+                            api_blockers.extend(blockers)
+                        else:
+                            query_item["status"] = "search-error"
                         query_item["search_error"] = str(search_response.get("error") or search_response.get("text") or "")[:220]
+                        search_status = int(search_response.get("status", 0) or 0)
+                        if search_status in {401, 403, 429}:
+                            api_payload["blocked"] = True
+                            api_payload["blocked_status"] = search_status
+                            blocked_hard = True
+                        if blocked_hard and _mpb_skip_ui_on_api_block():
+                            break
                         continue
 
                     models = _extract_mpb_api_models(search_response.get("json"))
@@ -1041,6 +1084,14 @@ class MPBValuator(BaseValuator):
                             }
                         )
                         if price_status != 200:
+                            blockers = [str(item).strip() for item in (price_response.get("blockers") or []) if str(item).strip()]
+                            if blockers:
+                                api_payload["blocked"] = True
+                                api_blockers.extend(blockers)
+                            if price_status in {401, 403, 429}:
+                                api_payload["blocked"] = True
+                                api_payload["blocked_status"] = price_status
+                                blocked_hard = True
                             continue
                         price_blob = price_response.get("json")
                         if not isinstance(price_blob, dict):
@@ -1080,8 +1131,12 @@ class MPBValuator(BaseValuator):
                         return round(purchase_value, 2), source_url
 
                     query_item["status"] = "no-price"
+                    if blocked_hard and _mpb_skip_ui_on_api_block():
+                        break
             finally:
                 await browser.close()
+        if api_blockers:
+            api_payload["blockers"] = sorted(set(api_blockers))[:20]
         return None, None
 
     async def _fetch_offer(
@@ -1129,6 +1184,21 @@ class MPBValuator(BaseValuator):
             if api_offer is not None:
                 _clear_mpb_temporary_block()
                 return api_offer, api_source, payload
+            api_state = payload.get("api_purchase_price") if isinstance(payload.get("api_purchase_price"), dict) else {}
+            if bool(api_state.get("blocked")) and _mpb_skip_ui_on_api_block():
+                blockers = [str(item).strip() for item in (api_state.get("blockers") or []) if str(item).strip()]
+                if blockers:
+                    _mark_mpb_temporarily_blocked("api-blocked")
+                raise ValuatorRuntimeError(
+                    "MPB API blocked by anti-bot challenge; UI fallback skipped.",
+                    payload={
+                        "api_purchase_price_enabled": api_enabled,
+                        "api_purchase_price": payload.get("api_purchase_price"),
+                        "api_purchase_price_error": payload.get("api_purchase_price_error"),
+                        "blocker_hits": blockers[:12] if blockers else [],
+                    },
+                    source_url=self.base_url,
+                )
 
         storage_state_path = _load_storage_state_b64()
         payload["storage_state"] = bool(storage_state_path)
@@ -1148,6 +1218,22 @@ class MPBValuator(BaseValuator):
             "rotate": rotate_user_agent and not bool(storage_state_path),
             "sticky_with_storage_state": bool(storage_state_path),
         }
+        total_budget_seconds = _mpb_total_time_budget_seconds()
+        deadline = time.monotonic() + total_budget_seconds
+        payload["valuation_time_budget_s"] = total_budget_seconds
+
+        def _remaining_budget_ms(default_ms: int, *, min_ms: int = 0) -> int:
+            remaining = int((deadline - time.monotonic()) * 1000)
+            if remaining <= 0:
+                return 0
+            bounded = min(int(default_ms), remaining)
+            if min_ms > 0:
+                return min(remaining, max(min_ms, bounded))
+            return bounded
+
+        def _budget_exhausted() -> bool:
+            return time.monotonic() > deadline
+
         blocker_hits: list[str] = []
         had_unblocked_attempt = False
         network_price_candidates: list[dict[str, Any]] = []
@@ -1181,7 +1267,19 @@ class MPBValuator(BaseValuator):
             try:
                 global_attempt = 0
                 for query_index, query in enumerate(query_candidates, start=1):
+                    if _budget_exhausted():
+                        raise ValuatorRuntimeError(
+                            f"MPB valuation budget exceeded ({total_budget_seconds:.0f}s).",
+                            payload=payload,
+                            source_url=self.base_url,
+                        )
                     for attempt in range(1, max_attempts + 1):
+                        if _budget_exhausted():
+                            raise ValuatorRuntimeError(
+                                f"MPB valuation budget exceeded ({total_budget_seconds:.0f}s).",
+                                payload=payload,
+                                source_url=self.base_url,
+                            )
                         global_attempt += 1
                         if storage_state_path:
                             # Cloudflare clearance cookies are often tied to UA/session.
@@ -1203,7 +1301,15 @@ class MPBValuator(BaseValuator):
                         context = await browser.new_context(**context_kwargs)
                         await _apply_stealth_context(context)
                         page = await context.new_page()
-                        page.set_default_timeout(self.nav_timeout_ms)
+                        page_default_timeout = _remaining_budget_ms(int(self.nav_timeout_ms), min_ms=1200)
+                        if page_default_timeout <= 0:
+                            await context.close()
+                            raise ValuatorRuntimeError(
+                                f"MPB valuation budget exceeded ({total_budget_seconds:.0f}s).",
+                                payload=payload,
+                                source_url=self.base_url,
+                            )
+                        page.set_default_timeout(page_default_timeout)
                         response_tasks: set[asyncio.Task[Any]] = set()
 
                         async def _capture_response_body(response) -> None:  # noqa: ANN001
@@ -1283,6 +1389,12 @@ class MPBValuator(BaseValuator):
                         page.on("response", _on_response)
                         try:
                             payload["query"] = query
+                            if _budget_exhausted():
+                                raise ValuatorRuntimeError(
+                                    f"MPB valuation budget exceeded ({total_budget_seconds:.0f}s).",
+                                    payload=payload,
+                                    source_url=self.base_url,
+                                )
                             await page.goto(self.base_url, wait_until="domcontentloaded")
                             await self._accept_cookie_if_present(page)
                             blockers = await self._detect_page_blockers(page)
@@ -1339,7 +1451,7 @@ class MPBValuator(BaseValuator):
                             search_selector = await self._wait_for_search_input(
                                 page,
                                 selectors=search_selectors,
-                                timeout_ms=10000,
+                                timeout_ms=_remaining_budget_ms(10000, min_ms=1800),
                             )
                             semantic_search = False
                             if search_selector:
@@ -1412,19 +1524,21 @@ class MPBValuator(BaseValuator):
                                 blocker_hits.extend(fallback["blockers"])
                                 continue
 
-                            await page.wait_for_timeout(1000)
+                            wait_ms = _remaining_budget_ms(1000)
+                            if wait_ms > 0:
+                                await page.wait_for_timeout(wait_ms)
 
                             clicked_result = await self._click_first(
                                 page,
                                 suggestion_selectors,
-                                timeout_ms=2500,
+                                timeout_ms=_remaining_budget_ms(2500, min_ms=900),
                             )
                             if not clicked_result:
                                 name_tokens = [token for token in re.split(r"\W+", query) if len(token) >= 3][:4]
                                 clicked_result = await self._click_first_semantic(
                                     page,
                                     keywords=[*name_tokens, "sell", "camera", "lens"],
-                                    timeout_ms=2500,
+                                    timeout_ms=_remaining_budget_ms(2500, min_ms=900),
                                     selectors=["a", "button", "[role='option']", "li", "div[role='option']"],
                                 )
                                 payload["adaptive_fallbacks"]["result_semantic"] = clicked_result
@@ -1433,24 +1547,28 @@ class MPBValuator(BaseValuator):
 
                             if not clicked_result:
                                 await page.keyboard.press("Enter")
-                            await page.wait_for_timeout(2400)
+                            wait_ms = _remaining_budget_ms(2400)
+                            if wait_ms > 0:
+                                await page.wait_for_timeout(wait_ms)
                             await page.wait_for_load_state("domcontentloaded")
 
                             condition_selected = await self._click_first(
                                 page,
                                 condition_selectors,
-                                timeout_ms=5000,
+                                timeout_ms=_remaining_budget_ms(5000, min_ms=1100),
                             )
                             if not condition_selected:
                                 condition_selected = await self._click_first_semantic(
                                     page,
                                     keywords=["ottimo", "excellent", "grade a", "come nuovo"],
-                                    timeout_ms=2400,
+                                    timeout_ms=_remaining_budget_ms(2400, min_ms=900),
                                 )
                                 payload["adaptive_fallbacks"]["condition_semantic"] = condition_selected
                             else:
                                 payload["adaptive_fallbacks"]["condition_semantic"] = False
-                            await page.wait_for_timeout(1400)
+                            wait_ms = _remaining_budget_ms(1400)
+                            if wait_ms > 0:
+                                await page.wait_for_timeout(wait_ms)
 
                             match_text = await self._collect_match_text(page)
                             match = _assess_mpb_match(

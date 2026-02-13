@@ -13,6 +13,7 @@ from tech_sniper_it.sources.amazon_warehouse import (
     _expand_marketplaces,
     _extract_asin_from_url,
     _extract_products_from_html,
+    _infer_cart_addition,
     _parse_cart_summary,
     _load_storage_state_paths,
     _parse_proxy_entry,
@@ -339,6 +340,48 @@ def test_parse_cart_summary_extracts_subtotal_promo_and_total() -> None:
     assert summary["subtotal_price"] == 699.0
     assert summary["promo_discount_eur"] == 70.0
     assert summary["total_price"] == 629.0
+
+
+def test_infer_cart_addition_accepts_asin_mismatch_when_new_row_is_added() -> None:
+    before = {
+        "row_count": 0,
+        "cart_asins": [],
+        "subtotal_price": None,
+        "total_price": None,
+        "target_in_cart": False,
+    }
+    after = {
+        "row_count": 1,
+        "cart_asins": ["B0ZZZZ9999"],
+        "subtotal_price": 699.0,
+        "total_price": 699.0,
+        "target_in_cart": False,
+    }
+    result = _infer_cart_addition(before, after, "B0ABCDE123")
+    assert result["added"] is True
+    assert result["asin_mismatch"] is True
+    assert result["new_asins"] == ["B0ZZZZ9999"]
+
+
+def test_infer_cart_addition_rejects_when_no_cart_change_detected() -> None:
+    before = {
+        "row_count": 2,
+        "cart_asins": ["B0AAA11111", "B0BBB22222"],
+        "subtotal_price": 500.0,
+        "total_price": 480.0,
+        "target_in_cart": False,
+    }
+    after = {
+        "row_count": 2,
+        "cart_asins": ["B0AAA11111", "B0BBB22222"],
+        "subtotal_price": 500.0,
+        "total_price": 480.0,
+        "target_in_cart": False,
+    }
+    result = _infer_cart_addition(before, after, "B0ABCDE123")
+    assert result["added"] is False
+    assert result["asin_mismatch"] is False
+    assert result["new_asins"] == []
 
 
 def test_parse_cart_summary_falls_back_to_subtotal_minus_promo_when_total_missing() -> None:

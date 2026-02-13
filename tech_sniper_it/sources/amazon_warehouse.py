@@ -1253,6 +1253,43 @@ def _positive_delta(after_value: Any, before_value: Any) -> float | None:
     return round(delta, 2)
 
 
+def _infer_cart_addition(before: dict[str, Any], after: dict[str, Any], target_asin: str | None) -> dict[str, Any]:
+    before_asins = {
+        str(item).strip().upper()
+        for item in (before.get("cart_asins") or [])
+        if str(item).strip()
+    }
+    after_asins = {
+        str(item).strip().upper()
+        for item in (after.get("cart_asins") or [])
+        if str(item).strip()
+    }
+    new_asins = sorted(item for item in after_asins if item not in before_asins)
+    target = (target_asin or "").strip().upper()
+
+    row_gain = int(after.get("row_count") or 0) - int(before.get("row_count") or 0)
+    delta_total = _positive_delta(after.get("total_price"), before.get("total_price"))
+    delta_subtotal = _positive_delta(after.get("subtotal_price"), before.get("subtotal_price"))
+    target_in_cart = bool(after.get("target_in_cart"))
+    inferred = bool(
+        target_in_cart
+        or new_asins
+        or row_gain > 0
+        or (isinstance(delta_total, (int, float)) and delta_total > 0)
+        or (isinstance(delta_subtotal, (int, float)) and delta_subtotal > 0)
+    )
+    return {
+        "added": inferred,
+        "target_asin": target,
+        "target_in_cart": target_in_cart,
+        "new_asins": new_asins,
+        "row_gain": row_gain,
+        "delta_total": delta_total,
+        "delta_subtotal": delta_subtotal,
+        "asin_mismatch": bool(inferred and not target_in_cart and new_asins),
+    }
+
+
 async def _click_add_to_cart(page) -> bool:  # noqa: ANN001
     for selector in ADD_TO_CART_SELECTORS:
         try:
@@ -1625,9 +1662,21 @@ async def _resolve_cart_net_price(
 
         after = await _read_cart_summary(page, host=host, asin=asin)
         after_summary = after
-        if not after.get("target_in_cart"):
+        addition = _infer_cart_addition(before, after, asin)
+        result["cart_addition"] = {
+            "added": bool(addition.get("added")),
+            "target_in_cart": bool(addition.get("target_in_cart")),
+            "asin_mismatch": bool(addition.get("asin_mismatch")),
+            "new_asins": list(addition.get("new_asins") or []),
+            "row_gain": addition.get("row_gain"),
+            "delta_total": addition.get("delta_total"),
+            "delta_subtotal": addition.get("delta_subtotal"),
+        }
+        if not addition.get("added"):
             result["reason"] = "not-found-in-cart-after-add"
             return result
+        if addition.get("asin_mismatch"):
+            result["reason_hint"] = "target-asin-mismatch"
         subtotal = after.get("subtotal_price")
         promo_discount = after.get("promo_discount_eur")
         total_price = after.get("total_price")
@@ -1830,6 +1879,7 @@ async def apply_cart_net_pricing(
                                 f"promo_discount={_format_money(pricing.get('promo_discount_eur'))} "
                                 f"total={_format_money(pricing.get('total_price'))} "
                                 f"source={pricing.get('net_price_source') or 'n/d'} "
+                                f"cart_addition={pricing.get('cart_addition') or {}} "
                                 f"removed={pricing.get('removed')} "
                                 f"cleanup_asins={pricing.get('cleanup_asins') or []} "
                                 f"failed_remove_asins={pricing.get('failed_remove_asins') or []} "
@@ -1844,6 +1894,7 @@ async def apply_cart_net_pricing(
                                 f"promo_discount={_format_money(pricing.get('promo_discount_eur'))} "
                                 f"total={_format_money(pricing.get('total_price'))} "
                                 f"source={pricing.get('net_price_source') or 'n/d'} "
+                                f"cart_addition={pricing.get('cart_addition') or {}} "
                                 f"removed={pricing.get('removed')} "
                                 f"cleanup_asins={pricing.get('cleanup_asins') or []} "
                                 f"failed_remove_asins={pricing.get('failed_remove_asins') or []} "
