@@ -586,12 +586,12 @@ def _extract_anchor_numbers(text: str, pattern: str) -> set[str]:
 def _extract_model_number_map(text: str) -> dict[str, set[str]]:
     normalized = _normalize_match_text(text)
     return {
-        "iphone": _extract_anchor_numbers(normalized, r"\biphone\s*(\d{1,2})\b"),
-        "forerunner": _extract_anchor_numbers(normalized, r"\bforerunner\s*(\d{3,4})\b"),
-        "fenix": _extract_anchor_numbers(normalized, r"\bfenix\s*(\d{1,2})\b"),
-        "dji_mini": _extract_anchor_numbers(normalized, r"\bdji\s*mini\s*(\d{1,2})\b"),
-        "watch_series": _extract_anchor_numbers(normalized, r"\bwatch\s*series\s*(\d{1,2})\b"),
-        "watch_ultra": _extract_anchor_numbers(normalized, r"\bwatch\s*ultra\s*(\d{1,2})\b"),
+        "iphone": _extract_anchor_numbers(normalized, r"\biphone[\s\-]*(\d{1,2})\b"),
+        "forerunner": _extract_anchor_numbers(normalized, r"\bforerunner[\s\-]*(\d{3,4})\b"),
+        "fenix": _extract_anchor_numbers(normalized, r"\bfenix[\s\-]*(\d{1,2})\b"),
+        "dji_mini": _extract_anchor_numbers(normalized, r"\bdji[\s\-]*mini[\s\-]*(\d{1,2})\b"),
+        "watch_series": _extract_anchor_numbers(normalized, r"\bwatch[\s\-]*series[\s\-]*(\d{1,2})\b"),
+        "watch_ultra": _extract_anchor_numbers(normalized, r"\bwatch[\s\-]*ultra[\s\-]*(\d{1,2})\b"),
     }
 
 
@@ -691,6 +691,7 @@ def _assess_rebuy_match(
         )
         if part
     )
+    url_only_norm = _normalize_match_text(url_parts)
     candidate_norm = _normalize_match_text(f"{candidate_text} {url_parts}")
 
     ratio = SequenceMatcher(None, query_norm, candidate_norm).ratio() if query_norm and candidate_norm else 0.0
@@ -721,8 +722,28 @@ def _assess_rebuy_match(
     capacity_hits = [token for token in capacities if token in candidate_norm.replace(" ", "")]
     query_numbers = _extract_model_number_map(query_norm)
     candidate_numbers = _extract_model_number_map(candidate_norm)
+    url_numbers = _extract_model_number_map(url_only_norm)
+    url_capacities = _capacity_tokens(url_only_norm)
     token_ratio = (len(hit_tokens) / len(required_tokens)) if required_tokens else 0.0
     generic_url = _is_generic_rebuy_url(source_url)
+    for anchor_key, query_values in query_numbers.items():
+        url_values = url_numbers.get(anchor_key, set())
+        if query_values and url_values and query_values.isdisjoint(url_values):
+            return {
+                "ok": False,
+                "reason": "model-generation-mismatch",
+                "anchor": anchor_key,
+                "score": int((ratio * 100) + (len(hit_tokens) * 14) + (len(anchor_hits) * 8)),
+                "ratio": round(ratio, 3),
+                "token_ratio": round(token_ratio, 3),
+                "generic_url": generic_url,
+                "generic_override": False,
+                "query_model_numbers": {key: sorted(values) for key, values in query_numbers.items() if values},
+                "candidate_model_numbers": {key: sorted(values) for key, values in candidate_numbers.items() if values},
+                "url_model_numbers": {key: sorted(values) for key, values in url_numbers.items() if values},
+                "hit_tokens": hit_tokens,
+                "required_tokens": required_tokens,
+            }
     for anchor_key, query_values in query_numbers.items():
         candidate_values = candidate_numbers.get(anchor_key, set())
         if query_values and candidate_values and query_values.isdisjoint(candidate_values):
@@ -741,6 +762,23 @@ def _assess_rebuy_match(
                 "required_tokens": required_tokens,
             }
     if _is_watch_ultra_unversioned(query_norm):
+        url_ultra = url_numbers.get("watch_ultra", set())
+        if url_ultra:
+            return {
+                "ok": False,
+                "reason": "model-generation-mismatch",
+                "anchor": "watch_ultra",
+                "score": int((ratio * 100) + (len(hit_tokens) * 14) + (len(anchor_hits) * 8)),
+                "ratio": round(ratio, 3),
+                "token_ratio": round(token_ratio, 3),
+                "generic_url": generic_url,
+                "generic_override": False,
+                "query_model_numbers": {key: sorted(values) for key, values in query_numbers.items() if values},
+                "candidate_model_numbers": {key: sorted(values) for key, values in candidate_numbers.items() if values},
+                "url_model_numbers": {key: sorted(values) for key, values in url_numbers.items() if values},
+                "hit_tokens": hit_tokens,
+                "required_tokens": required_tokens,
+            }
         candidate_ultra = candidate_numbers.get("watch_ultra", set())
         if candidate_ultra:
             return {
@@ -757,6 +795,22 @@ def _assess_rebuy_match(
                 "hit_tokens": hit_tokens,
                 "required_tokens": required_tokens,
             }
+    if capacities and url_capacities and not set(capacities).intersection(url_capacities):
+        precheck_score = int((ratio * 100) + (len(hit_tokens) * 14) + (len(anchor_hits) * 8))
+        return {
+            "ok": False,
+            "reason": "capacity-mismatch",
+            "score": precheck_score,
+            "ratio": round(ratio, 3),
+            "token_ratio": round(token_ratio, 3),
+            "generic_url": generic_url,
+            "generic_override": False,
+            "hit_tokens": hit_tokens,
+            "required_tokens": required_tokens,
+            "query_capacities": capacities,
+            "candidate_capacities": candidate_capacities,
+            "url_capacities": url_capacities,
+        }
     strong_generic_match = (
         generic_url
         and token_ratio >= 0.72

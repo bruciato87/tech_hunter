@@ -86,6 +86,26 @@ def test_rebuy_assess_match_rejects_iphone_generation_mismatch() -> None:
     assert match["reason"] == "model-generation-mismatch"
 
 
+def test_rebuy_assess_match_rejects_generation_mismatch_even_with_query_like_text() -> None:
+    match = _assess_rebuy_match(
+        normalized_name="Apple iPhone 13 128GB",
+        candidate_text="Apple iPhone 13 128GB mezzanotte",
+        source_url="https://www.rebuy.it/vendere/p/apple-iphone-16/15513620?from=group",
+    )
+    assert match["ok"] is False
+    assert match["reason"] == "model-generation-mismatch"
+
+
+def test_rebuy_assess_match_rejects_capacity_mismatch_from_url() -> None:
+    match = _assess_rebuy_match(
+        normalized_name='Apple iPad Air 13" M3 256GB',
+        candidate_text='Apple iPad Air 13" M3 256GB',
+        source_url="https://www.rebuy.it/vendere/tablet-e-ebook-reader/apple-ipad-air-6-13-1tb-wifi-plus-cellulare-blu_15426786",
+    )
+    assert match["ok"] is False
+    assert match["reason"] == "capacity-mismatch"
+
+
 def test_rebuy_assess_match_rejects_explicit_capacity_conflict() -> None:
     match = _assess_rebuy_match(
         normalized_name='Apple iPad Air 13" M3 256GB',
