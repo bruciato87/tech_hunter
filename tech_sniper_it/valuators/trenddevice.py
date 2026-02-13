@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import json
 import os
 import re
@@ -17,7 +16,7 @@ from playwright.async_api import Page
 from playwright.async_api import async_playwright
 
 from tech_sniper_it.models import AmazonProduct, ProductCategory
-from tech_sniper_it.utils import detect_color_variants, extract_capacity_gb, parse_eur_price
+from tech_sniper_it.utils import decode_json_dict_maybe_base64, detect_color_variants, extract_capacity_gb, parse_eur_price
 from tech_sniper_it.valuators.base import BaseValuator
 
 
@@ -113,6 +112,7 @@ NETWORK_PROMO_BLOCKERS: tuple[str, ...] = (
     "reso gratis",
     "rate",
 )
+_TRENDDEVICE_STORAGE_STATE_ERROR = ""
 
 
 def _env_or_default(name: str, default: str) -> str:
@@ -128,17 +128,17 @@ def _use_storage_state() -> bool:
 
 
 def _load_storage_state_b64() -> str | None:
+    global _TRENDDEVICE_STORAGE_STATE_ERROR
+    _TRENDDEVICE_STORAGE_STATE_ERROR = ""
     if not _use_storage_state():
         return None
     raw = (os.getenv("TRENDDEVICE_STORAGE_STATE_B64") or "").strip()
     if not raw:
+        _TRENDDEVICE_STORAGE_STATE_ERROR = "empty"
         return None
-    try:
-        decoded = base64.b64decode(raw).decode("utf-8")
-        parsed = json.loads(decoded)
-    except Exception:
-        return None
-    if not isinstance(parsed, dict):
+    parsed, error = decode_json_dict_maybe_base64(raw)
+    if not parsed:
+        _TRENDDEVICE_STORAGE_STATE_ERROR = str(error or "invalid-base64-json")
         return None
     handle = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8")
     try:
@@ -826,6 +826,12 @@ class TrendDeviceValuator(BaseValuator):
         }
         storage_state_path = _load_storage_state_b64()
         payload["storage_state"] = bool(storage_state_path)
+        if _use_storage_state() and storage_state_path is None:
+            payload["storage_state_error"] = _TRENDDEVICE_STORAGE_STATE_ERROR or "missing"
+            print(
+                "[trenddevice] storage_state missing/invalid | "
+                f"reason={payload['storage_state_error']}"
+            )
         email_gate_wait_ms = max(1500, int(_env_or_default("TRENDDEVICE_EMAIL_GATE_WAIT_MS", "6500")))
 
         async with async_playwright() as playwright:

@@ -1711,12 +1711,9 @@ def _format_scan_summary(decisions: list, threshold: float) -> str:
         "🚀 Tech_Sniper_IT | Scan Report",
         "━━━━━━━━━━━━━━━━━━━━",
         "🔎 Scan completata",
-        "💡 Formula spread netto: offerta reseller - prezzo Amazon - costi operativi - buffer rischio",
         f"🧭 Profilo strategia: {strategy.get('profile', 'balanced')}",
-        f"📦 Prodotti analizzati: {len(decisions)}",
-        f"🎯 Soglia spread: {threshold:.2f} EUR",
-        f"✅ Opportunita sopra soglia: {len(profitable)}",
-        f"🗑️ Scartati sotto soglia: {len(decisions) - len(profitable)}",
+        f"📦 Analizzati: {len(decisions)} | ✅ Over soglia: {len(profitable)} | 🗑️ Scartati: {len(decisions) - len(profitable)}",
+        f"🎯 Soglia spread netto: {threshold:.2f} EUR",
         f"🧠 AI usata: {ai_live_count}/{len(decisions)} | gemini={gemini_count} openrouter={openrouter_count} fallback={heuristic_count}",
         f"🧠 Modelli AI: {ai_models}",
         f"🧩 UI drift rilevati: {ui_drift_count}/{ui_drift_total}",
@@ -1728,38 +1725,34 @@ def _format_scan_summary(decisions: list, threshold: float) -> str:
         return "\n".join(lines)
 
     ranked = sorted(profitable, key=lambda item: item.spread_eur or 0.0, reverse=True)
+    lines.extend(["", "🔥 Opportunita (ordinate per spread netto):"])
     for index, decision in enumerate(ranked, start=1):
         best_offer = decision.best_offer
-        spread = _format_signed_eur(decision.spread_eur)
-        status_icon, status_text = _spread_status_badge(decision.spread_eur, threshold)
+        spread_net = _format_signed_eur(decision.spread_eur)
         product_url = _normalize_http_url(getattr(decision.product, "url", None))
         if not product_url:
             product_url = _amazon_search_url(decision.normalized_name or decision.product.title)
         best_offer_url = _normalize_http_url(getattr(best_offer, "source_url", None) if best_offer else None)
         platform_name = best_offer.platform if best_offer else "n/d"
         platform_icon = _platform_icon(platform_name)
-        decision_label = "🔥 SI"
         display_name = decision.normalized_name or getattr(decision.product, "title", "n/d")
-        category = getattr(getattr(decision.product, "category", None), "value", None) or "n/d"
         amazon_condition = getattr(decision.product, "amazon_condition", None) or "n/d"
         packaging_only = bool(getattr(decision.product, "amazon_packaging_only", False))
         condition_tag = " 📦 solo packaging" if packaging_only else ""
+        spread_gross = _format_signed_eur(getattr(decision, "spread_gross_eur", None))
+        risk = float(getattr(decision, "risk_buffer_eur", 0.0) or 0.0)
+        cost = float(getattr(decision, "operating_cost_eur", 0.0) or 0.0)
+        risk_cost = ""
+        if risk > 0 or cost > 0:
+            risk_cost = f" | rischio {_format_eur(risk)} | costi {_format_eur(cost)}"
+        ai_label = _ai_usage_label(decision).replace("provider=", "").replace(" | model=", "/").replace(" | mode=", " | ")
         lines.extend(
             [
                 "",
-                f"{status_icon} Prodotto {index}: {display_name}",
-                f"🧾 Esito: {status_text}",
-                f"🏷️ Categoria: {category}",
-                f"🧪 Condizione Amazon: {amazon_condition}{condition_tag}",
-                f"💶 Amazon: {_format_eur(decision.product.price_eur)}",
-                f"🏆 Best offer: {_format_eur(best_offer.offer_eur if best_offer else None)} ({platform_name})",
-                f"{platform_icon} Reseller top: {platform_name}",
-                f"📉 Spread lordo: {_format_signed_eur(getattr(decision, 'spread_gross_eur', None))}",
-                f"🛡️ Buffer rischio: {_format_eur(getattr(decision, 'risk_buffer_eur', 0.0))} | costi: {_format_eur(getattr(decision, 'operating_cost_eur', 0.0))}",
-                f"📈 Spread netto: {spread}",
-                f"🚨 Opportunita: {decision_label}",
-                f"🧠 AI match: {_ai_usage_label(decision)}",
-                f"📊 Offerte: {_format_offers_compact(decision)}",
+                f"{index}. {display_name}",
+                f"💶 Buy {_format_eur(decision.product.price_eur)} → {platform_icon} {platform_name} {_format_eur(best_offer.offer_eur if best_offer else None)} | netto {spread_net}",
+                f"📉 Lordo {spread_gross}{risk_cost}",
+                f"🧪 Condizione: {amazon_condition}{condition_tag} | 🧠 AI: {ai_label}",
                 f"🛒 Amazon link: {product_url}",
                 f"🔗 Link migliore offerta: {best_offer_url or 'n/d'}",
             ]
@@ -1928,7 +1921,18 @@ async def _run_scan_command(payload: dict[str, Any]) -> int:
 
     max_parallel_products = int(_env_or_default("MAX_PARALLEL_PRODUCTS", "3"))
     print(f"[scan] Loaded products: {len(products)} | max_parallel_products={max_parallel_products}")
-    decisions = await manager.evaluate_many(products, max_parallel_products=max_parallel_products)
+    send_individual_alerts = _is_truthy_env("SCAN_TELEGRAM_INDIVIDUAL_ALERTS", "false")
+    original_notifier = getattr(manager, "notifier", None)
+    notifier_disabled = False
+    if original_notifier is not None and not send_individual_alerts:
+        print("[scan] Individual Telegram alerts disabled for scan; using consolidated report only.")
+        manager.notifier = None
+        notifier_disabled = True
+    try:
+        decisions = await manager.evaluate_many(products, max_parallel_products=max_parallel_products)
+    finally:
+        if notifier_disabled:
+            manager.notifier = original_notifier
     await _save_non_profitable_decisions(manager, decisions)
     profitable = [item for item in decisions if item.should_notify]
     print(f"Scanned: {len(decisions)} | Profitable: {len(profitable)}")

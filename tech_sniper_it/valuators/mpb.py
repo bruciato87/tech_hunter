@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import base64
 import json
 import os
 import re
@@ -15,7 +14,7 @@ from playwright.async_api import Page
 from playwright.async_api import async_playwright
 
 from tech_sniper_it.models import AmazonProduct
-from tech_sniper_it.utils import parse_eur_price
+from tech_sniper_it.utils import decode_json_dict_maybe_base64, parse_eur_price
 from tech_sniper_it.valuators.base import BaseValuator
 
 
@@ -80,6 +79,7 @@ BLOCKER_HINTS: tuple[str, ...] = (
 )
 _MPB_BLOCKED_UNTIL_TS = 0.0
 _MPB_BLOCK_REASON = ""
+_MPB_STORAGE_STATE_ERROR = ""
 
 
 def _env_or_default(name: str, default: str) -> str:
@@ -121,6 +121,8 @@ def _clear_mpb_temporary_block() -> None:
 
 
 def _load_storage_state_b64() -> str | None:
+    global _MPB_STORAGE_STATE_ERROR
+    _MPB_STORAGE_STATE_ERROR = ""
     use_storage_state = _env_or_default("MPB_USE_STORAGE_STATE", "true").lower() not in {
         "0",
         "false",
@@ -131,14 +133,13 @@ def _load_storage_state_b64() -> str | None:
         return None
     raw = (os.getenv("MPB_STORAGE_STATE_B64") or "").strip()
     if not raw:
+        _MPB_STORAGE_STATE_ERROR = "empty"
         return None
-    try:
-        decoded = base64.b64decode(raw).decode("utf-8")
-        parsed = json.loads(decoded)
-    except Exception:
+    parsed, error = decode_json_dict_maybe_base64(raw)
+    if not parsed:
+        _MPB_STORAGE_STATE_ERROR = str(error or "invalid-base64-json")
         return None
-    if not isinstance(parsed, dict):
-        return None
+
     handle = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8")
     try:
         json.dump(parsed, handle, ensure_ascii=False)
@@ -241,8 +242,9 @@ class MPBValuator(BaseValuator):
         max_attempts = max(1, int(_env_or_default("MPB_MAX_ATTEMPTS", "3")))
         storage_state_path = _load_storage_state_b64()
         if _mpb_require_storage_state() and storage_state_path is None:
+            reason = _MPB_STORAGE_STATE_ERROR or "missing"
             raise RuntimeError(
-                "MPB storage_state missing/invalid; set MPB_STORAGE_STATE_B64 or disable MPB_REQUIRE_STORAGE_STATE."
+                f"MPB storage_state missing/invalid ({reason}); set MPB_STORAGE_STATE_B64 or disable MPB_REQUIRE_STORAGE_STATE."
             )
         payload: dict[str, Any] = {
             "query": normalized_name,

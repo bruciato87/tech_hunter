@@ -513,9 +513,9 @@ def test_format_scan_summary() -> None:
         ],
         threshold=80.0,
     )
-    assert "📦 Prodotti analizzati: 2" in summary
-    assert "✅ Opportunita sopra soglia: 1" in summary
-    assert "🏆 Best offer: 620.00 EUR (trenddevice)" in summary
+    assert "📦 Analizzati: 2 | ✅ Over soglia: 1 | 🗑️ Scartati: 1" in summary
+    assert "🔥 Opportunita (ordinate per spread netto):" in summary
+    assert "💶 Buy 500.00 EUR → 📱 trenddevice 620.00 EUR | netto +120.00 EUR" in summary
     assert "🔗 Link migliore offerta: https://rebuy.it/item" in summary
 
 
@@ -530,7 +530,7 @@ def test_format_scan_summary_falls_back_to_amazon_search_link() -> None:
             self.offers = [type("Offer", (), {"platform": "rebuy", "offer_eur": 510.0, "error": None})()]
 
     summary = _format_scan_summary([DummyDecision()], threshold=40.0)
-    assert "✅ Opportunita sopra soglia: 0" in summary
+    assert "✅ Over soglia: 0" in summary
     assert "😴 Nessuna opportunita sopra soglia in questa run." in summary
     assert "🛒 Amazon link:" not in summary
 
@@ -735,8 +735,54 @@ async def test_run_scan_command_sends_summary_for_manual_debug(monkeypatch: pyte
     assert len(sent_messages) == 1
     assert sent_messages[0][0] is None
     assert "🔎 Scan completata" in sent_messages[0][1]
-    assert "✅ Opportunita sopra soglia: 0" in sent_messages[0][1]
-    assert "🏆 Best offer:" not in sent_messages[0][1]
+    assert "✅ Over soglia: 0" in sent_messages[0][1]
+    assert "🔥 Opportunita (ordinate per spread netto):" not in sent_messages[0][1]
+
+
+@pytest.mark.asyncio
+async def test_run_scan_command_disables_individual_notifier_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {"notifier_disabled": False}
+
+    class DummyDecision:
+        def __init__(self) -> None:
+            self.product = type("P", (), {"title": "iPhone", "price_eur": 679.0, "url": None})()
+            self.normalized_name = "iPhone 14 Pro 128GB"
+            self.best_offer = type("B", (), {"offer_eur": 720.0, "platform": "rebuy", "source_url": None})()
+            self.spread_eur = 41.0
+            self.should_notify = True
+            self.ai_provider = "heuristic"
+            self.ai_model = None
+            self.ai_mode = "fallback"
+            self.offers = []
+
+    class DummyManager:
+        min_spread_eur = 40.0
+        notifier = object()
+
+        async def evaluate_many(self, products, max_parallel_products=3):  # noqa: ANN001, ANN201
+            captured["notifier_disabled"] = self.notifier is None
+            return [DummyDecision()]
+
+    async def fake_send(_text: str, _chat_id: str | None) -> None:
+        return None
+
+    manager = DummyManager()
+    monkeypatch.setattr("tech_sniper_it.worker.build_default_manager", lambda: manager)
+    monkeypatch.setattr("tech_sniper_it.worker._load_github_event_data", lambda: {})
+    monkeypatch.setattr(
+        "tech_sniper_it.worker.load_products",
+        lambda event_data=None: [
+            type("Product", (), {"title": "iPhone", "price_eur": 679.0, "category": ProductCategory.APPLE_PHONE})()
+        ],
+    )
+    monkeypatch.setattr("tech_sniper_it.worker._send_telegram_message", fake_send)
+    monkeypatch.delenv("SCAN_TELEGRAM_INDIVIDUAL_ALERTS", raising=False)
+
+    exit_code = await _run_scan_command({"source": "manual_debug"})
+
+    assert exit_code == 0
+    assert captured["notifier_disabled"] is True
+    assert manager.notifier is not None
 
 
 @pytest.mark.asyncio
@@ -856,8 +902,8 @@ async def test_run_scan_command_uses_warehouse_fallback_when_no_input(monkeypatc
 
     assert exit_code == 0
     assert len(sent_messages) == 1
-    assert "Prodotti analizzati: 1" in sent_messages[0][1]
-    assert "✅ Opportunita sopra soglia: 0" in sent_messages[0][1]
+    assert "📦 Analizzati: 1" in sent_messages[0][1]
+    assert "✅ Over soglia: 0" in sent_messages[0][1]
 
 
 @pytest.mark.asyncio

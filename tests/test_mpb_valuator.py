@@ -47,6 +47,16 @@ def test_load_storage_state_b64_invalid(monkeypatch: pytest.MonkeyPatch) -> None
     assert _load_storage_state_b64() is None
 
 
+def test_load_storage_state_b64_accepts_raw_json(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MPB_STORAGE_STATE_B64", '{"cookies":[],"origins":[]}')
+    path = _load_storage_state_b64()
+    try:
+        assert path is not None
+        assert os.path.exists(path)
+    finally:
+        _remove_file_if_exists(path)
+
+
 def test_load_storage_state_b64_disabled_by_env(monkeypatch: pytest.MonkeyPatch) -> None:
     payload = {"cookies": [], "origins": []}
     encoded = base64.b64encode(json.dumps(payload).encode("utf-8")).decode("ascii")

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import re
+from difflib import SequenceMatcher
 from typing import Any
+from urllib.parse import unquote, urlparse
 
 from bs4 import BeautifulSoup
 from playwright.async_api import Error as PlaywrightError
@@ -14,6 +16,61 @@ from tech_sniper_it.valuators.base import BaseValuator
 
 PRICE_HINTS: tuple[str, ...] = ("ti paghiamo", "valutazione", "offerta", "ricevi", "vendi")
 PRICE_BLOCKERS: tuple[str, ...] = ("ordine min", "spedizione", "cookie", "prezzo di vendita")
+MATCH_STOPWORDS: set[str] = {
+    "apple",
+    "amazon",
+    "warehouse",
+    "ricondizionato",
+    "ricondizionata",
+    "renewed",
+    "reconditionne",
+    "reconditioned",
+    "used",
+    "usato",
+    "con",
+    "senza",
+    "wifi",
+    "wi",
+    "fi",
+    "pack",
+    "combo",
+    "with",
+    "and",
+    "the",
+    "plus",
+}
+ANCHOR_TOKENS: tuple[str, ...] = (
+    "iphone",
+    "ipad",
+    "macbook",
+    "steam",
+    "deck",
+    "rog",
+    "ally",
+    "legion",
+    "dji",
+    "mavic",
+    "avata",
+    "garmin",
+    "forerunner",
+    "fenix",
+    "epix",
+    "watch",
+    "playstation",
+    "xbox",
+)
+GENERIC_REBUY_CATEGORIES: set[str] = {
+    "apple",
+    "samsung",
+    "notebook-apple",
+    "notebook",
+    "smartphone",
+    "tablet",
+    "fotocamere",
+    "fotocamera",
+    "console",
+}
+CAPACITY_TOKEN_PATTERN = re.compile(r"\b\d{2,4}\s*(?:gb|tb)\b", re.IGNORECASE)
 
 
 def _extract_contextual_price(text: str) -> tuple[float | None, str]:
@@ -42,6 +99,181 @@ def _extract_contextual_price(text: str) -> tuple[float | None, str]:
     if score <= 0:
         return None, ""
     return value, snippet
+
+
+def _normalize_match_text(value: str | None) -> str:
+    raw = (value or "").lower()
+    raw = re.sub(r"[%/]", " ", raw)
+    raw = re.sub(r"[^a-z0-9+\- ]+", " ", raw)
+    raw = re.sub(r"\s+", " ", raw).strip()
+    return raw
+
+
+def _query_tokens(value: str) -> list[str]:
+    normalized = _normalize_match_text(value)
+    tokens = [item for item in normalized.split(" ") if item]
+    ranked: list[str] = []
+    for token in tokens:
+        if token in MATCH_STOPWORDS:
+            continue
+        if len(token) < 2:
+            continue
+        if token not in ranked:
+            ranked.append(token)
+    return ranked
+
+
+def _capacity_tokens(value: str) -> list[str]:
+    normalized = _normalize_match_text(value).replace(" ", "")
+    return sorted(set(match.group(0).replace(" ", "").lower() for match in CAPACITY_TOKEN_PATTERN.finditer(normalized)))
+
+
+def _is_generic_rebuy_url(url: str | None) -> bool:
+    parsed = urlparse(url or "")
+    path = (parsed.path or "").strip("/").lower()
+    if not path:
+        return True
+    if path.startswith("comprare/search") or path == "vendi":
+        return True
+    segments = [segment for segment in path.split("/") if segment]
+    if not segments:
+        return True
+    if len(segments) == 1:
+        return True
+    if len(segments) == 2 and segments[0] == "comprare" and segments[1] in GENERIC_REBUY_CATEGORIES:
+        return True
+    return False
+
+
+def _is_search_rebuy_url(url: str | None) -> bool:
+    path = (urlparse(url or "").path or "").lower()
+    return "/comprare/search" in path or path.endswith("/search")
+
+
+def _assess_rebuy_match(
+    *,
+    normalized_name: str,
+    candidate_text: str,
+    source_url: str | None,
+) -> dict[str, Any]:
+    query_norm = _normalize_match_text(normalized_name)
+    parsed_url = urlparse(source_url or "")
+    url_parts = " ".join(
+        part
+        for part in (
+            unquote(parsed_url.path or ""),
+            unquote(parsed_url.query or ""),
+        )
+        if part
+    )
+    candidate_norm = _normalize_match_text(f"{candidate_text} {url_parts}")
+
+    ratio = SequenceMatcher(None, query_norm, candidate_norm).ratio() if query_norm and candidate_norm else 0.0
+    tokens = _query_tokens(normalized_name)
+    query_anchors = [token for token in tokens if token in ANCHOR_TOKENS]
+    capacities = _capacity_tokens(normalized_name)
+
+    required_tokens: list[str] = []
+    for item in capacities:
+        if item not in required_tokens:
+            required_tokens.append(item)
+    for item in query_anchors[:2]:
+        if item not in required_tokens:
+            required_tokens.append(item)
+    for item in tokens:
+        if item.isdigit() or re.search(r"\d", item):
+            if item not in required_tokens:
+                required_tokens.append(item)
+    for item in tokens:
+        if item not in required_tokens:
+            required_tokens.append(item)
+        if len(required_tokens) >= 6:
+            break
+
+    hit_tokens = [token for token in required_tokens if token and token in candidate_norm]
+    anchor_hits = [token for token in query_anchors if token in candidate_norm]
+    capacity_hits = [token for token in capacities if token in candidate_norm.replace(" ", "")]
+    token_ratio = (len(hit_tokens) / len(required_tokens)) if required_tokens else 0.0
+    generic_url = _is_generic_rebuy_url(source_url)
+    score = int((ratio * 100) + (len(hit_tokens) * 14) + (len(anchor_hits) * 8) - (40 if generic_url else 0))
+
+    if _is_search_rebuy_url(source_url):
+        return {
+            "ok": False,
+            "reason": "generic-search-url",
+            "score": score,
+            "ratio": round(ratio, 3),
+            "token_ratio": round(token_ratio, 3),
+            "generic_url": generic_url,
+            "hit_tokens": hit_tokens,
+            "required_tokens": required_tokens,
+        }
+
+    if capacities and len(capacity_hits) < len(capacities):
+        return {
+            "ok": False,
+            "reason": "capacity-mismatch",
+            "score": score,
+            "ratio": round(ratio, 3),
+            "token_ratio": round(token_ratio, 3),
+            "generic_url": generic_url,
+            "hit_tokens": hit_tokens,
+            "required_tokens": required_tokens,
+        }
+    if query_anchors and not anchor_hits:
+        return {
+            "ok": False,
+            "reason": "anchor-mismatch",
+            "score": score,
+            "ratio": round(ratio, 3),
+            "token_ratio": round(token_ratio, 3),
+            "generic_url": generic_url,
+            "hit_tokens": hit_tokens,
+            "required_tokens": required_tokens,
+        }
+    if generic_url and token_ratio < 0.85:
+        return {
+            "ok": False,
+            "reason": "generic-url-low-coverage",
+            "score": score,
+            "ratio": round(ratio, 3),
+            "token_ratio": round(token_ratio, 3),
+            "generic_url": generic_url,
+            "hit_tokens": hit_tokens,
+            "required_tokens": required_tokens,
+        }
+    if token_ratio < 0.55 and ratio < 0.60:
+        return {
+            "ok": False,
+            "reason": "low-token-similarity",
+            "score": score,
+            "ratio": round(ratio, 3),
+            "token_ratio": round(token_ratio, 3),
+            "generic_url": generic_url,
+            "hit_tokens": hit_tokens,
+            "required_tokens": required_tokens,
+        }
+    if score < 72:
+        return {
+            "ok": False,
+            "reason": "score-too-low",
+            "score": score,
+            "ratio": round(ratio, 3),
+            "token_ratio": round(token_ratio, 3),
+            "generic_url": generic_url,
+            "hit_tokens": hit_tokens,
+            "required_tokens": required_tokens,
+        }
+    return {
+        "ok": True,
+        "reason": "ok",
+        "score": score,
+        "ratio": round(ratio, 3),
+        "token_ratio": round(token_ratio, 3),
+        "generic_url": generic_url,
+        "hit_tokens": hit_tokens,
+        "required_tokens": required_tokens,
+    }
 
 
 class RebuyValuator(BaseValuator):
@@ -123,7 +355,9 @@ class RebuyValuator(BaseValuator):
                     ],
                     payload=payload,
                 )
-                opened = await self._click_first(page, result_selectors, timeout_ms=10000)
+                opened = await self._open_best_result(page, result_selectors, normalized_name, payload=payload)
+                if not opened:
+                    opened = await self._click_first(page, result_selectors, timeout_ms=10000)
                 if not opened:
                     name_tokens = [token for token in re.split(r"\W+", normalized_name) if len(token) >= 3][:4]
                     opened = await self._click_first_semantic(
@@ -136,6 +370,7 @@ class RebuyValuator(BaseValuator):
                     payload["adaptive_fallbacks"]["result_semantic"] = False
                 payload["result_opened"] = opened
                 await page.wait_for_load_state("domcontentloaded")
+                await page.wait_for_timeout(1200)
 
                 condition_selectors = self._selector_candidates(
                     site=self.platform_name,
@@ -161,6 +396,19 @@ class RebuyValuator(BaseValuator):
                 payload["condition_selected"] = condition_selected
                 await page.wait_for_timeout(1600)
 
+                match_text = await self._collect_match_text(page)
+                match = _assess_rebuy_match(
+                    normalized_name=normalized_name,
+                    candidate_text=match_text,
+                    source_url=page.url,
+                )
+                payload["match_quality"] = match
+                if not match.get("ok"):
+                    reason = match.get("reason", "low-confidence")
+                    raise RuntimeError(
+                        f"Rebuy low-confidence match ({reason}); discarded to prevent false-positive."
+                    )
+
                 price, price_text = await self._extract_price(page, payload=payload)
                 payload["price_text"] = price_text
                 if price is None:
@@ -176,6 +424,106 @@ class RebuyValuator(BaseValuator):
             finally:
                 await context.close()
                 await browser.close()
+
+    async def _open_best_result(
+        self,
+        page: Page,
+        selectors: list[str],
+        normalized_name: str,
+        *,
+        payload: dict[str, Any],
+    ) -> bool:
+        candidates: list[dict[str, Any]] = []
+        for selector in selectors:
+            locator = page.locator(selector)
+            try:
+                count = min(await locator.count(), 12)
+            except PlaywrightError:
+                continue
+            for index in range(count):
+                node = locator.nth(index)
+                try:
+                    if not await node.is_visible():
+                        continue
+                    text = await node.inner_text(timeout=1200)
+                    href = await node.get_attribute("href")
+                except PlaywrightError:
+                    continue
+                assessment = _assess_rebuy_match(
+                    normalized_name=normalized_name,
+                    candidate_text=text or "",
+                    source_url=href,
+                )
+                ranking = int(assessment.get("score", 0)) + (35 if assessment.get("ok") else 0)
+                candidates.append(
+                    {
+                        "selector": selector,
+                        "index": index,
+                        "text": (text or "").strip()[:220],
+                        "href": href,
+                        "assessment": assessment,
+                        "ranking": ranking,
+                    }
+                )
+
+        if not candidates:
+            return False
+
+        ranked = sorted(
+            candidates,
+            key=lambda item: (item.get("ranking", 0), item.get("assessment", {}).get("token_ratio", 0.0)),
+            reverse=True,
+        )
+        payload["result_candidates"] = [
+            {
+                "score": row["assessment"].get("score"),
+                "ok": row["assessment"].get("ok"),
+                "token_ratio": row["assessment"].get("token_ratio"),
+                "reason": row["assessment"].get("reason"),
+                "href": row.get("href"),
+                "text": row.get("text"),
+            }
+            for row in ranked[:4]
+        ]
+
+        for row in ranked[:4]:
+            node = page.locator(row["selector"]).nth(int(row["index"]))
+            try:
+                await node.click(timeout=2800)
+                payload["result_pick"] = {
+                    "selector": row["selector"],
+                    "index": row["index"],
+                    "assessment": row["assessment"],
+                    "href": row.get("href"),
+                    "text": row.get("text"),
+                }
+                return True
+            except PlaywrightError:
+                continue
+        return False
+
+    async def _collect_match_text(self, page: Page) -> str:
+        chunks: list[str] = []
+        try:
+            chunks.append(await page.title())
+        except PlaywrightError:
+            pass
+        for selector in ("h1", "h2", "[data-testid*='title' i]", "main"):
+            try:
+                locator = page.locator(selector)
+                count = min(await locator.count(), 3)
+            except PlaywrightError:
+                continue
+            for index in range(count):
+                try:
+                    text = await locator.nth(index).inner_text(timeout=900)
+                except PlaywrightError:
+                    continue
+                cleaned = re.sub(r"\s+", " ", text).strip()
+                if cleaned:
+                    chunks.append(cleaned[:300])
+        chunks.append(unquote(urlparse(page.url).path))
+        return " ".join(chunks)
 
     async def _extract_price(self, page: Page, *, payload: dict[str, Any] | None = None) -> tuple[float | None, str]:
         selector_candidates = self._selector_candidates(
@@ -220,5 +568,4 @@ class RebuyValuator(BaseValuator):
         return parse_eur_price(text), text[:220]
 
 
-__all__ = ["RebuyValuator", "_extract_contextual_price"]
-
+__all__ = ["RebuyValuator", "_assess_rebuy_match", "_extract_contextual_price"]

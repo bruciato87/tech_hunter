@@ -14,6 +14,8 @@ Serverless-friendly arbitrage worker for Amazon Warehouse IT -> recommerce valua
   - TrendDevice: `Grado A`
   - MPB: `Ottimo`
   - Rebuy: `Come nuovo`
+- Rebuy anti-false-positive guard:
+  - validates model/capacity/url match quality and discards generic search/category pages.
 - Net spread formula:
   - `spread_net = best_offer - amazon_price - operating_cost - risk_buffer(condition)`
 - Strategy profile:
@@ -69,6 +71,7 @@ python -m tech_sniper_it.worker
 - `MIN_SPREAD_EUR` (default: `40`)
 - `STRATEGY_PROFILE` (default: `balanced`, one of `conservative|balanced|aggressive`; sets operating cost + risk buffers internally)
 - `MAX_PARALLEL_PRODUCTS` (default: `3`)
+- `SCAN_TELEGRAM_INDIVIDUAL_ALERTS` (default: `false`, send one message per opportunity in addition to consolidated scan report)
 - `SCAN_TARGET_PRODUCTS` (default: `12`)
 - `SCAN_CANDIDATE_MULTIPLIER` (default: `4`)
 - `SCAN_DYNAMIC_QUERIES_ENABLED` (default: `true`, enables trend-driven query planning at scan start)
@@ -90,14 +93,14 @@ python -m tech_sniper_it.worker
 - `HEADLESS` (default: `true`)
 - `MPB_MAX_ATTEMPTS` (default: `3`)
 - `MPB_USE_STORAGE_STATE` (default: `true`)
-- `MPB_STORAGE_STATE_B64` (optional base64 Playwright storage state for MPB challenge bypass)
+- `MPB_STORAGE_STATE_B64` (optional Playwright storage state for MPB challenge bypass; accepts base64 JSON or raw JSON)
 - `MPB_BLOCK_COOLDOWN_SECONDS` (default: `1800`, temporary MPB pause after anti-bot challenge detection)
 - `MPB_REQUIRE_STORAGE_STATE` (default: `true`, skip MPB run when storage state is missing/invalid to avoid challenge loops)
 - `VALUATOR_MAX_PARALLEL_MPB` (default: `1`, serializes MPB requests to reduce anti-bot triggers)
 - `VALUATOR_MAX_PARALLEL_TRENDDEVICE` (default: `2`)
 - `TRENDDEVICE_LEAD_EMAIL` (optional lead email used by TrendDevice wizard when required)
 - `TRENDDEVICE_USE_STORAGE_STATE` (default: `true`)
-- `TRENDDEVICE_STORAGE_STATE_B64` (optional base64 Playwright storage state for logged-in TrendDevice session)
+- `TRENDDEVICE_STORAGE_STATE_B64` (optional Playwright storage state for logged-in TrendDevice session; accepts base64 JSON or raw JSON)
 - `TRENDDEVICE_EMAIL_GATE_WAIT_MS` (default: `6500`, wait after lead form submit before fallback extraction)
 - `VALUATOR_SELECTOR_OVERRIDES_JSON` (optional JSON selector overrides for automatic UI drift adaptation)
 - `AMAZON_PRODUCTS_JSON` (optional JSON array)

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import base64
 import json
 import os
 from urllib.parse import urlparse
@@ -78,6 +77,47 @@ def _parse_openrouter_model_power_json(value: str | None) -> bool:
         if not isinstance(score, (int, float)):
             return False
     return True
+
+
+def _decode_json_dict_maybe_base64(raw_value: str | None) -> tuple[dict | None, str | None]:
+    raw = (raw_value or "").strip()
+    if not raw:
+        return None, "empty"
+
+    def _parse_json_dict(candidate: str) -> tuple[dict | None, str | None]:
+        try:
+            decoded = json.loads(candidate)
+        except Exception:
+            return None, "invalid-json"
+        if not isinstance(decoded, dict):
+            return None, "json-not-object"
+        return decoded, None
+
+    if raw.startswith("{"):
+        return _parse_json_dict(raw)
+
+    compact = "".join(raw.split())
+    variants = [compact]
+    padding = (-len(compact)) % 4
+    if padding:
+        variants.append(compact + ("=" * padding))
+
+    import base64
+
+    decoders = (base64.b64decode, base64.urlsafe_b64decode)
+    for variant in variants:
+        for decoder in decoders:
+            try:
+                decoded_bytes = decoder(variant)
+                decoded_text = decoded_bytes.decode("utf-8")
+            except Exception:
+                continue
+            parsed, error = _parse_json_dict(decoded_text)
+            if parsed is not None:
+                return parsed, None
+            if error == "json-not-object":
+                return None, error
+    return None, "invalid-base64-json"
 
 
 def main() -> int:
@@ -266,13 +306,9 @@ def main() -> int:
         "off",
     }
     if mpb_use_storage_state and mpb_storage_state:
-        try:
-            decoded = base64.b64decode(mpb_storage_state).decode("utf-8")
-            parsed = json.loads(decoded)
-            if not isinstance(parsed, dict):
-                warnings.append("MPB_STORAGE_STATE_B64 must decode to a JSON object.")
-        except Exception:
-            warnings.append("MPB_STORAGE_STATE_B64 is not valid base64 JSON.")
+        decoded, error = _decode_json_dict_maybe_base64(mpb_storage_state)
+        if decoded is None:
+            warnings.append(f"MPB_STORAGE_STATE_B64 is invalid ({error or 'invalid-base64-json'}).")
     if mpb_require_storage_state and not mpb_use_storage_state:
         warnings.append("MPB_REQUIRE_STORAGE_STATE=true but MPB_USE_STORAGE_STATE=false.")
     if mpb_require_storage_state and not mpb_storage_state:
@@ -306,13 +342,9 @@ def main() -> int:
     }
     trenddevice_storage_state = (os.getenv("TRENDDEVICE_STORAGE_STATE_B64") or "").strip()
     if trenddevice_use_storage_state and trenddevice_storage_state:
-        try:
-            decoded = base64.b64decode(trenddevice_storage_state).decode("utf-8")
-            parsed = json.loads(decoded)
-            if not isinstance(parsed, dict):
-                warnings.append("TRENDDEVICE_STORAGE_STATE_B64 must decode to a JSON object.")
-        except Exception:
-            warnings.append("TRENDDEVICE_STORAGE_STATE_B64 is not valid base64 JSON.")
+        decoded, error = _decode_json_dict_maybe_base64(trenddevice_storage_state)
+        if decoded is None:
+            warnings.append(f"TRENDDEVICE_STORAGE_STATE_B64 is invalid ({error or 'invalid-base64-json'}).")
 
     raw_selector_overrides = (os.getenv("VALUATOR_SELECTOR_OVERRIDES_JSON") or "").strip()
     if raw_selector_overrides and not _parse_selector_overrides(raw_selector_overrides):
@@ -426,13 +458,9 @@ def main() -> int:
             raw_storage_state = (os.getenv(env_name) or "").strip()
             if not use_storage_state or not raw_storage_state:
                 continue
-            try:
-                decoded = base64.b64decode(raw_storage_state).decode("utf-8")
-                parsed = json.loads(decoded)
-                if not isinstance(parsed, dict):
-                    warnings.append(f"{env_name} must decode to a JSON object.")
-            except Exception:
-                warnings.append(f"{env_name} is not valid base64 JSON.")
+            decoded, error = _decode_json_dict_maybe_base64(raw_storage_state)
+            if decoded is None:
+                warnings.append(f"{env_name} is invalid ({error or 'invalid-base64-json'}).")
 
         cart_pricing_enabled = _env_or_default("AMAZON_WAREHOUSE_CART_PRICING_ENABLED", "false").lower() not in {
             "0",

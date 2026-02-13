@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import base64
+import json
 import re
+from typing import Any
 
 
 PRICE_PATTERN = re.compile(r"(\d{1,3}(?:[.\s]\d{3})*(?:,\d{2})?)\s*€|€\s*(\d{1,3}(?:[.\s]\d{3})*(?:,\d{2})?)")
@@ -81,6 +84,45 @@ COLOR_MAP = {
     "gray": ("grigio", "gray", "space grey", "grafite"),
     "purple": ("viola", "purple"),
 }
+
+
+def decode_json_dict_maybe_base64(raw_value: str | None) -> tuple[dict[str, Any] | None, str | None]:
+    raw = (raw_value or "").strip()
+    if not raw:
+        return None, "empty"
+
+    def _parse_json_dict(candidate: str) -> tuple[dict[str, Any] | None, str | None]:
+        try:
+            decoded = json.loads(candidate)
+        except Exception:
+            return None, "invalid-json"
+        if not isinstance(decoded, dict):
+            return None, "json-not-object"
+        return decoded, None
+
+    if raw.startswith("{"):
+        return _parse_json_dict(raw)
+
+    compact = re.sub(r"\s+", "", raw)
+    variants = [compact]
+    padding = (-len(compact)) % 4
+    if padding:
+        variants.append(compact + ("=" * padding))
+
+    decoders = (base64.b64decode, base64.urlsafe_b64decode)
+    for variant in variants:
+        for decoder in decoders:
+            try:
+                decoded_bytes = decoder(variant)
+                decoded_text = decoded_bytes.decode("utf-8")
+            except Exception:
+                continue
+            parsed, error = _parse_json_dict(decoded_text)
+            if parsed is not None:
+                return parsed, None
+            if error == "json-not-object":
+                return None, error
+    return None, "invalid-base64-json"
 
 
 def parse_eur_price(text: str) -> float | None:

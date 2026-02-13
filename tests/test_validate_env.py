@@ -85,7 +85,7 @@ def test_validate_env_warns_on_invalid_trenddevice_storage_state(tmp_path: Path)
         },
     )
     assert result.returncode == 0
-    assert "TRENDDEVICE_STORAGE_STATE_B64 is not valid base64 JSON." in result.stdout
+    assert "TRENDDEVICE_STORAGE_STATE_B64 is invalid (" in result.stdout
 
 
 def test_validate_env_warns_on_invalid_mpb_storage_state(tmp_path: Path) -> None:
@@ -101,7 +101,7 @@ def test_validate_env_warns_on_invalid_mpb_storage_state(tmp_path: Path) -> None
         },
     )
     assert result.returncode == 0
-    assert "MPB_STORAGE_STATE_B64 is not valid base64 JSON." in result.stdout
+    assert "MPB_STORAGE_STATE_B64 is invalid (" in result.stdout
 
 
 def test_validate_env_warns_on_invalid_amazon_marketplace_storage_state(tmp_path: Path) -> None:
@@ -117,7 +117,7 @@ def test_validate_env_warns_on_invalid_amazon_marketplace_storage_state(tmp_path
         },
     )
     assert result.returncode == 0
-    assert "AMAZON_WAREHOUSE_STORAGE_STATE_B64_FR is not valid base64 JSON." in result.stdout
+    assert "AMAZON_WAREHOUSE_STORAGE_STATE_B64_FR is invalid (" in result.stdout
 
 
 def test_validate_env_fails_on_invalid_mpb_max_attempts(tmp_path: Path) -> None:

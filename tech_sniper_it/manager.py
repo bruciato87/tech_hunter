@@ -119,7 +119,7 @@ def _valuator_backoff_threshold(platform: str) -> int:
     default_threshold = max(1, int(_env_or_default("VALUATOR_BACKOFF_DEFAULT_ERRORS", "2")))
     defaults = {
         "mpb": 1,
-        "trenddevice": 2,
+        "trenddevice": 1,
     }
     platform_name = platform.strip().lower()
     platform_default = defaults.get(platform_name, default_threshold)

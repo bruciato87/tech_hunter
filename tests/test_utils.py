@@ -1,9 +1,12 @@
 from tech_sniper_it.utils import (
+    decode_json_dict_maybe_base64,
     detect_color_variants,
     extract_capacity_gb,
     infer_amazon_warehouse_condition,
     parse_eur_price,
 )
+import base64
+import json
 
 
 def test_parse_eur_price_suffix() -> None:
@@ -42,3 +45,17 @@ def test_infer_amazon_warehouse_condition_detects_like_new() -> None:
     assert condition == "like_new"
     assert confidence > 0.9
     assert packaging_only is False
+
+
+def test_decode_json_dict_maybe_base64_accepts_raw_json() -> None:
+    parsed, error = decode_json_dict_maybe_base64('{"cookies":[],"origins":[]}')
+    assert error is None
+    assert parsed == {"cookies": [], "origins": []}
+
+
+def test_decode_json_dict_maybe_base64_accepts_base64_with_missing_padding() -> None:
+    raw = json.dumps({"cookies": [], "origins": []}).encode("utf-8")
+    encoded = base64.b64encode(raw).decode("ascii").rstrip("=")
+    parsed, error = decode_json_dict_maybe_base64(encoded)
+    assert error is None
+    assert parsed == {"cookies": [], "origins": []}

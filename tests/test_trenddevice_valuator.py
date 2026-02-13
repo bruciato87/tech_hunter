@@ -312,3 +312,17 @@ def test_load_storage_state_b64_returns_none_on_invalid_payload(monkeypatch: pyt
     monkeypatch.setenv("TRENDDEVICE_USE_STORAGE_STATE", "true")
     monkeypatch.setenv("TRENDDEVICE_STORAGE_STATE_B64", "not-base64")
     assert _load_storage_state_b64() is None
+
+
+def test_load_storage_state_b64_accepts_raw_json(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TRENDDEVICE_USE_STORAGE_STATE", "true")
+    monkeypatch.setenv("TRENDDEVICE_STORAGE_STATE_B64", '{"cookies":[],"origins":[]}')
+    path = _load_storage_state_b64()
+    assert path is not None
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            loaded = json.load(handle)
+        assert isinstance(loaded, dict)
+        assert loaded.get("cookies") == []
+    finally:
+        _remove_file_if_exists(path)

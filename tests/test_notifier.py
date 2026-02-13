@@ -47,7 +47,8 @@ async def test_notifier_sends_message(monkeypatch: pytest.MonkeyPatch) -> None:
     text = fake_bot.messages[0]["text"]
     assert "🚨 Tech_Sniper_IT | Opportunita trovata" in text
     assert "✅ Spread netto: +140.00 EUR" in text
-    assert "🛡️ Buffer rischio: -0.00 EUR | costi: -0.00 EUR" in text
+    assert "lordo +140.00" in text
+    assert "🧠 AI: heuristic/rule-based (fallback)" in text
     assert "🛒 Amazon link: https://amazon.it/item" in text
 
 
