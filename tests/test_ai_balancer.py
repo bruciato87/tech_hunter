@@ -65,6 +65,32 @@ async def test_openrouter_prefers_most_powerful_free_model(monkeypatch: pytest.M
 
 
 @pytest.mark.asyncio
+async def test_openrouter_auto_prioritizes_stable_perplexity_when_available(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    balancer = SmartAIBalancer(
+        gemini_keys=[],
+        openrouter_keys=["o1"],
+        openrouter_model="openrouter/auto",
+        openrouter_free_models=["qwen/qwen-2.5-72b-instruct:free", "perplexity/sonar"],
+        openrouter_model_power={"qwen/qwen-2.5-72b-instruct:free": 120, "perplexity/sonar": 90},
+        openrouter_max_models_per_request=2,
+    )
+    attempts: list[str] = []
+
+    async def fake_openrouter(api_key: str, prompt: str, title: str, model: str | None = None) -> tuple[str, str | None]:
+        attempts.append(model or "")
+        return "Apple Watch Ultra 2 49mm", model
+
+    monkeypatch.setattr(balancer, "_call_openrouter", fake_openrouter)
+
+    result, usage = await balancer.normalize_with_meta("Apple Watch Ultra 2 GPS + Cellular 49mm Titanio")
+    assert result == "Apple Watch Ultra 2 49mm"
+    assert usage["provider"] == "openrouter"
+    assert attempts[0] == "perplexity/sonar"
+
+
+@pytest.mark.asyncio
 async def test_openrouter_cooldown_skips_quota_model(monkeypatch: pytest.MonkeyPatch) -> None:
     balancer = SmartAIBalancer(
         gemini_keys=[],

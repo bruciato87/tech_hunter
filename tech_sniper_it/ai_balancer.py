@@ -13,12 +13,12 @@ import httpx
 
 
 DEFAULT_OPENROUTER_FREE_MODELS = [
+    "perplexity/sonar",
     "deepseek/deepseek-r1:free",
     "meta-llama/llama-3.3-70b-instruct:free",
     "qwen/qwen-2.5-72b-instruct:free",
     "mistralai/mistral-small-3.1-24b-instruct:free",
     "google/gemini-2.0-flash-exp:free",
-    "perplexity/sonar",
 ]
 
 
@@ -197,7 +197,7 @@ class SmartAIBalancer:
             1,
             openrouter_max_models_per_request
             if openrouter_max_models_per_request is not None
-            else _env_int("OPENROUTER_MAX_MODELS_PER_REQUEST", 3),
+            else _env_int("OPENROUTER_MAX_MODELS_PER_REQUEST", 2),
         )
         self.openrouter_cooldown_seconds = max(
             1,
@@ -636,13 +636,12 @@ class SmartAIBalancer:
         stats["blocked_until"] = time.monotonic() + max(1, cooldown_seconds)
 
     def _augment_openrouter_candidates(self, initial: list[str], ranked_models: list[str]) -> list[str]:
-        candidates = _dedupe_keep_order(initial)
-        rescue_chain = [
+        candidates: list[str] = []
+        preferred_chain = [
             self._last_successful_openrouter_model or "",
             "perplexity/sonar",
-            "openrouter/auto",
         ]
-        for model in rescue_chain:
+        for model in [*preferred_chain, *initial, *ranked_models]:
             if not model:
                 continue
             if model not in ranked_models:
@@ -652,7 +651,13 @@ class SmartAIBalancer:
             if self._cooldown_remaining(model) > 0:
                 continue
             candidates.append(model)
-        return candidates
+            if len(candidates) >= self.openrouter_max_models_per_request:
+                break
+        if candidates:
+            return candidates
+        # Emergency fallback: return top-ranked models even if currently cooled down.
+        fallback = _dedupe_keep_order(ranked_models)[: self.openrouter_max_models_per_request]
+        return fallback or _dedupe_keep_order(initial)[: self.openrouter_max_models_per_request]
 
     def _sanitize_result(self, text: str) -> str:
         value = (text or "").strip()
