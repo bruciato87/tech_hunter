@@ -647,6 +647,17 @@ class MPBValuator(BaseValuator):
             "adaptive_fallbacks": {},
             "storage_state": bool(storage_state_path),
         }
+        rotate_user_agent = _env_or_default("MPB_ROTATE_USER_AGENT", "true").strip().lower() not in {
+            "0",
+            "false",
+            "no",
+            "off",
+        }
+        sticky_user_agent = _env_or_default("MPB_USER_AGENT", DEFAULT_USER_AGENTS[1]).strip() or DEFAULT_USER_AGENTS[1]
+        payload["user_agent_strategy"] = {
+            "rotate": rotate_user_agent and not bool(storage_state_path),
+            "sticky_with_storage_state": bool(storage_state_path),
+        }
         blocker_hits: list[str] = []
         had_unblocked_attempt = False
         network_price_candidates: list[dict[str, Any]] = []
@@ -682,7 +693,14 @@ class MPBValuator(BaseValuator):
                 for query_index, query in enumerate(query_candidates, start=1):
                     for attempt in range(1, max_attempts + 1):
                         global_attempt += 1
-                        user_agent = DEFAULT_USER_AGENTS[(global_attempt - 1) % len(DEFAULT_USER_AGENTS)]
+                        if storage_state_path:
+                            # Cloudflare clearance cookies are often tied to UA/session.
+                            # Keep UA stable when replaying an authenticated storage state.
+                            user_agent = sticky_user_agent
+                        elif rotate_user_agent:
+                            user_agent = DEFAULT_USER_AGENTS[(global_attempt - 1) % len(DEFAULT_USER_AGENTS)]
+                        else:
+                            user_agent = sticky_user_agent
                         context_kwargs: dict[str, Any] = {
                             "locale": "it-IT",
                             "user_agent": user_agent,
