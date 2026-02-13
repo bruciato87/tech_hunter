@@ -1726,13 +1726,12 @@ async def _run_scan_command(payload: dict[str, Any]) -> int:
         headless=headless,
         nav_timeout_ms=nav_timeout_ms,
     )
-    if cart_pricing_stats.get("checked", 0):
-        print(
-            "[scan] Cart net pricing applied | "
-            f"checked={cart_pricing_stats.get('checked', 0)} "
-            f"updated={cart_pricing_stats.get('updated', 0)} "
-            f"skipped={cart_pricing_stats.get('skipped', 0)}"
-        )
+    print(
+        "[scan] Cart net pricing stage | "
+        f"checked={cart_pricing_stats.get('checked', 0)} "
+        f"updated={cart_pricing_stats.get('updated', 0)} "
+        f"skipped={cart_pricing_stats.get('skipped', 0)}"
+    )
 
     max_parallel_products = int(_env_or_default("MAX_PARALLEL_PRODUCTS", "3"))
     print(f"[scan] Loaded products: {len(products)} | max_parallel_products={max_parallel_products}")
