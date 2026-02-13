@@ -932,9 +932,11 @@ class MPBValuator(BaseValuator):
         locale_segment = _mpb_api_locale_segment(market)
         search_path = _mpb_api_search_path(market)
         condition = _mpb_api_condition()
-        query_limit = max(1, int(_env_or_default("MPB_API_QUERY_LIMIT", "4")))
-        model_limit = max(1, int(_env_or_default("MPB_API_MODEL_LIMIT", "6")))
-        rows = max(6, min(28, int(_env_or_default("MPB_API_SEARCH_ROWS", "16"))))
+        query_limit = max(1, int(_env_or_default("MPB_API_QUERY_LIMIT", "2")))
+        model_limit = max(1, int(_env_or_default("MPB_API_MODEL_LIMIT", "3")))
+        rows = max(6, min(20, int(_env_or_default("MPB_API_SEARCH_ROWS", "10"))))
+        api_budget_seconds = max(6.0, min(40.0, float(_env_or_default("MPB_API_TIME_BUDGET_SECONDS", "18"))))
+        deadline = time.monotonic() + api_budget_seconds
 
         api_payload: dict[str, Any] = {
             "market": market,
@@ -943,6 +945,7 @@ class MPBValuator(BaseValuator):
             "query_limit": query_limit,
             "model_limit": model_limit,
             "rows": rows,
+            "time_budget_s": api_budget_seconds,
             "queries": [],
         }
         payload["api_purchase_price"] = api_payload
@@ -968,6 +971,9 @@ class MPBValuator(BaseValuator):
                     api_payload["blockers"] = page_blockers
 
                 for query in query_candidates[:query_limit]:
+                    if time.monotonic() > deadline:
+                        api_payload["timed_out"] = True
+                        break
                     query_item: dict[str, Any] = {"query": query, "status": "pending"}
                     api_payload["queries"].append(query_item)
                     search_response = await self._api_search_models(
@@ -1003,6 +1009,10 @@ class MPBValuator(BaseValuator):
                     ]
 
                     for model in ranked_models[:model_limit]:
+                        if time.monotonic() > deadline:
+                            query_item["status"] = "timeout"
+                            api_payload["timed_out"] = True
+                            break
                         assessment = model.get("assessment", {})
                         score = int(assessment.get("score", 0) or 0)
                         token_ratio = float(assessment.get("token_ratio", 0.0) or 0.0)
