@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
@@ -227,6 +228,38 @@ def _extract_rebuy_cash_payout(text: str) -> tuple[float | None, str]:
             continue
         return value, snippet[:240]
     return None, ""
+
+
+def _pick_best_rebuy_network_candidate(candidates: list[dict[str, Any]]) -> tuple[float | None, str]:
+    if not candidates:
+        return None, ""
+    ranked: list[tuple[int, float, str]] = []
+    for item in candidates:
+        try:
+            value = float(item.get("price"))
+        except (TypeError, ValueError):
+            continue
+        if value <= 0 or value > 10000:
+            continue
+        snippet = str(item.get("snippet") or "").strip()
+        snippet_norm = snippet.lower()
+        url_norm = str(item.get("url") or "").lower()
+        score = 0
+        if "pagamento diretto" in snippet_norm:
+            score += 40
+        if "bonifico" in snippet_norm or "paypal" in snippet_norm:
+            score += 20
+        if "codice promozionale" in snippet_norm or "buono" in snippet_norm:
+            score -= 25
+        if "/vendere/" in url_norm:
+            score += 10
+        if int(item.get("status", 0) or 0) == 200:
+            score += 3
+        ranked.append((score, value, snippet))
+    if not ranked:
+        return None, ""
+    _, value, snippet = max(ranked, key=lambda row: (row[0], row[1]))
+    return value, snippet
 
 
 def _rebuy_wizard_state(text: str) -> str:
@@ -657,6 +690,58 @@ class RebuyValuator(BaseValuator):
             context = await browser.new_context(**context_kwargs)
             page = await context.new_page()
             page.set_default_timeout(self.nav_timeout_ms)
+            network_price_candidates: list[dict[str, Any]] = []
+            response_tasks: set[asyncio.Task[Any]] = set()
+
+            async def _capture_response_body(response) -> None:  # noqa: ANN001
+                try:
+                    url = str(getattr(response, "url", "") or "")
+                    if not url:
+                        return
+                    url_norm = url.lower()
+                    request = getattr(response, "request", None)
+                    resource_type = ""
+                    if request is not None:
+                        resource_type = str(getattr(request, "resource_type", "") or "").lower()
+                    if resource_type not in {"xhr", "fetch"} and not any(
+                        token in url_norm for token in ("offer", "offert", "quote", "valuat", "price", "/api/", "graphql", "vendere")
+                    ):
+                        return
+                    body = await response.text()
+                    if not body:
+                        return
+                    price, snippet = _extract_rebuy_cash_payout(body)
+                    source = "network-cash"
+                    if price is None:
+                        price, snippet = _extract_contextual_price(body)
+                        source = "network-context"
+                    if price is None:
+                        return
+                    network_price_candidates.append(
+                        {
+                            "price": float(price),
+                            "snippet": snippet[:240],
+                            "url": url,
+                            "status": getattr(response, "status", None),
+                            "source": source,
+                        }
+                    )
+                    if len(network_price_candidates) > 40:
+                        del network_price_candidates[:-40]
+                except Exception:
+                    return
+
+            def _on_response(response) -> None:  # noqa: ANN001
+                task = asyncio.create_task(_capture_response_body(response))
+                response_tasks.add(task)
+                task.add_done_callback(lambda done: response_tasks.discard(done))
+
+            async def _drain_response_tasks() -> None:
+                if not response_tasks:
+                    return
+                await asyncio.gather(*tuple(response_tasks), return_exceptions=True)
+
+            page.on("response", _on_response)
             try:
                 search_url = f"{self.base_url}/cerca?query={quote_plus(str(query))}"
                 await page.goto(search_url, wait_until="domcontentloaded")
@@ -768,6 +853,7 @@ class RebuyValuator(BaseValuator):
                             normalized_name=normalized_name,
                             condition_selectors=condition_selectors,
                             payload=payload,
+                            network_price_candidates=network_price_candidates,
                         )
                         if rescue["offer"] is not None:
                             payload["price_source"] = "deep_link_rescue"
@@ -781,6 +867,13 @@ class RebuyValuator(BaseValuator):
                 price_text = ""
                 wizard_max_steps = _rebuy_wizard_max_steps()
                 for step_attempt in range(1, wizard_max_steps + 1):
+                    network_price, network_snippet = _pick_best_rebuy_network_candidate(network_price_candidates)
+                    if network_price is not None:
+                        payload["price_source"] = "network"
+                        payload["price_text"] = network_snippet
+                        payload["network_price_candidates"] = network_price_candidates[-12:]
+                        return network_price, resolved_source_url or page.url, payload
+
                     try:
                         step_body = await page.inner_text("body", timeout=1600)
                     except PlaywrightError:
@@ -864,6 +957,12 @@ class RebuyValuator(BaseValuator):
 
                 payload["price_text"] = price_text
                 if price is None:
+                    network_price, network_snippet = _pick_best_rebuy_network_candidate(network_price_candidates)
+                    if network_price is not None:
+                        payload["price_source"] = "network"
+                        payload["price_text"] = network_snippet
+                        payload["network_price_candidates"] = network_price_candidates[-12:]
+                        return network_price, resolved_source_url or page.url, payload
                     await self._attach_ui_probe(
                         payload=payload,
                         page=page,
@@ -876,6 +975,13 @@ class RebuyValuator(BaseValuator):
                 payload["price_source"] = str(payload.get("price_source") or "dom")
                 return price, resolved_source_url or page.url, payload
             finally:
+                await _drain_response_tasks()
+                if network_price_candidates:
+                    payload["network_price_candidates"] = network_price_candidates[-12:]
+                try:
+                    page.off("response", _on_response)
+                except Exception:
+                    pass
                 await context.close()
                 await browser.close()
                 _remove_file_if_exists(storage_state_path)
@@ -943,6 +1049,7 @@ class RebuyValuator(BaseValuator):
         normalized_name: str,
         condition_selectors: list[str],
         payload: dict[str, Any],
+        network_price_candidates: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         payload["adaptive_fallbacks"]["deep_link_rescue"] = True
         opened = await self._open_best_result_deep_link(page, normalized_name, payload=payload)
@@ -992,6 +1099,13 @@ class RebuyValuator(BaseValuator):
         price_text = ""
         wizard_max_steps = _rebuy_wizard_max_steps()
         for step_attempt in range(1, wizard_max_steps + 1):
+            network_price, network_snippet = _pick_best_rebuy_network_candidate(network_price_candidates or [])
+            if network_price is not None:
+                payload["price_source"] = "deep_link_rescue_network"
+                payload["price_text"] = network_snippet
+                if network_price_candidates:
+                    payload["network_price_candidates"] = network_price_candidates[-12:]
+                return {"offer": network_price, "url": resolved_source_url or page.url}
             try:
                 step_body = await page.inner_text("body", timeout=1600)
             except PlaywrightError:
