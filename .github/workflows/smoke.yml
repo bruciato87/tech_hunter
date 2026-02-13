@@ -68,9 +68,12 @@ jobs:
 
       - name: Inject products
         run: |
-          printf "AMAZON_PRODUCTS_JSON=%s\n" '${{ github.event.inputs.products_json }}' >> "$GITHUB_ENV"
+          {
+            echo "AMAZON_PRODUCTS_JSON<<__SMOKE_JSON__"
+            echo '${{ github.event.inputs.products_json }}'
+            echo "__SMOKE_JSON__"
+          } >> "$GITHUB_ENV"
 
       - name: Run smoke worker
         run: |
           python -u -m tech_sniper_it.worker
-
