@@ -16,6 +16,66 @@ class SupabaseStorage:
         self.table = table
         self.scanner_user_id = os.getenv("SUPABASE_SCANNER_USER_ID")
 
+    def _write_max_attempts(self) -> int:
+        raw = (os.getenv("SUPABASE_WRITE_MAX_ATTEMPTS") or "").strip()
+        try:
+            value = int(raw) if raw else 3
+        except ValueError:
+            value = 3
+        return max(1, min(value, 8))
+
+    def _write_base_delay_ms(self) -> int:
+        raw = (os.getenv("SUPABASE_WRITE_RETRY_DELAY_MS") or "").strip()
+        try:
+            value = int(raw) if raw else 250
+        except ValueError:
+            value = 250
+        return max(50, min(value, 5000))
+
+    def _is_retryable_write_error(self, exc: Exception) -> bool:
+        text = str(exc).lower()
+        retryable_markers = (
+            "server disconnected",
+            "connection reset",
+            "connection aborted",
+            "connection refused",
+            "read timed out",
+            "timed out",
+            "timeout",
+            "temporarily unavailable",
+            "temporary failure",
+            "too many requests",
+            "429",
+            "500",
+            "502",
+            "503",
+            "504",
+        )
+        return any(marker in text for marker in retryable_markers)
+
+    async def _insert_payload(self, payload: dict[str, Any]) -> None:
+        max_attempts = self._write_max_attempts()
+        base_delay_ms = self._write_base_delay_ms()
+        last_error: Exception | None = None
+
+        for attempt in range(1, max_attempts + 1):
+            try:
+                await asyncio.to_thread(self.client.table(self.table).insert(payload).execute)
+                return
+            except Exception as exc:
+                last_error = exc
+                if attempt >= max_attempts or not self._is_retryable_write_error(exc):
+                    raise
+                delay = min(6.0, (base_delay_ms / 1000) * (2 ** (attempt - 1)))
+                print(
+                    "[storage] Write retry scheduled | "
+                    f"attempt={attempt}/{max_attempts} delay_s={delay:.2f} error='{type(exc).__name__}: {exc}'"
+                )
+                await asyncio.sleep(delay)
+
+        if last_error is not None:
+            raise last_error
+
     async def save_opportunity(self, decision: ArbitrageDecision) -> None:
         if not decision.best_offer or decision.spread_eur is None:
             return
@@ -35,10 +95,7 @@ class SupabaseStorage:
         if self.scanner_user_id:
             payload["scanner_user_id"] = self.scanner_user_id
 
-        def _insert() -> None:
-            self.client.table(self.table).insert(payload).execute()
-
-        await asyncio.to_thread(_insert)
+        await self._insert_payload(payload)
 
     async def save_non_profitable(self, decision: ArbitrageDecision, *, threshold: float) -> None:
         if not decision.best_offer or decision.spread_eur is None:

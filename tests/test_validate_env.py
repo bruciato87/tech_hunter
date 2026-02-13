@@ -239,3 +239,48 @@ def test_validate_env_warns_when_cart_pricing_enabled_without_storage_state(tmp_
     )
     assert result.returncode == 0
     assert "AMAZON_WAREHOUSE_CART_PRICING_ENABLED=true but no AMAZON_WAREHOUSE_STORAGE_STATE_B64*" in result.stdout
+
+
+def test_validate_env_fails_on_invalid_non_profitable_save_parallel(tmp_path: Path) -> None:
+    result = _run_validate_env(
+        tmp_path,
+        {
+            "GEMINI_API_KEYS": "k1",
+            "MIN_SPREAD_EUR": "40",
+            "MAX_PARALLEL_PRODUCTS": "2",
+            "PLAYWRIGHT_NAV_TIMEOUT_MS": "45000",
+            "NON_PROFITABLE_SAVE_MAX_PARALLEL": "0",
+        },
+    )
+    assert result.returncode == 1
+    assert "NON_PROFITABLE_SAVE_MAX_PARALLEL must be >= 1." in result.stdout
+
+
+def test_validate_env_fails_on_invalid_supabase_write_attempts(tmp_path: Path) -> None:
+    result = _run_validate_env(
+        tmp_path,
+        {
+            "GEMINI_API_KEYS": "k1",
+            "MIN_SPREAD_EUR": "40",
+            "MAX_PARALLEL_PRODUCTS": "2",
+            "PLAYWRIGHT_NAV_TIMEOUT_MS": "45000",
+            "SUPABASE_WRITE_MAX_ATTEMPTS": "0",
+        },
+    )
+    assert result.returncode == 1
+    assert "SUPABASE_WRITE_MAX_ATTEMPTS must be >= 1." in result.stdout
+
+
+def test_validate_env_fails_on_invalid_mpb_block_cooldown(tmp_path: Path) -> None:
+    result = _run_validate_env(
+        tmp_path,
+        {
+            "GEMINI_API_KEYS": "k1",
+            "MIN_SPREAD_EUR": "40",
+            "MAX_PARALLEL_PRODUCTS": "2",
+            "PLAYWRIGHT_NAV_TIMEOUT_MS": "45000",
+            "MPB_BLOCK_COOLDOWN_SECONDS": "10",
+        },
+    )
+    assert result.returncode == 1
+    assert "MPB_BLOCK_COOLDOWN_SECONDS must be >= 60." in result.stdout

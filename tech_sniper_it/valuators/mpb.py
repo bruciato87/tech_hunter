@@ -5,6 +5,7 @@ import json
 import os
 import re
 import tempfile
+import time
 from typing import Any
 from urllib.parse import quote_plus
 
@@ -77,6 +78,8 @@ BLOCKER_HINTS: tuple[str, ...] = (
     "enable javascript and cookies to continue",
     "verify you are human",
 )
+_MPB_BLOCKED_UNTIL_TS = 0.0
+_MPB_BLOCK_REASON = ""
 
 
 def _env_or_default(name: str, default: str) -> str:
@@ -84,6 +87,37 @@ def _env_or_default(name: str, default: str) -> str:
     if value and value.strip():
         return value.strip()
     return default
+
+
+def _mpb_block_cooldown_seconds() -> int:
+    raw = (os.getenv("MPB_BLOCK_COOLDOWN_SECONDS") or "").strip()
+    try:
+        value = int(raw) if raw else 1800
+    except ValueError:
+        value = 1800
+    return max(60, min(value, 86_400))
+
+
+def _mpb_block_remaining_seconds() -> int:
+    remaining = int(max(0.0, _MPB_BLOCKED_UNTIL_TS - time.time()))
+    return remaining
+
+
+def _mark_mpb_temporarily_blocked(reason: str) -> None:
+    global _MPB_BLOCKED_UNTIL_TS, _MPB_BLOCK_REASON
+    cooldown = _mpb_block_cooldown_seconds()
+    _MPB_BLOCKED_UNTIL_TS = time.time() + float(cooldown)
+    _MPB_BLOCK_REASON = reason.strip() or "anti-bot challenge"
+    print(
+        "[mpb] Temporary block enabled | "
+        f"cooldown_s={cooldown} reason='{_MPB_BLOCK_REASON}'"
+    )
+
+
+def _clear_mpb_temporary_block() -> None:
+    global _MPB_BLOCKED_UNTIL_TS, _MPB_BLOCK_REASON
+    _MPB_BLOCKED_UNTIL_TS = 0.0
+    _MPB_BLOCK_REASON = ""
 
 
 def _load_storage_state_b64() -> str | None:
@@ -189,6 +223,12 @@ class MPBValuator(BaseValuator):
         product: AmazonProduct,
         normalized_name: str,
     ) -> tuple[float | None, str | None, dict[str, Any]]:
+        blocked_remaining = _mpb_block_remaining_seconds()
+        if blocked_remaining > 0:
+            reason = _MPB_BLOCK_REASON or "anti-bot challenge"
+            raise RuntimeError(
+                f"MPB temporarily paused after anti-bot challenge ({reason}); retry in ~{blocked_remaining}s."
+            )
         max_attempts = max(1, int(_env_or_default("MPB_MAX_ATTEMPTS", "3")))
         storage_state_path = _load_storage_state_b64()
         payload: dict[str, Any] = {
@@ -392,6 +432,7 @@ class MPBValuator(BaseValuator):
                             }
                         )
                         if price is not None:
+                            _clear_mpb_temporary_block()
                             payload["price_text"] = price_text
                             payload["condition_selected"] = condition_selected
                             payload["price_source"] = "sell_flow"
@@ -403,6 +444,7 @@ class MPBValuator(BaseValuator):
                 _remove_file_if_exists(storage_state_path)
 
         if blocker_hits:
+            _mark_mpb_temporarily_blocked("turnstile/cloudflare")
             raise RuntimeError("MPB blocked by anti-bot challenge (turnstile/cloudflare).")
         raise RuntimeError("MPB price not found after retries.")
 

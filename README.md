@@ -44,6 +44,8 @@ python -m tech_sniper_it.worker
 - `SUPABASE_SERVICE_ROLE_KEY`
 - `SUPABASE_TABLE` (default: `arbitrage_opportunities`)
 - `SUPABASE_SCANNER_USER_ID` (optional, for non-service-role inserts)
+- `SUPABASE_WRITE_MAX_ATTEMPTS` (default: `3`, retry attempts for transient Supabase write failures)
+- `SUPABASE_WRITE_RETRY_DELAY_MS` (default: `250`, base backoff for Supabase write retry)
 - `TELEGRAM_BOT_TOKEN`
 - `TELEGRAM_CHAT_ID`
 - `GEMINI_API_KEYS` (comma-separated)
@@ -69,6 +71,7 @@ python -m tech_sniper_it.worker
 - `EXCLUDE_LOOKBACK_DAYS` (default: `1`)
 - `EXCLUDE_DAILY_RESET` (default: `true`, reset exclusion cache at day boundary)
 - `EXCLUDE_RESET_TIMEZONE` (default: `Europe/Rome`)
+- `NON_PROFITABLE_SAVE_MAX_PARALLEL` (default: `3`, throttles concurrent non-profitable writes to Supabase)
 - `SCAN_IT_QUOTA` (default: `6`, preferred IT candidates in final selection)
 - `SCAN_EU_QUOTA` (default: `6`, preferred EU candidates in final selection)
 - `SCORING_ENABLE` (default: `true`, enables historical expected-spread ranking)
@@ -80,6 +83,7 @@ python -m tech_sniper_it.worker
 - `MPB_MAX_ATTEMPTS` (default: `3`)
 - `MPB_USE_STORAGE_STATE` (default: `true`)
 - `MPB_STORAGE_STATE_B64` (optional base64 Playwright storage state for MPB challenge bypass)
+- `MPB_BLOCK_COOLDOWN_SECONDS` (default: `1800`, temporary MPB pause after anti-bot challenge detection)
 - `TRENDDEVICE_LEAD_EMAIL` (optional lead email used by TrendDevice wizard when required)
 - `TRENDDEVICE_USE_STORAGE_STATE` (default: `true`)
 - `TRENDDEVICE_STORAGE_STATE_B64` (optional base64 Playwright storage state for logged-in TrendDevice session)

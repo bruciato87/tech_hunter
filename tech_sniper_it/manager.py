@@ -135,21 +135,23 @@ class ArbitrageManager:
             category = ProductCategory(category_value)
             sample = group_items[0]
             all_valuators = self._build_valuators(category)
-            if backoff_enabled:
-                async with backoff_lock:
-                    blocked = set(disabled_platforms)
-                allowed_valuators = [item for item in all_valuators if _valuator_platform_name(item) not in blocked]
-                skipped = [item for item in all_valuators if _valuator_platform_name(item) in blocked]
-                if skipped:
-                    skipped_names = [_valuator_platform_name(item) for item in skipped]
-                    print(
-                        "[scan] Valuator skipped by circuit breaker | "
-                        f"platforms={skipped_names} | category={category.value}"
-                    )
-            else:
-                allowed_valuators = all_valuators
 
             async with semaphore:
+                # Filter valuators only when the task actually starts to run, so queued tasks
+                # can observe circuit-breaker updates from earlier failures.
+                if backoff_enabled:
+                    async with backoff_lock:
+                        blocked = set(disabled_platforms)
+                    allowed_valuators = [item for item in all_valuators if _valuator_platform_name(item) not in blocked]
+                    skipped = [item for item in all_valuators if _valuator_platform_name(item) in blocked]
+                    if skipped:
+                        skipped_names = [_valuator_platform_name(item) for item in skipped]
+                        print(
+                            "[scan] Valuator skipped by circuit breaker | "
+                            f"platforms={skipped_names} | category={category.value}"
+                        )
+                else:
+                    allowed_valuators = all_valuators
                 offers = await self._evaluate_with_valuators(allowed_valuators, sample, normalized_name)
 
             if backoff_enabled:

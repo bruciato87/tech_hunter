@@ -12,6 +12,11 @@ class FakeBalancer(SmartAIBalancer):
         return "iPhone 14 Pro 128GB"
 
 
+class TitleBalancer(SmartAIBalancer):
+    async def normalize_product_name(self, title: str) -> str:
+        return title
+
+
 class StaticValuator:
     def __init__(self, platform: str, offer: float | None, error: str | None = None) -> None:
         self.platform = platform
@@ -145,3 +150,30 @@ def test_build_default_manager_uses_fallback_supabase_table(monkeypatch: pytest.
 
     assert manager.storage is not None
     assert captured["table"] == "arbitrage_opportunities"
+
+
+@pytest.mark.asyncio
+async def test_manager_circuit_breaker_skips_mpb_for_queued_groups(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("VALUATOR_CIRCUIT_BREAKER_ENABLED", "true")
+    monkeypatch.setenv("VALUATOR_BACKOFF_MPB_ERRORS", "1")
+
+    manager = ManagerUnderTest(
+        valuators=[
+            StaticValuator("mpb", None, error="MPB blocked by anti-bot challenge (turnstile/cloudflare)."),
+            StaticValuator("rebuy", 120.0),
+        ],
+        ai_balancer=TitleBalancer(gemini_keys=[], openrouter_keys=[]),
+        min_spread_eur=40.0,
+    )
+    items = [
+        AmazonProduct(title="Canon EOS R7", price_eur=500.0, category=ProductCategory.PHOTOGRAPHY),
+        AmazonProduct(title="Nikon Z fc", price_eur=500.0, category=ProductCategory.PHOTOGRAPHY),
+    ]
+
+    decisions = await manager.evaluate_many(items, max_parallel_products=1)
+
+    assert len(decisions) == 2
+    first_platforms = [offer.platform for offer in decisions[0].offers]
+    second_platforms = [offer.platform for offer in decisions[1].offers]
+    assert "mpb" in first_platforms
+    assert second_platforms == ["rebuy"]

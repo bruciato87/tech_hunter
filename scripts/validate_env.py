@@ -96,6 +96,18 @@ def main() -> int:
         errors.append("SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY must be set together.")
     if not supabase_url:
         warnings.append("Supabase disabled. Profitable deals will not be persisted.")
+    try:
+        supabase_write_attempts = int(_env_or_default("SUPABASE_WRITE_MAX_ATTEMPTS", "3"))
+        if supabase_write_attempts < 1:
+            errors.append("SUPABASE_WRITE_MAX_ATTEMPTS must be >= 1.")
+    except ValueError:
+        errors.append("SUPABASE_WRITE_MAX_ATTEMPTS must be integer.")
+    try:
+        supabase_write_retry_delay = int(_env_or_default("SUPABASE_WRITE_RETRY_DELAY_MS", "250"))
+        if supabase_write_retry_delay < 50:
+            errors.append("SUPABASE_WRITE_RETRY_DELAY_MS must be >= 50.")
+    except ValueError:
+        errors.append("SUPABASE_WRITE_RETRY_DELAY_MS must be integer.")
 
     tg_token = os.getenv("TELEGRAM_BOT_TOKEN")
     tg_chat = os.getenv("TELEGRAM_CHAT_ID")
@@ -153,6 +165,12 @@ def main() -> int:
             errors.append("EXCLUDE_MIN_KEEP must be >= 0.")
     except ValueError:
         errors.append("EXCLUDE_MIN_KEEP must be integer.")
+    try:
+        non_profitable_parallel = int(_env_or_default("NON_PROFITABLE_SAVE_MAX_PARALLEL", "3"))
+        if non_profitable_parallel < 1:
+            errors.append("NON_PROFITABLE_SAVE_MAX_PARALLEL must be >= 1.")
+    except ValueError:
+        errors.append("NON_PROFITABLE_SAVE_MAX_PARALLEL must be integer.")
 
     try:
         exclude_lookback_days = int(_env_or_default("EXCLUDE_LOOKBACK_DAYS", "1"))
@@ -210,6 +228,12 @@ def main() -> int:
             errors.append("MPB_MAX_ATTEMPTS must be >= 1.")
     except ValueError:
         errors.append("MPB_MAX_ATTEMPTS must be integer.")
+    try:
+        mpb_block_cooldown = int(_env_or_default("MPB_BLOCK_COOLDOWN_SECONDS", "1800"))
+        if mpb_block_cooldown < 60:
+            errors.append("MPB_BLOCK_COOLDOWN_SECONDS must be >= 60.")
+    except ValueError:
+        errors.append("MPB_BLOCK_COOLDOWN_SECONDS must be integer.")
     mpb_use_storage_state = _env_or_default("MPB_USE_STORAGE_STATE", "true").lower() not in {
         "0",
         "false",

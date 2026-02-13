@@ -1485,17 +1485,31 @@ async def _save_non_profitable_decisions(manager, decisions: list) -> int:  # no
     storage = getattr(manager, "storage", None)
     if not storage:
         return 0
-    tasks = [storage.save_non_profitable(decision, threshold=manager.min_spread_eur) for decision in decisions]
-    if not tasks:
-        return 0
-    results = await asyncio.gather(*tasks, return_exceptions=True)
-    eligible_indexes = [
-        index
+    eligible: list[tuple[int, Any]] = [
+        (index, decision)
         for index, decision in enumerate(decisions)
-        if decision.spread_eur is not None and decision.spread_eur <= manager.min_spread_eur
+        if decision.best_offer is not None and decision.spread_eur is not None and decision.spread_eur <= manager.min_spread_eur
     ]
-    saved = sum(1 for index in eligible_indexes if not isinstance(results[index], Exception))
-    failed = [results[index] for index in eligible_indexes if isinstance(results[index], Exception)]
+    if not eligible:
+        return 0
+
+    try:
+        max_parallel = max(1, int(_env_or_default("NON_PROFITABLE_SAVE_MAX_PARALLEL", "3")))
+    except ValueError:
+        max_parallel = 3
+    semaphore = asyncio.Semaphore(max_parallel)
+
+    async def _persist(_index: int, decision: Any) -> Exception | None:
+        async with semaphore:
+            try:
+                await storage.save_non_profitable(decision, threshold=manager.min_spread_eur)
+                return None
+            except Exception as exc:  # pragma: no cover - defensive
+                return exc
+
+    persisted = await asyncio.gather(*(_persist(index, decision) for index, decision in eligible))
+    saved = sum(1 for item in persisted if item is None)
+    failed = [item for item in persisted if isinstance(item, Exception)]
     print(f"[scan] Stored non-profitable records for exclusion cache: {saved}")
     if failed:
         first_error = _safe_error_details(failed[0], max_len=160)

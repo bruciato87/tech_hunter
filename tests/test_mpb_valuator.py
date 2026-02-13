@@ -7,11 +7,14 @@ import os
 import pytest
 
 from tech_sniper_it.valuators.mpb import (
+    _clear_mpb_temporary_block,
     _contains_price_hint,
     _detect_blockers,
     _env_or_default,
     _extract_contextual_price,
     _load_storage_state_b64,
+    _mark_mpb_temporarily_blocked,
+    _mpb_block_remaining_seconds,
     _remove_file_if_exists,
 )
 
@@ -77,3 +80,13 @@ def test_extract_contextual_price_returns_none_without_context() -> None:
 def test_contains_price_hint_handles_sell_context() -> None:
     assert _contains_price_hint("Ti paghiamo 320,00 € subito") is True
     assert _contains_price_hint("Prezzo di vendita: 320,00 €") is False
+
+
+def test_mpb_temporary_block_mark_and_clear(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MPB_BLOCK_COOLDOWN_SECONDS", "120")
+    _clear_mpb_temporary_block()
+    _mark_mpb_temporarily_blocked("turnstile/cloudflare")
+    remaining = _mpb_block_remaining_seconds()
+    assert remaining > 0
+    _clear_mpb_temporary_block()
+    assert _mpb_block_remaining_seconds() == 0

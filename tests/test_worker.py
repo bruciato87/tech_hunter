@@ -1101,13 +1101,14 @@ async def test_save_non_profitable_decisions_counts(monkeypatch: pytest.MonkeyPa
             saved.append((decision, threshold))
 
     manager = type("M", (), {"storage": DummyStorage(), "min_spread_eur": 40.0})()
-    decision_low = type("D1", (), {"spread_eur": 10.0})()
-    decision_high = type("D2", (), {"spread_eur": 60.0})()
-    decision_none = type("D3", (), {"spread_eur": None})()
+    best_offer = type("Best", (), {"offer_eur": 100.0, "platform": "rebuy"})()
+    decision_low = type("D1", (), {"spread_eur": 10.0, "best_offer": best_offer})()
+    decision_high = type("D2", (), {"spread_eur": 60.0, "best_offer": best_offer})()
+    decision_none = type("D3", (), {"spread_eur": None, "best_offer": best_offer})()
 
     count = await _save_non_profitable_decisions(manager, [decision_low, decision_high, decision_none])
     assert count == 1
-    assert len(saved) == 3
+    assert len(saved) == 1
 
 
 @pytest.mark.asyncio
@@ -1118,9 +1119,10 @@ async def test_save_non_profitable_decisions_ignores_storage_transient_errors() 
                 raise RuntimeError("temporary supabase disconnect")
 
     manager = type("M", (), {"storage": DummyStorage(), "min_spread_eur": 40.0})()
-    decision_ok = type("D1", (), {"spread_eur": 10.0, "tag": "ok"})()
-    decision_fail = type("D2", (), {"spread_eur": 20.0, "tag": "fail"})()
-    decision_skip = type("D3", (), {"spread_eur": 60.0, "tag": "skip"})()
+    best_offer = type("Best", (), {"offer_eur": 100.0, "platform": "rebuy"})()
+    decision_ok = type("D1", (), {"spread_eur": 10.0, "tag": "ok", "best_offer": best_offer})()
+    decision_fail = type("D2", (), {"spread_eur": 20.0, "tag": "fail", "best_offer": best_offer})()
+    decision_skip = type("D3", (), {"spread_eur": 60.0, "tag": "skip", "best_offer": best_offer})()
 
     count = await _save_non_profitable_decisions(manager, [decision_ok, decision_fail, decision_skip])
     assert count == 1
