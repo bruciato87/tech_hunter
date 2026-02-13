@@ -140,6 +140,61 @@ def test_extract_products_from_html_ignores_installment_price_when_full_price_pr
     assert item["price_eur"] == 609.0
 
 
+def test_extract_products_from_html_ignores_installment_price_spanish_por_mes() -> None:
+    html = """
+    <html>
+      <body>
+        <div data-component-type="s-search-result">
+          <h2>
+            <a href="/Apple-iPad-Air-13-M3-256GB/dp/B0ABCDE123/ref=sr_1_1">
+              <span>Apple iPad Air 13" M3 256GB Wi-Fi</span>
+            </a>
+          </h2>
+          <div class="pricing">
+            <span class="a-price"><span class="a-offscreen">121,80 €</span></span>
+            <span>por mes</span>
+          </div>
+          <div class="pricing">
+            <span class="a-price"><span class="a-offscreen">599,00 €</span></span>
+          </div>
+        </div>
+      </body>
+    </html>
+    """
+    items = _extract_products_from_html(html, "www.amazon.es")
+    assert len(items) == 1
+    item = items[0]
+    assert item["displayed_price_eur"] == 599.0
+    assert item["price_eur"] == 599.0
+
+
+def test_extract_products_from_html_discards_low_outlier_even_without_installment_hint() -> None:
+    html = """
+    <html>
+      <body>
+        <div data-component-type="s-search-result">
+          <h2>
+            <a href="/Apple-iPad-Air-13-M3-256GB/dp/B0ABCDE123/ref=sr_1_1">
+              <span>Apple iPad Air 13" M3 256GB Wi-Fi</span>
+            </a>
+          </h2>
+          <div class="pricing">
+            <span class="a-price"><span class="a-offscreen">121,80 €</span></span>
+          </div>
+          <div class="pricing">
+            <span class="a-price"><span class="a-offscreen">589,00 €</span></span>
+          </div>
+        </div>
+      </body>
+    </html>
+    """
+    items = _extract_products_from_html(html, "www.amazon.es")
+    assert len(items) == 1
+    item = items[0]
+    assert item["displayed_price_eur"] == 589.0
+    assert item["price_eur"] == 589.0
+
+
 def test_extract_products_from_html_applies_coupon_eur_discount_to_net_price() -> None:
     html = """
     <html>

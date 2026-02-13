@@ -118,6 +118,27 @@ INSTALLMENT_HINTS: tuple[str, ...] = (
     "a mese",
     "/mese",
     "mensil",
+    "mensile",
+    "mensiles",
+    "mesi",
+    "meses",
+    "por mes",
+    "/mes",
+    "par mois",
+    "/mois",
+    "pro monat",
+    "/monat",
+    "rate",
+    "rata",
+    "raten",
+    "cuota",
+    "cuotas",
+    "finanziament",
+    "financement",
+    "financing",
+    "taeg",
+    "tan",
+    "apr",
     "month",
     "monat",
     "mois",
@@ -375,6 +396,7 @@ def _extract_price_from_row(row: Any) -> float | None:
 
 
 def _extract_prices_by_selectors(row: Any, selectors: tuple[str, ...]) -> list[float]:
+    all_values: list[float] = []
     values: list[float] = []
     for selector in selectors:
         for node in row.select(selector):
@@ -386,15 +408,28 @@ def _extract_prices_by_selectors(row: Any, selectors: tuple[str, ...]) -> list[f
                 if grandparent is not None:
                     context_chunks.append(grandparent.get_text(" ", strip=True))
             context_text = " ".join(chunk for chunk in context_chunks if chunk).lower()
-            if any(hint in context_text for hint in INSTALLMENT_HINTS):
-                continue
             price = parse_eur_price(node.get_text(" ", strip=True))
             if price is None:
                 continue
             if price <= 0:
                 continue
-            values.append(float(price))
-    return values
+            parsed = float(price)
+            all_values.append(parsed)
+            if any(hint in context_text for hint in INSTALLMENT_HINTS):
+                continue
+            values.append(parsed)
+    if values:
+        return values
+    # If every parsed value looks tied to installment context, still guard against
+    # taking the monthly installment as the product price.
+    if len(all_values) >= 2:
+        top = max(all_values)
+        low = min(all_values)
+        if top >= 180 and low <= top * 0.45:
+            high_cluster = [value for value in all_values if value >= (top * 0.55)]
+            if high_cluster:
+                return high_cluster
+    return all_values
 
 
 def _extract_discount_amounts_from_text(text: str) -> tuple[list[float], list[float]]:
@@ -435,12 +470,15 @@ def _extract_price_details_from_row(row: Any) -> dict[str, float]:
     all_prices = _extract_prices_by_selectors(row, (".a-price .a-offscreen",))
     row_text = row.get_text(" ", strip=True).lower()
     has_installment_hints = any(hint in row_text for hint in INSTALLMENT_HINTS)
-    if has_installment_hints:
-        if len(current_prices) >= 2:
-            top = max(current_prices)
+    if len(current_prices) >= 2:
+        top = max(current_prices)
+        low = min(current_prices)
+        if has_installment_hints or (top >= 180 and low <= top * 0.45):
             current_prices = [value for value in current_prices if value >= (top * 0.55)]
-        if len(all_prices) >= 2:
-            top = max(all_prices)
+    if len(all_prices) >= 2:
+        top = max(all_prices)
+        low = min(all_prices)
+        if has_installment_hints or (top >= 180 and low <= top * 0.45):
             all_prices = [value for value in all_prices if value >= (top * 0.55)]
 
     displayed_price = current_prices[0] if current_prices else None
