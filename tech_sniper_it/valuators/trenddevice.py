@@ -149,6 +149,47 @@ MATCH_STOPWORDS: set[str] = {
     "pack",
     "plus",
 }
+OPTIONAL_DESCRIPTOR_TOKENS: set[str] = {
+    "titanio",
+    "titanium",
+    "acciaio",
+    "steel",
+    "alluminio",
+    "aluminum",
+    "argent",
+    "argento",
+    "silver",
+    "black",
+    "nero",
+    "blu",
+    "blue",
+    "verde",
+    "green",
+    "bianco",
+    "white",
+    "oro",
+    "gold",
+    "grigio",
+    "gray",
+    "grey",
+    "natural",
+    "naturale",
+    "starlight",
+    "siderale",
+    "midnight",
+    "mezzanotte",
+    "small",
+    "medium",
+    "large",
+    "taglia",
+    "loop",
+    "ocean",
+    "alpine",
+    "trail",
+    "cassa",
+    "cinturino",
+    "correa",
+}
 ANCHOR_TOKENS: tuple[str, ...] = (
     "iphone",
     "ipad",
@@ -973,6 +1014,43 @@ def _assess_trenddevice_match(
     source_url: str | None,
     price_text: str | None,
 ) -> dict[str, Any]:
+    def _extract_watch_generation_signature(text: str) -> dict[str, str]:
+        normalized = _normalize_wizard_text(text)
+        signature: dict[str, str] = {}
+
+        series_hits: list[tuple[int, str]] = []
+        for pattern in (r"\b(?:serie|series)\s*(\d{1,2})\b", r"\b(\d{1,2})\s*(?:serie|series)\b"):
+            for match in re.finditer(pattern, normalized):
+                raw_value = match.group(1)
+                try:
+                    parsed_value = int(raw_value)
+                except ValueError:
+                    continue
+                if 1 <= parsed_value <= 20:
+                    series_hits.append((match.start(), str(parsed_value)))
+        if series_hits:
+            series_hits.sort(key=lambda item: item[0])
+            signature["series"] = series_hits[0][1]
+
+        ultra_generation: str | None = None
+        for match in re.finditer(r"\bultra\s*(\d{1,2})\b", normalized):
+            raw_value = match.group(1)
+            try:
+                parsed_value = int(raw_value)
+            except ValueError:
+                continue
+            tail = normalized[match.end() : match.end() + 5]
+            if "mm" in tail:
+                continue
+            if 1 <= parsed_value <= 5:
+                ultra_generation = str(parsed_value)
+                break
+        if ultra_generation is not None:
+            signature["ultra"] = ultra_generation
+        elif "ultra" in normalized:
+            signature["ultra"] = "base"
+        return signature
+
     query_norm = _normalize_wizard_text(normalized_name)
     selected_parts = [
         _normalize_wizard_text(str(step.get("selected", "")))
@@ -1008,6 +1086,8 @@ def _assess_trenddevice_match(
             if item not in required_tokens:
                 required_tokens.append(item)
     for item in tokens:
+        if item in OPTIONAL_DESCRIPTOR_TOKENS:
+            continue
         if item not in required_tokens:
             required_tokens.append(item)
         if len(required_tokens) >= 7:
@@ -1039,6 +1119,47 @@ def _assess_trenddevice_match(
     score = int((ratio * 100) + (len(hit_tokens) * 13) + (len(anchor_hits) * 10) + (14 if has_model_step else -14) - (34 if generic_url else 0))
 
     watch_intent = any(token in query_norm for token in ("watch", "garmin", "fenix", "epix", "forerunner"))
+    query_generation = _extract_watch_generation_signature(query_norm)
+    candidate_generation = _extract_watch_generation_signature(candidate_norm)
+    if watch_intent and query_generation:
+        if query_generation.get("series") and candidate_generation.get("series"):
+            if query_generation["series"] != candidate_generation["series"]:
+                return {
+                    "ok": False,
+                    "reason": "model-generation-mismatch",
+                    "score": score,
+                    "ratio": round(ratio, 3),
+                    "token_ratio": round(token_ratio, 3),
+                    "generic_url": generic_url,
+                    "has_model_step": has_model_step,
+                    "hit_tokens": hit_tokens,
+                    "required_tokens": required_tokens,
+                }
+        if query_generation.get("ultra") and candidate_generation.get("ultra"):
+            if query_generation["ultra"] != candidate_generation["ultra"]:
+                return {
+                    "ok": False,
+                    "reason": "model-generation-mismatch",
+                    "score": score,
+                    "ratio": round(ratio, 3),
+                    "token_ratio": round(token_ratio, 3),
+                    "generic_url": generic_url,
+                    "has_model_step": has_model_step,
+                    "hit_tokens": hit_tokens,
+                    "required_tokens": required_tokens,
+                }
+        if query_generation.get("ultra") == "base" and candidate_generation.get("ultra") not in {None, "base"}:
+            return {
+                "ok": False,
+                "reason": "model-generation-mismatch",
+                "score": score,
+                "ratio": round(ratio, 3),
+                "token_ratio": round(token_ratio, 3),
+                "generic_url": generic_url,
+                "has_model_step": has_model_step,
+                "hit_tokens": hit_tokens,
+                "required_tokens": required_tokens,
+            }
     if watch_intent and "iphone" in selected_combined and "watch" not in selected_combined and "garmin" not in selected_combined:
         return {
             "ok": False,
@@ -1100,7 +1221,12 @@ def _assess_trenddevice_match(
             "hit_tokens": hit_tokens,
             "required_tokens": required_tokens,
         }
-    if token_ratio < 0.55 and ratio < 0.60:
+    low_token_ratio_floor = 0.55
+    low_ratio_floor = 0.60
+    if watch_intent and has_model_step and not generic_url:
+        low_token_ratio_floor = 0.48
+        low_ratio_floor = 0.56
+    if token_ratio < low_token_ratio_floor and ratio < low_ratio_floor:
         return {
             "ok": False,
             "reason": "low-token-similarity",

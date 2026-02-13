@@ -450,6 +450,46 @@ def test_assess_trenddevice_match_accepts_api_style_spacing_and_series_aliases()
     assert match["ok"] is True
 
 
+def test_assess_trenddevice_match_rejects_ultra_generation_mismatch() -> None:
+    product = AmazonProduct(
+        title="Apple Watch Ultra GPS + Cellular 49mm",
+        price_eur=379.0,
+        category=ProductCategory.SMARTWATCH,
+    )
+    match = _assess_trenddevice_match(
+        product=product,
+        normalized_name=product.title,
+        wizard_steps=[
+            {"step_type": STEP_DEVICE_FAMILY, "selected": "Apple Watch"},
+            {"step_type": STEP_MODEL, "selected": "Ultra 3"},
+        ],
+        source_url="https://www.trendevice.com/vendi/valutazione/ultra-3",
+        price_text="Ti offriamo 525,00 €",
+    )
+    assert match["ok"] is False
+    assert match["reason"] == "model-generation-mismatch"
+
+
+def test_assess_trenddevice_match_accepts_watch_material_descriptor_gap() -> None:
+    product = AmazonProduct(
+        title="Apple Watch Ultra GPS + Cellular 49mm Titanio",
+        price_eur=379.0,
+        category=ProductCategory.SMARTWATCH,
+    )
+    match = _assess_trenddevice_match(
+        product=product,
+        normalized_name=product.title,
+        wizard_steps=[
+            {"step_type": STEP_DEVICE_FAMILY, "selected": "Apple Watch"},
+            {"step_type": STEP_MODEL, "selected": "Ultra"},
+            {"step_type": STEP_MODEL, "selected": "49 mm"},
+        ],
+        source_url="https://0lpt5fe6f2.execute-api.eu-south-1.amazonaws.com/prod/vendi/usato/800?device=apple+watch&model=ultra",
+        price_text="stima=160.00€ | Apple Watch | Ultra | 49 mm",
+    )
+    assert match["ok"] is True
+
+
 def test_load_storage_state_b64_decodes_valid_json(monkeypatch: pytest.MonkeyPatch) -> None:
     raw = json.dumps({"cookies": [], "origins": []}, ensure_ascii=False).encode("utf-8")
     encoded = base64.b64encode(raw).decode("ascii")

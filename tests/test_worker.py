@@ -1420,6 +1420,31 @@ async def test_exclude_non_profitable_candidates_relaxes_to_min_keep(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_exclude_non_profitable_candidates_respects_min_keep_hint(monkeypatch: pytest.MonkeyPatch) -> None:
+    class DummyStorage:
+        async def get_excluded_source_urls(self, *, max_spread_eur: float, lookback_days: int, limit: int):  # noqa: ANN201
+            return {"https://www.amazon.it/dp/B0A", "https://www.amazon.it/dp/B0B"}
+
+    manager = type("M", (), {"storage": DummyStorage(), "min_spread_eur": 40.0})()
+    monkeypatch.setenv("EXCLUDE_NON_PROFITABLE", "true")
+    monkeypatch.delenv("EXCLUDE_MIN_KEEP", raising=False)
+
+    removed_a = type(
+        "P1",
+        (),
+        {"title": "A", "price_eur": 100.0, "category": ProductCategory.GENERAL_TECH, "url": "https://www.amazon.it/dp/B0A"},
+    )()
+    removed_b = type(
+        "P2",
+        (),
+        {"title": "B", "price_eur": 100.0, "category": ProductCategory.GENERAL_TECH, "url": "https://www.amazon.it/dp/B0B"},
+    )()
+
+    filtered = await _exclude_non_profitable_candidates(manager, [removed_a, removed_b], min_keep_hint=2)
+    assert len(filtered) == 2
+
+
+@pytest.mark.asyncio
 async def test_exclude_non_profitable_candidates_filters_by_signature(monkeypatch: pytest.MonkeyPatch) -> None:
     class DummyStorage:
         async def get_excluded_source_urls(self, *, max_spread_eur: float, lookback_days: int, limit: int):  # noqa: ANN201

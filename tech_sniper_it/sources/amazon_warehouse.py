@@ -201,9 +201,16 @@ SIGNIN_MARKERS: tuple[str, ...] = (
 ADD_TO_CART_SELECTORS: tuple[str, ...] = (
     "#add-to-cart-button",
     "input#add-to-cart-button",
+    "input#add-to-cart-button-ubb",
     "input[name='submit.add-to-cart']",
     "button[name='submit.add-to-cart']",
     "input[name='submit.add-to-cart.v2']",
+    "button[name='submit.add-to-cart.v2']",
+    "input[name='submit.addToCart']",
+    "button[name='submit.addToCart']",
+    "input[name*='submit.add-to-cart']",
+    "button[name*='submit.add-to-cart']",
+    "input[id*='add-to-cart-button']",
     "button#add-to-cart-button",
 )
 CART_ROW_SELECTORS: tuple[str, ...] = (
@@ -811,6 +818,24 @@ def _cart_pricing_min_add_delta_eur() -> float:
     return max(0.0, min(value, 500.0))
 
 
+def _cart_pricing_add_retries() -> int:
+    raw = _env_or_default("AMAZON_WAREHOUSE_CART_PRICING_ADD_RETRIES", "2")
+    try:
+        value = int(raw)
+    except ValueError:
+        value = 2
+    return max(0, min(value, 4))
+
+
+def _cart_pricing_retry_wait_ms() -> int:
+    raw = _env_or_default("AMAZON_WAREHOUSE_CART_PRICING_RETRY_WAIT_MS", "1100")
+    try:
+        value = int(raw)
+    except ValueError:
+        value = 1100
+    return max(250, min(value, 6000))
+
+
 def _retry_delay_for_attempt(base_ms: int, attempt: int) -> int:
     multiplier = max(1, 2 ** max(0, attempt - 1))
     jitter = random.randint(0, 250)
@@ -1090,6 +1115,33 @@ def _extract_asin_from_url(url: str | None) -> str | None:
     return None
 
 
+def _candidate_product_urls_for_cart(host: str, *, product_url: str, asin: str) -> list[str]:
+    candidates: list[str] = []
+    raw_urls = [
+        product_url,
+        f"https://{host}/dp/{asin}",
+        f"https://{host}/dp/{asin}?psc=1&th=1",
+        f"https://{host}/gp/product/{asin}",
+        f"https://{host}/gp/product/{asin}?psc=1",
+        f"https://{host}/gp/aw/d/{asin}",
+    ]
+    for raw_url in raw_urls:
+        absolute = raw_url if raw_url.startswith(("http://", "https://")) else f"https://{host}{raw_url}"
+        parsed = urlparse(absolute)
+        if not parsed.netloc:
+            continue
+        normalized = parsed._replace(fragment="").geturl()
+        if "psc=" not in normalized and "th=" not in normalized:
+            canonical = _canonical_amazon_url(host, normalized)
+            if canonical:
+                normalized = canonical
+        if not normalized:
+            continue
+        if normalized not in candidates:
+            candidates.append(normalized)
+    return candidates
+
+
 def _cart_url_for_host(host: str) -> str:
     return f"https://{host}/gp/cart/view.html?ref_=nav_cart"
 
@@ -1249,6 +1301,32 @@ async def _read_cart_summary(page, *, host: str, asin: str | None) -> dict[str, 
     return summary
 
 
+async def _navigate_product_page_for_cart(  # noqa: ANN001
+    page,
+    *,
+    host: str,
+    product_url: str,
+    asin: str,
+) -> tuple[str | None, set[str]]:
+    seen_blockers: set[str] = set()
+    candidates = _candidate_product_urls_for_cart(host, product_url=product_url, asin=asin)
+    for index, candidate_url in enumerate(candidates):
+        try:
+            await page.goto(candidate_url, wait_until="domcontentloaded")
+            await _accept_cookie_if_present(page)
+            await page.wait_for_timeout(900 + (index * 250))
+            html = await page.content()
+            title = await page.title()
+            blockers = set(_detect_page_barriers(html, title))
+            if {"signin", "captcha", "sorry-page"} & blockers:
+                seen_blockers.update(blockers)
+                continue
+            return candidate_url, seen_blockers
+        except Exception:
+            continue
+    return None, seen_blockers
+
+
 def _positive_delta(after_value: Any, before_value: Any) -> float | None:
     if not isinstance(after_value, (int, float)):
         return None
@@ -1309,6 +1387,21 @@ async def _click_add_to_cart(page) -> bool:  # noqa: ANN001
             await locator.wait_for(state="visible", timeout=1400)
             await locator.click(timeout=1800)
             return True
+        except PlaywrightError:
+            continue
+    add_patterns = (
+        r"add to cart",
+        r"aggiungi al carrello",
+        r"in den einkaufswagen",
+        r"ajouter au panier",
+        r"a[nñ]adir a la cesta",
+    )
+    for pattern in add_patterns:
+        try:
+            locator = page.get_by_role("button", name=re.compile(pattern, re.IGNORECASE)).first
+            if await locator.count() and await locator.is_visible(timeout=900):
+                await locator.click(timeout=1800)
+                return True
         except PlaywrightError:
             continue
     return False
@@ -1653,26 +1746,44 @@ async def _resolve_cart_net_price(
     before_cart_asins = list(before.get("cart_asins") or [])
     before_cart_empty = bool(before.get("is_empty"))
     try:
-        await page.goto(product_url, wait_until="domcontentloaded")
-        await _accept_cookie_if_present(page)
-        await page.wait_for_timeout(1100)
-        html = await page.content()
-        title = await page.title()
-        product_barriers = set(_detect_page_barriers(html, title))
-        if {"signin", "captcha", "sorry-page"} & product_barriers:
+        loaded_url, seen_blockers = await _navigate_product_page_for_cart(
+            page,
+            host=host,
+            product_url=product_url,
+            asin=asin,
+        )
+        if not loaded_url:
+            if seen_blockers:
+                result["reason_hint"] = f"blocked={'/'.join(sorted(seen_blockers))}"
             result["reason"] = "product-page-blocked"
             return result
+        result["resolved_product_url"] = loaded_url
+
         add_ok = await _click_add_to_cart(page)
         if not add_ok:
             result["reason"] = "add-to-cart-unavailable"
             return result
         added = True
         result["added"] = True
-        await page.wait_for_timeout(1700)
+        retry_wait_ms = _cart_pricing_retry_wait_ms()
+        await page.wait_for_timeout(retry_wait_ms)
 
-        after = await _read_cart_summary(page, host=host, asin=asin)
-        after_summary = after
-        addition = _infer_cart_addition(before, after, asin)
+        attempts = 0
+        max_add_attempts = 1 + _cart_pricing_add_retries()
+        addition: dict[str, Any] | None = None
+        after: dict[str, Any] | None = None
+        while attempts < max_add_attempts:
+            attempts += 1
+            after = await _read_cart_summary(page, host=host, asin=asin)
+            after_summary = after
+            addition = _infer_cart_addition(before, after, asin)
+            if addition.get("added"):
+                break
+            if attempts < max_add_attempts:
+                await page.wait_for_timeout(retry_wait_ms * attempts)
+        if not isinstance(addition, dict):
+            result["reason"] = "not-found-in-cart-after-add"
+            return result
         result["cart_addition"] = {
             "added": bool(addition.get("added")),
             "strong": bool(addition.get("strong")),
@@ -1682,6 +1793,7 @@ async def _resolve_cart_net_price(
             "row_gain": addition.get("row_gain"),
             "delta_total": addition.get("delta_total"),
             "delta_subtotal": addition.get("delta_subtotal"),
+            "attempts": attempts,
         }
         if not addition.get("added"):
             result["reason"] = "not-found-in-cart-after-add"

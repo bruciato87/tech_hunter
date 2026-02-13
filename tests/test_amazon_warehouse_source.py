@@ -5,6 +5,7 @@ import json
 import os
 
 from tech_sniper_it.sources.amazon_warehouse import (
+    _candidate_product_urls_for_cart,
     _build_cart_cleanup_asins,
     _canonical_amazon_url,
     _decode_storage_state_b64,
@@ -82,6 +83,17 @@ def test_extract_products_from_html_supports_h2_span_title_markup() -> None:
     assert item["displayed_price_eur"] == 629.9
     assert item["category"] == "apple_phone"
     assert item["url"] == "https://www.amazon.it/dp/B0ABCDE123"
+
+
+def test_candidate_product_urls_for_cart_prioritizes_canonical_dp() -> None:
+    urls = _candidate_product_urls_for_cart(
+        "www.amazon.it",
+        product_url="https://www.amazon.it/Apple-iPhone-14-Pro-128GB/dp/B0ABCDE123/ref=sr_1_1",
+        asin="B0ABCDE123",
+    )
+    assert urls[0] == "https://www.amazon.it/dp/B0ABCDE123"
+    assert "https://www.amazon.it/dp/B0ABCDE123?psc=1&th=1" in urls
+    assert "https://www.amazon.it/gp/aw/d/B0ABCDE123" in urls
 
 
 def test_expand_marketplaces_handles_eu_alias() -> None:

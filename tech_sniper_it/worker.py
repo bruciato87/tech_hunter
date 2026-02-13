@@ -1885,7 +1885,12 @@ def _select_balanced_candidates(products: list[AmazonProduct], target: int) -> l
     return selected
 
 
-async def _exclude_non_profitable_candidates(manager, products: list[AmazonProduct]) -> list[AmazonProduct]:  # noqa: ANN001
+async def _exclude_non_profitable_candidates(  # noqa: ANN001
+    manager,
+    products: list[AmazonProduct],
+    *,
+    min_keep_hint: int | None = None,
+) -> list[AmazonProduct]:
     storage = getattr(manager, "storage", None)
     if not storage or not _is_truthy_env("EXCLUDE_NON_PROFITABLE", "true"):
         return products
@@ -1973,7 +1978,8 @@ async def _exclude_non_profitable_candidates(manager, products: list[AmazonProdu
         f"url_rows={len(excluded_urls)} signature_rows={len(excluded_signatures)} "
         f"removed_by_url={removed_url} removed_by_signature={removed_signature}"
     )
-    min_keep = max(0, int(_env_or_default("EXCLUDE_MIN_KEEP", "0")))
+    min_keep_default = max(0, int(min_keep_hint or 0))
+    min_keep = max(0, int(_env_or_default("EXCLUDE_MIN_KEEP", str(min_keep_default))))
     if min_keep > 0 and len(filtered) < min_keep and removed_products:
         restore_count = min(min_keep - len(filtered), len(removed_products))
         filtered.extend(removed_products[:restore_count])
@@ -2242,7 +2248,16 @@ async def _run_scan_command(payload: dict[str, Any]) -> int:
             print(f"[scan] Accessory drop -> {row}")
         if len(accessory_drops) > len(preview):
             print(f"[scan] Accessory drop -> ... and {len(accessory_drops) - len(preview)} more.")
-    products = await _exclude_non_profitable_candidates(manager, products)
+    exclude_min_keep_factor = max(1, int(_env_or_default("EXCLUDE_MIN_KEEP_AUTO_FACTOR", "2")))
+    exclude_min_keep_hint = min(
+        len(products),
+        max(scan_target_products, scan_target_products * exclude_min_keep_factor),
+    )
+    products = await _exclude_non_profitable_candidates(
+        manager,
+        products,
+        min_keep_hint=exclude_min_keep_hint,
+    )
     if scoring_context.get("enabled"):
         health_snapshot = scoring_context.get("platform_health", {})
         print(
@@ -2257,8 +2272,10 @@ async def _run_scan_command(payload: dict[str, Any]) -> int:
         print("[scan] Scoring context disabled; using legacy priority.")
 
     products = _prioritize_products(products, scoring_context=scoring_context)
-    predicted_min_keep_default = max(2, scan_target_products // 3)
+    predicted_min_keep_default = max(2, scan_target_products)
     predicted_min_keep = max(2, int(_env_or_default("SCAN_PREDICTED_MIN_KEEP", str(predicted_min_keep_default))))
+    if _is_truthy_env("SCAN_PREDICTED_MIN_KEEP_AUTO_TARGET", "true"):
+        predicted_min_keep = max(predicted_min_keep, scan_target_products)
     products, predicted_drops = _filter_predicted_candidates(
         products,
         scoring_context=scoring_context,
@@ -2276,10 +2293,40 @@ async def _run_scan_command(payload: dict[str, Any]) -> int:
             print(f"[scan] Predicted drop -> ... and {len(predicted_drops) - 5} more.")
 
     max_variants_per_model = max(1, int(_env_or_default("SCAN_MAX_VARIANTS_PER_MODEL", "1")))
+    pre_diversity_products = list(products)
     products, diversity_drops = _apply_model_diversity(
-        products,
+        pre_diversity_products,
         max_per_model=max_variants_per_model,
     )
+    adaptive_diversity_enabled = _is_truthy_env("SCAN_ADAPTIVE_DIVERSITY_RELAX", "true")
+    diversity_target = min(scan_target_products, len(pre_diversity_products))
+    if adaptive_diversity_enabled and diversity_target > 0 and len(products) < diversity_target:
+        relaxed_limit = max_variants_per_model
+        relaxed_products = products
+        for candidate_limit in range(max_variants_per_model + 1, 5):
+            candidate_products, _candidate_drops = _apply_model_diversity(
+                pre_diversity_products,
+                max_per_model=candidate_limit,
+            )
+            if len(candidate_products) <= len(relaxed_products):
+                continue
+            relaxed_limit = candidate_limit
+            relaxed_products = candidate_products
+            if len(relaxed_products) >= diversity_target:
+                break
+        if relaxed_limit != max_variants_per_model:
+            products = relaxed_products
+            max_variants_per_model = relaxed_limit
+            _kept_ids = {id(item) for item in products}
+            diversity_drops = [
+                f"title='{_safe_text(item.title, max_len=90)}' model_key='{_safe_text(_coarse_model_signature(item), max_len=80)}'"
+                for item in pre_diversity_products
+                if id(item) not in _kept_ids
+            ]
+            print(
+                "[scan] Adaptive diversity relaxation | "
+                f"new_max_per_model={relaxed_limit} kept={len(products)} target={diversity_target}"
+            )
     if diversity_drops:
         print(
             "[scan] Model diversity filter applied | "
