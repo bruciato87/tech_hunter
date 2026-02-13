@@ -112,8 +112,11 @@ NETWORK_PRICE_KEYS: tuple[str, ...] = (
 NETWORK_PROMO_BLOCKERS: tuple[str, ...] = (
     "fino al",
     "fino a",
+    "sconto",
     "sconti",
     "promo",
+    "newsletter",
+    "coupon",
     "garanzia",
     "reso gratis",
     "rate",
@@ -1229,11 +1232,7 @@ class TrendDeviceValuator(BaseValuator):
                 request = getattr(response, "request", None)
                 resource_type = str(getattr(request, "resource_type", "")).lower()
                 if "trendevice.com" not in url_lower:
-                    is_api_like = resource_type in {"xhr", "fetch"} or any(
-                        token in content_type for token in ("json", "text", "javascript")
-                    )
-                    if not is_api_like:
-                        return
+                    return
                 interesting_url = any(
                     token in url_lower
                     for token in ("valut", "offer", "offert", "quote", "quotazione", "/api/", "graphql", "vendi")
