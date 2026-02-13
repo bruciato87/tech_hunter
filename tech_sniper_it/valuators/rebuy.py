@@ -481,6 +481,7 @@ def _assess_rebuy_match(
 ) -> dict[str, Any]:
     query_norm = _normalize_match_text(normalized_name)
     parsed_url = urlparse(source_url or "")
+    path = (parsed_url.path or "").strip("/").lower()
     url_parts = " ".join(
         part
         for part in (
@@ -590,7 +591,12 @@ def _assess_rebuy_match(
             "hit_tokens": hit_tokens,
             "required_tokens": required_tokens,
         }
-    if score < 72:
+    score_floor = 72
+    if not generic_url and (query_anchors or capacities):
+        score_floor = 62
+    if path.startswith("vendere/p/"):
+        score_floor = min(score_floor, 58)
+    if score < score_floor:
         return {
             "ok": False,
             "reason": "score-too-low",
@@ -599,6 +605,7 @@ def _assess_rebuy_match(
             "token_ratio": round(token_ratio, 3),
             "generic_url": generic_url,
             "generic_override": strong_generic_match,
+            "score_floor": score_floor,
             "hit_tokens": hit_tokens,
             "required_tokens": required_tokens,
         }
@@ -749,6 +756,10 @@ class RebuyValuator(BaseValuator):
                 payload["match_quality"] = match
                 if not match.get("ok"):
                     reason = match.get("reason", "low-confidence")
+                    score = match.get("score")
+                    token_ratio = match.get("token_ratio")
+                    ratio = match.get("ratio")
+                    detail = f"{reason};score={score};token_ratio={token_ratio};ratio={ratio}"
                     if reason in {"generic-search-url", "generic-category-url"}:
                         rescue = await self._deep_link_rescue(
                             page=page,
@@ -760,7 +771,7 @@ class RebuyValuator(BaseValuator):
                             payload["price_source"] = "deep_link_rescue"
                             return rescue["offer"], rescue["url"], payload
                     raise RuntimeError(
-                        f"Rebuy low-confidence match ({reason}); discarded to prevent false-positive."
+                        f"Rebuy low-confidence match ({detail}); discarded to prevent false-positive."
                     )
 
                 # Complete remaining wizard steps (e.g. accessories) until we see an offer.
@@ -800,14 +811,35 @@ class RebuyValuator(BaseValuator):
                         timeout_ms=2600,
                     )
                     if not progressed:
+                        progressed = await self._click_first_semantic(
+                            page,
+                            keywords=["no", "non", "nein"],
+                            selectors=["button", "[role='button']", "a", "label", "li", "div[role='option']"],
+                            timeout_ms=2000,
+                        )
+                    if not progressed:
                         progressed = await self._click_first(
                             page,
                             selectors=[
                                 "button:has-text('Continua')",
                                 "button:has-text('Avanti')",
                                 "button:has-text('Weiter')",
+                                "[role='button']:has-text('Continua')",
+                                "[role='button']:has-text('Avanti')",
                             ],
                             timeout_ms=2600,
+                        )
+                    if not progressed:
+                        progressed = await self._click_first(
+                            page,
+                            selectors=[
+                                "label:has(input[type='radio'])",
+                                "label:has(input[type='checkbox'])",
+                                "div[role='option']",
+                                "li[role='option']",
+                                "[data-testid*='option' i]",
+                            ],
+                            timeout_ms=2200,
                         )
                     if progressed:
                         payload.setdefault("wizard", []).append({"step": "auto", "attempt": step_attempt, "action": "progress"})
@@ -978,14 +1010,35 @@ class RebuyValuator(BaseValuator):
                 timeout_ms=2600,
             )
             if not progressed:
+                progressed = await self._click_first_semantic(
+                    page,
+                    keywords=["no", "non", "nein"],
+                    selectors=["button", "[role='button']", "a", "label", "li", "div[role='option']"],
+                    timeout_ms=2000,
+                )
+            if not progressed:
                 progressed = await self._click_first(
                     page,
                     selectors=[
                         "button:has-text('Continua')",
                         "button:has-text('Avanti')",
                         "button:has-text('Weiter')",
+                        "[role='button']:has-text('Continua')",
+                        "[role='button']:has-text('Avanti')",
                     ],
                     timeout_ms=2600,
+                )
+            if not progressed:
+                progressed = await self._click_first(
+                    page,
+                    selectors=[
+                        "label:has(input[type='radio'])",
+                        "label:has(input[type='checkbox'])",
+                        "div[role='option']",
+                        "li[role='option']",
+                        "[data-testid*='option' i]",
+                    ],
+                    timeout_ms=2200,
                 )
             if not progressed:
                 await page.wait_for_timeout(1800)
