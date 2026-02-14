@@ -301,18 +301,18 @@ def _mpb_blocker_recovery_enabled() -> bool:
 def _mpb_blocker_recovery_attempts() -> int:
     raw = (os.getenv("MPB_BLOCKER_RECOVERY_ATTEMPTS") or "").strip()
     try:
-        value = int(raw) if raw else 2
+        value = int(raw) if raw else 1
     except ValueError:
-        value = 2
+        value = 1
     return max(1, min(value, 4))
 
 
 def _mpb_blocker_recovery_wait_ms() -> int:
     raw = (os.getenv("MPB_BLOCKER_RECOVERY_WAIT_MS") or "").strip()
     try:
-        value = int(raw) if raw else 2500
+        value = int(raw) if raw else 1200
     except ValueError:
-        value = 2500
+        value = 1200
     return max(500, min(value, 10_000))
 
 
@@ -346,18 +346,18 @@ def _mpb_challenge_warmup_enabled() -> bool:
 def _mpb_challenge_warmup_attempts() -> int:
     raw = (os.getenv("MPB_CHALLENGE_WARMUP_ATTEMPTS") or "").strip()
     try:
-        value = int(raw) if raw else 3
+        value = int(raw) if raw else 1
     except ValueError:
-        value = 3
+        value = 1
     return max(1, min(value, 6))
 
 
 def _mpb_challenge_warmup_wait_ms() -> int:
     raw = (os.getenv("MPB_CHALLENGE_WARMUP_WAIT_MS") or "").strip()
     try:
-        value = int(raw) if raw else 2600
+        value = int(raw) if raw else 1200
     except ValueError:
-        value = 2600
+        value = 1200
     return max(600, min(value, 12_000))
 
 
@@ -438,19 +438,19 @@ def _mpb_total_time_budget_seconds() -> float:
 def _mpb_storage_state_time_budget_seconds() -> float:
     raw = (os.getenv("MPB_STORAGE_STATE_TIME_BUDGET_SECONDS") or "").strip()
     try:
-        value = float(raw) if raw else 12.0
+        value = float(raw) if raw else 9.0
     except ValueError:
-        value = 12.0
-    return max(6.0, min(value, 30.0))
+        value = 9.0
+    return max(4.0, min(value, 20.0))
 
 
 def _mpb_api_time_budget_with_storage_state_seconds() -> float:
     raw = (os.getenv("MPB_API_TIME_BUDGET_WITH_STORAGE_STATE_SECONDS") or "").strip()
     try:
-        value = float(raw) if raw else 7.0
+        value = float(raw) if raw else 5.0
     except ValueError:
-        value = 7.0
-    return max(4.0, min(value, 20.0))
+        value = 5.0
+    return max(3.0, min(value, 15.0))
 
 
 def _remove_file_if_exists(path: str | None) -> None:

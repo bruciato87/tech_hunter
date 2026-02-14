@@ -180,20 +180,20 @@ def test_mpb_total_time_budget_seconds_bounds(monkeypatch: pytest.MonkeyPatch) -
 
 def test_mpb_storage_state_time_budget_seconds_bounds(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MPB_STORAGE_STATE_TIME_BUDGET_SECONDS", "2")
-    assert _mpb_storage_state_time_budget_seconds() == 6.0
-    monkeypatch.setenv("MPB_STORAGE_STATE_TIME_BUDGET_SECONDS", "20")
-    assert _mpb_storage_state_time_budget_seconds() == 20.0
+    assert _mpb_storage_state_time_budget_seconds() == 4.0
+    monkeypatch.setenv("MPB_STORAGE_STATE_TIME_BUDGET_SECONDS", "12")
+    assert _mpb_storage_state_time_budget_seconds() == 12.0
     monkeypatch.setenv("MPB_STORAGE_STATE_TIME_BUDGET_SECONDS", "100")
-    assert _mpb_storage_state_time_budget_seconds() == 30.0
+    assert _mpb_storage_state_time_budget_seconds() == 20.0
 
 
 def test_mpb_api_time_budget_with_storage_state_seconds_bounds(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MPB_API_TIME_BUDGET_WITH_STORAGE_STATE_SECONDS", "1")
-    assert _mpb_api_time_budget_with_storage_state_seconds() == 4.0
+    assert _mpb_api_time_budget_with_storage_state_seconds() == 3.0
     monkeypatch.setenv("MPB_API_TIME_BUDGET_WITH_STORAGE_STATE_SECONDS", "9")
     assert _mpb_api_time_budget_with_storage_state_seconds() == 9.0
     monkeypatch.setenv("MPB_API_TIME_BUDGET_WITH_STORAGE_STATE_SECONDS", "100")
-    assert _mpb_api_time_budget_with_storage_state_seconds() == 20.0
+    assert _mpb_api_time_budget_with_storage_state_seconds() == 15.0
 
 
 def test_mpb_max_attempts_with_storage_state_bounds(monkeypatch: pytest.MonkeyPatch) -> None:
