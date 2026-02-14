@@ -465,9 +465,9 @@ def _mpb_storage_state_time_budget_seconds() -> float:
 def _mpb_api_time_budget_with_storage_state_seconds() -> float:
     raw = (os.getenv("MPB_API_TIME_BUDGET_WITH_STORAGE_STATE_SECONDS") or "").strip()
     try:
-        value = float(raw) if raw else 5.0
+        value = float(raw) if raw else 8.0
     except ValueError:
-        value = 5.0
+        value = 8.0
     return max(3.0, min(value, 15.0))
 
 
@@ -1606,6 +1606,9 @@ class MPBValuator(BaseValuator):
                         await _apply_stealth_context(context)
                         page = await context.new_page()
                         page_default_timeout = _remaining_budget_ms(int(self.nav_timeout_ms), min_ms=1200)
+                        if storage_state_path:
+                            # Keep storage_state retries fast; long waits here cascade into manager-level timeouts.
+                            page_default_timeout = min(page_default_timeout, 3200)
                         if page_default_timeout <= 0:
                             await context.close()
                             raise ValuatorRuntimeError(
@@ -2349,7 +2352,7 @@ class MPBValuator(BaseValuator):
         if not candidates:
             return {"offer": None, "url": None, "blockers": [], "unblocked": True}
 
-        link_limit = max(1, int(_env_or_default("MPB_DEEP_LINK_LIMIT", "4")))
+        link_limit = max(1, int(_env_or_default("MPB_DEEP_LINK_LIMIT", "2")))
         blockers_acc: list[str] = []
         for rank, candidate in enumerate(candidates[:link_limit], start=1):
             candidate_url = str(candidate.get("url") or "").strip()
