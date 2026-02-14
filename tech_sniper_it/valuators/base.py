@@ -60,6 +60,8 @@ class BaseValuator(ABC):
         raise NotImplementedError
 
     async def _accept_cookie_if_present(self, page: Page) -> None:
+        if hasattr(page, "is_closed") and page.is_closed():
+            return
         selectors = [
             "#cookiescript_accept",
             "#cookiescript_save",
@@ -72,9 +74,12 @@ class BaseValuator(ABC):
         ]
         for selector in selectors:
             try:
+                if hasattr(page, "is_closed") and page.is_closed():
+                    return
                 locator = page.locator(selector).first
                 if await locator.count() and await locator.is_visible(timeout=1000):
-                    await locator.click(timeout=1500)
+                    # Force click avoids long retry loops when blackout overlays intercept pointer events.
+                    await locator.click(timeout=900, force=True)
                     return
             except PlaywrightError:
                 continue

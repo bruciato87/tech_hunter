@@ -2782,6 +2782,7 @@ async def _run_scan_command(payload: dict[str, Any]) -> int:
             if scan_mode == "smoke"
             else _format_scan_summary(decisions, manager.min_spread_eur)
         )
+        print(f"[scan] Summary text ({scan_mode}):\n{summary}")
         print(
             "[scan] Sending Telegram summary "
             f"(target={'explicit_chat' if command_chat else 'default_chat'})."

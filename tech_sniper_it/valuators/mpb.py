@@ -1992,16 +1992,25 @@ class MPBValuator(BaseValuator):
                                 payload["price_source"] = "sell_flow"
                                 return price, page.url, payload
                         finally:
-                            await _drain_response_tasks()
+                            try:
+                                await asyncio.shield(_drain_response_tasks())
+                            except Exception:
+                                pass
                             if network_price_candidates:
                                 payload["network_price_candidates"] = network_price_candidates[-12:]
                             try:
                                 page.off("response", _on_response)
                             except Exception:
                                 pass
-                            await context.close()
+                            try:
+                                await asyncio.shield(context.close())
+                            except Exception:
+                                pass
             finally:
-                await browser.close()
+                try:
+                    await asyncio.shield(browser.close())
+                except Exception:
+                    pass
                 _remove_file_if_exists(storage_state_path)
 
         if network_price_candidates:
