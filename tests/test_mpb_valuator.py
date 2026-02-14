@@ -28,6 +28,7 @@ from tech_sniper_it.valuators.mpb import (
     _mpb_api_market,
     _mpb_api_degraded_remaining_seconds,
     _mpb_block_remaining_seconds,
+    _mpb_api_continue_on_bootstrap_blockers,
     _mpb_challenge_warmup_enabled,
     _mpb_skip_api_when_degraded_with_storage_state,
     _mpb_max_attempts_with_storage_state,
@@ -157,6 +158,13 @@ def test_mpb_challenge_warmup_enabled_defaults_true(monkeypatch: pytest.MonkeyPa
     assert _mpb_challenge_warmup_enabled() is True
     monkeypatch.setenv("MPB_CHALLENGE_WARMUP_ENABLED", "false")
     assert _mpb_challenge_warmup_enabled() is False
+
+
+def test_mpb_api_continue_on_bootstrap_blockers_defaults_true(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("MPB_API_CONTINUE_ON_BOOTSTRAP_BLOCKERS", raising=False)
+    assert _mpb_api_continue_on_bootstrap_blockers() is True
+    monkeypatch.setenv("MPB_API_CONTINUE_ON_BOOTSTRAP_BLOCKERS", "false")
+    assert _mpb_api_continue_on_bootstrap_blockers() is False
 
 
 def test_mpb_api_degraded_mark_and_clear(monkeypatch: pytest.MonkeyPatch) -> None:

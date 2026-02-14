@@ -346,23 +346,32 @@ def _mpb_challenge_warmup_enabled() -> bool:
 def _mpb_challenge_warmup_attempts() -> int:
     raw = (os.getenv("MPB_CHALLENGE_WARMUP_ATTEMPTS") or "").strip()
     try:
-        value = int(raw) if raw else 1
+        value = int(raw) if raw else 2
     except ValueError:
-        value = 1
+        value = 2
     return max(1, min(value, 6))
 
 
 def _mpb_challenge_warmup_wait_ms() -> int:
     raw = (os.getenv("MPB_CHALLENGE_WARMUP_WAIT_MS") or "").strip()
     try:
-        value = int(raw) if raw else 1200
+        value = int(raw) if raw else 1400
     except ValueError:
-        value = 1200
+        value = 1400
     return max(600, min(value, 12_000))
 
 
 def _mpb_challenge_warmup_reload_enabled() -> bool:
     return _env_or_default("MPB_CHALLENGE_WARMUP_RELOAD", "true").lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+
+
+def _mpb_api_continue_on_bootstrap_blockers() -> bool:
+    return _env_or_default("MPB_API_CONTINUE_ON_BOOTSTRAP_BLOCKERS", "true").lower() not in {
         "0",
         "false",
         "no",
@@ -995,39 +1004,79 @@ class MPBValuator(BaseValuator):
         url: str,
         headers: dict[str, str],
     ) -> dict[str, Any]:
-        result = await page.evaluate(
-            """
-            async ({url, headers}) => {
-              try {
-                const response = await fetch(url, {
-                  method: "GET",
-                  credentials: "include",
-                  headers: headers || {},
-                });
-                const text = await response.text();
-                let parsed = null;
-                try {
-                  parsed = JSON.parse(text);
-                } catch (_error) {
-                  parsed = null;
-                }
-                return {
-                  ok: response.ok,
-                  status: response.status,
-                  text: (text || "").slice(0, 1800),
-                  json: parsed,
-                };
-              } catch (error) {
-                return {
-                  ok: false,
-                  status: 0,
-                  error: String(error),
-                };
-              }
+        timeout_ms = max(2_500, min(int(self.nav_timeout_ms), 15_000))
+        result: dict[str, Any] | None = None
+        try:
+            response = await page.context.request.get(
+                url,
+                headers=headers or {},
+                timeout=timeout_ms,
+                fail_on_status_code=False,
+            )
+            text = await response.text()
+            parsed: Any | None
+            try:
+                parsed = json.loads(text)
+            except Exception:
+                parsed = None
+            result = {
+                "ok": bool(response.ok),
+                "status": int(response.status),
+                "text": (text or "")[:1800],
+                "json": parsed,
+                "transport": "context-request",
             }
-            """,
-            {"url": url, "headers": headers},
-        )
+        except Exception as exc:
+            result = {
+                "ok": False,
+                "status": 0,
+                "error": str(exc)[:180],
+                "transport": "context-request",
+            }
+
+        fallback_needed = int(result.get("status", 0) or 0) in {0, 401, 403, 429}
+        if fallback_needed:
+            fallback = await page.evaluate(
+                """
+                async ({url, headers}) => {
+                  try {
+                    const response = await fetch(url, {
+                      method: "GET",
+                      credentials: "include",
+                      headers: headers || {},
+                    });
+                    const text = await response.text();
+                    let parsed = null;
+                    try {
+                      parsed = JSON.parse(text);
+                    } catch (_error) {
+                      parsed = null;
+                    }
+                    return {
+                      ok: response.ok,
+                      status: response.status,
+                      text: (text || "").slice(0, 1800),
+                      json: parsed,
+                      transport: "page-fetch",
+                    };
+                  } catch (error) {
+                    return {
+                      ok: false,
+                      status: 0,
+                      error: String(error),
+                      transport: "page-fetch",
+                    };
+                  }
+                }
+                """,
+                {"url": url, "headers": headers},
+            )
+            if isinstance(fallback, dict):
+                fallback_status = int(fallback.get("status", 0) or 0)
+                current_status = int(result.get("status", 0) or 0)
+                if fallback_status == 200 or (current_status == 0 and fallback_status > 0):
+                    result = fallback
+
         if not isinstance(result, dict):
             return {"ok": False, "status": 0, "error": "invalid-fetch-result"}
         response_text = str(result.get("text") or "")
@@ -1110,6 +1159,7 @@ class MPBValuator(BaseValuator):
         model_limit = max(1, int(_env_or_default("MPB_API_MODEL_LIMIT", "2")))
         rows = max(6, min(20, int(_env_or_default("MPB_API_SEARCH_ROWS", "8"))))
         api_budget_seconds = max(6.0, min(40.0, float(_env_or_default("MPB_API_TIME_BUDGET_SECONDS", "12"))))
+        continue_on_bootstrap_blockers = _mpb_api_continue_on_bootstrap_blockers()
         if storage_state_path:
             api_budget_seconds = min(api_budget_seconds, _mpb_api_time_budget_with_storage_state_seconds())
         deadline = time.monotonic() + api_budget_seconds
@@ -1156,10 +1206,17 @@ class MPBValuator(BaseValuator):
                     storage_state_used=bool(storage_state_path),
                 )
                 if page_blockers:
-                    api_payload["blockers"] = page_blockers
-                    api_payload["blocked"] = True
+                    api_payload["bootstrap_blockers"] = page_blockers
+                    api_payload["bootstrap_blocked"] = True
                     api_blockers.extend(page_blockers)
-                    if _mpb_skip_ui_on_api_block():
+                    if continue_on_bootstrap_blockers:
+                        print(
+                            "[mpb] API bootstrap blocked; continuing API probes | "
+                            f"storage_state={bool(storage_state_path)} blockers={page_blockers[:4]}"
+                        )
+                    elif _mpb_skip_ui_on_api_block():
+                        api_payload["blockers"] = page_blockers
+                        api_payload["blocked"] = True
                         return None, None
 
                 for query in query_candidates[:query_limit]:
@@ -1176,6 +1233,12 @@ class MPBValuator(BaseValuator):
                         rows=rows,
                     )
                     query_item["search_status"] = int(search_response.get("status", 0) or 0)
+                    query_item["search_transport"] = str(search_response.get("transport") or "")
+                    print(
+                        "[mpb] API search | "
+                        f"query='{query[:72]}' status={query_item['search_status']} "
+                        f"transport={query_item['search_transport'] or 'n/a'}"
+                    )
                     if int(search_response.get("status", 0) or 0) != 200:
                         blockers = [str(item).strip() for item in (search_response.get("blockers") or []) if str(item).strip()]
                         if blockers:
@@ -1244,7 +1307,13 @@ class MPBValuator(BaseValuator):
                                 "model_id": model_id,
                                 "model_name": model.get("model_name"),
                                 "status": price_status,
+                                "transport": str(price_response.get("transport") or ""),
                             }
+                        )
+                        print(
+                            "[mpb] API purchase check | "
+                            f"model_id={model_id} status={price_status} "
+                            f"transport={str(price_response.get('transport') or 'n/a')}"
                         )
                         if price_status != 200:
                             blockers = [str(item).strip() for item in (price_response.get("blockers") or []) if str(item).strip()]
@@ -1299,6 +1368,10 @@ class MPBValuator(BaseValuator):
                             "currency": currency,
                             "purchase_value": round(purchase_value, 2),
                         }
+                        print(
+                            "[mpb] API purchase success | "
+                            f"model_id={model_id} offer={round(purchase_value, 2):.2f} {currency} condition={condition}"
+                        )
                         return round(purchase_value, 2), source_url
 
                     query_item["status"] = "no-price"
