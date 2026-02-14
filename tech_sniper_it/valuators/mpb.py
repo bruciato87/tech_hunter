@@ -207,6 +207,8 @@ MPB_API_SEARCH_PATH_MAP: dict[str, str] = {
 _MPB_BLOCKED_UNTIL_TS = 0.0
 _MPB_BLOCK_REASON = ""
 _MPB_STORAGE_STATE_ERROR = ""
+_MPB_API_DEGRADED_UNTIL_TS = 0.0
+_MPB_API_DEGRADED_REASON = ""
 
 
 def _env_or_default(name: str, default: str) -> str:
@@ -245,6 +247,82 @@ def _clear_mpb_temporary_block() -> None:
     global _MPB_BLOCKED_UNTIL_TS, _MPB_BLOCK_REASON
     _MPB_BLOCKED_UNTIL_TS = 0.0
     _MPB_BLOCK_REASON = ""
+
+
+def _mpb_api_degraded_cooldown_seconds() -> int:
+    raw = (os.getenv("MPB_API_BLOCK_COOLDOWN_SECONDS") or "").strip()
+    try:
+        value = int(raw) if raw else 900
+    except ValueError:
+        value = 900
+    return max(60, min(value, 3_600))
+
+
+def _mpb_api_degraded_remaining_seconds() -> int:
+    remaining = int(max(0.0, _MPB_API_DEGRADED_UNTIL_TS - time.time()))
+    return remaining
+
+
+def _mark_mpb_api_temporarily_degraded(reason: str) -> None:
+    global _MPB_API_DEGRADED_UNTIL_TS, _MPB_API_DEGRADED_REASON
+    cooldown = _mpb_api_degraded_cooldown_seconds()
+    _MPB_API_DEGRADED_UNTIL_TS = time.time() + float(cooldown)
+    _MPB_API_DEGRADED_REASON = reason.strip() or "api-blocked"
+    print(
+        "[mpb] API degraded mode enabled | "
+        f"cooldown_s={cooldown} reason='{_MPB_API_DEGRADED_REASON}'"
+    )
+
+
+def _clear_mpb_api_temporary_degraded() -> None:
+    global _MPB_API_DEGRADED_UNTIL_TS, _MPB_API_DEGRADED_REASON
+    _MPB_API_DEGRADED_UNTIL_TS = 0.0
+    _MPB_API_DEGRADED_REASON = ""
+
+
+def _mpb_skip_api_when_degraded_with_storage_state() -> bool:
+    return _env_or_default("MPB_SKIP_API_WHEN_DEGRADED_WITH_STORAGE_STATE", "true").lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+
+
+def _mpb_blocker_recovery_enabled() -> bool:
+    return _env_or_default("MPB_BLOCKER_RECOVERY_ENABLED", "true").lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+
+
+def _mpb_blocker_recovery_attempts() -> int:
+    raw = (os.getenv("MPB_BLOCKER_RECOVERY_ATTEMPTS") or "").strip()
+    try:
+        value = int(raw) if raw else 2
+    except ValueError:
+        value = 2
+    return max(1, min(value, 4))
+
+
+def _mpb_blocker_recovery_wait_ms() -> int:
+    raw = (os.getenv("MPB_BLOCKER_RECOVERY_WAIT_MS") or "").strip()
+    try:
+        value = int(raw) if raw else 2500
+    except ValueError:
+        value = 2500
+    return max(500, min(value, 10_000))
+
+
+def _mpb_blocker_recovery_reload_enabled() -> bool:
+    return _env_or_default("MPB_BLOCKER_RECOVERY_RELOAD", "true").lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
 
 
 def _load_storage_state_b64() -> str | None:
@@ -1175,6 +1253,23 @@ class MPBValuator(BaseValuator):
         storage_state_path = _load_storage_state_b64()
         payload["storage_state"] = bool(storage_state_path)
         api_enabled = _mpb_api_purchase_price_enabled()
+        api_degraded_remaining = _mpb_api_degraded_remaining_seconds()
+        if (
+            api_enabled
+            and storage_state_path
+            and api_degraded_remaining > 0
+            and _mpb_skip_api_when_degraded_with_storage_state()
+        ):
+            api_enabled = False
+            payload["api_purchase_price_skipped"] = {
+                "reason": _MPB_API_DEGRADED_REASON or "api-degraded",
+                "remaining_seconds": api_degraded_remaining,
+                "mode": "storage-state-ui-priority",
+            }
+            print(
+                "[mpb] API stage skipped due temporary degraded mode "
+                f"(remaining~{api_degraded_remaining}s); using UI-first flow."
+            )
         payload["api_purchase_price_enabled"] = api_enabled
         if api_enabled:
             try:
@@ -1190,12 +1285,14 @@ class MPBValuator(BaseValuator):
                 api_offer, api_source = None, None
             if api_offer is not None:
                 _clear_mpb_temporary_block()
+                _clear_mpb_api_temporary_degraded()
                 _remove_file_if_exists(storage_state_path)
                 return api_offer, api_source, payload
             api_state = payload.get("api_purchase_price") if isinstance(payload.get("api_purchase_price"), dict) else {}
             if bool(api_state.get("blocked")) and _mpb_skip_ui_on_api_block():
                 blockers = [str(item).strip() for item in (api_state.get("blockers") or []) if str(item).strip()]
                 if storage_state_path:
+                    _mark_mpb_api_temporarily_degraded("api-blocked")
                     payload["api_purchase_price_ui_fallback"] = True
                     payload["api_purchase_price_ui_fallback_reason"] = "api-blocked-with-storage-state"
                     print("[mpb] API blocked; continuing with UI fallback using storage_state session.")
@@ -1411,6 +1508,13 @@ class MPBValuator(BaseValuator):
                             await page.goto(self.base_url, wait_until="domcontentloaded")
                             await self._accept_cookie_if_present(page)
                             blockers = await self._detect_page_blockers(page)
+                            blockers = await self._attempt_blocker_recovery(
+                                page=page,
+                                blockers=blockers,
+                                payload=payload,
+                                stage="base_load",
+                                storage_state_used=bool(storage_state_path),
+                            )
                             if blockers:
                                 blocker_hits.extend(blockers)
                                 payload["attempts"].append(
@@ -1487,6 +1591,13 @@ class MPBValuator(BaseValuator):
                                     expected_keywords=["mpb", "sell", "search", "camera"],
                                 )
                                 blockers = await self._detect_page_blockers(page)
+                                blockers = await self._attempt_blocker_recovery(
+                                    page=page,
+                                    blockers=blockers,
+                                    payload=payload,
+                                    stage="search_input_missing",
+                                    storage_state_used=bool(storage_state_path),
+                                )
                                 blockers.extend(_detect_blockers(json.dumps(probe, ensure_ascii=False)))
                                 blocker_hits.extend(blockers)
                                 payload["attempts"].append(
@@ -1724,6 +1835,57 @@ class MPBValuator(BaseValuator):
             html = ""
         return _detect_blockers(title, html)
 
+    async def _attempt_blocker_recovery(
+        self,
+        *,
+        page: Page,
+        blockers: list[str],
+        payload: dict[str, Any],
+        stage: str,
+        storage_state_used: bool,
+    ) -> list[str]:
+        if not blockers or not storage_state_used or not _mpb_blocker_recovery_enabled():
+            return blockers
+
+        attempts = _mpb_blocker_recovery_attempts()
+        wait_ms = _mpb_blocker_recovery_wait_ms()
+        allow_reload = _mpb_blocker_recovery_reload_enabled()
+        history: list[dict[str, Any]] = []
+        current = blockers
+
+        for index in range(1, attempts + 1):
+            try:
+                await page.wait_for_timeout(wait_ms)
+            except Exception:
+                break
+            try:
+                current = await self._detect_page_blockers(page)
+            except Exception:
+                break
+            history.append({"step": index, "blockers": current[:8]})
+            if not current:
+                print(f"[mpb] Blocker recovered | stage={stage} step={index}")
+                payload["adaptive_fallbacks"][f"blocker_recovery_{stage}"] = {
+                    "enabled": True,
+                    "recovered": True,
+                    "attempts": index,
+                    "history": history,
+                }
+                return []
+            if allow_reload and index < attempts:
+                try:
+                    await page.reload(wait_until="domcontentloaded")
+                except Exception:
+                    continue
+
+        payload["adaptive_fallbacks"][f"blocker_recovery_{stage}"] = {
+            "enabled": True,
+            "recovered": False,
+            "attempts": attempts,
+            "history": history,
+        }
+        return current or blockers
+
     async def _direct_search_fallback(
         self,
         *,
@@ -1746,6 +1908,13 @@ class MPBValuator(BaseValuator):
             return {"offer": None, "url": None, "blockers": [], "unblocked": False}
 
         blockers = await self._detect_page_blockers(page)
+        blockers = await self._attempt_blocker_recovery(
+            page=page,
+            blockers=blockers,
+            payload=payload,
+            stage="direct_search",
+            storage_state_used=bool(payload.get("storage_state")),
+        )
         if blockers:
             payload["attempts"].append(
                 {
@@ -1886,6 +2055,13 @@ class MPBValuator(BaseValuator):
                 continue
 
             blockers = await self._detect_page_blockers(page)
+            blockers = await self._attempt_blocker_recovery(
+                page=page,
+                blockers=blockers,
+                payload=payload,
+                stage="direct_sell_link",
+                storage_state_used=bool(payload.get("storage_state")),
+            )
             if blockers:
                 blockers_acc.extend(blockers)
                 payload["attempts"].append(

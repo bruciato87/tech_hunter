@@ -20,10 +20,14 @@ from tech_sniper_it.valuators.mpb import (
     _extract_mpb_sell_link_candidates,
     _extract_prices_from_json_blob,
     _extract_contextual_price,
+    _clear_mpb_api_temporary_degraded,
     _load_storage_state_b64,
     _mark_mpb_temporarily_blocked,
+    _mark_mpb_api_temporarily_degraded,
     _mpb_api_market,
+    _mpb_api_degraded_remaining_seconds,
     _mpb_block_remaining_seconds,
+    _mpb_skip_api_when_degraded_with_storage_state,
     _mpb_require_storage_state,
     _mpb_skip_ui_on_api_block,
     _mpb_total_time_budget_seconds,
@@ -135,6 +139,23 @@ def test_mpb_skip_ui_on_api_block_defaults_true(monkeypatch: pytest.MonkeyPatch)
     assert _mpb_skip_ui_on_api_block() is True
     monkeypatch.setenv("MPB_SKIP_UI_ON_API_BLOCK", "false")
     assert _mpb_skip_ui_on_api_block() is False
+
+
+def test_mpb_skip_api_when_degraded_with_storage_state_defaults_true(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("MPB_SKIP_API_WHEN_DEGRADED_WITH_STORAGE_STATE", raising=False)
+    assert _mpb_skip_api_when_degraded_with_storage_state() is True
+    monkeypatch.setenv("MPB_SKIP_API_WHEN_DEGRADED_WITH_STORAGE_STATE", "false")
+    assert _mpb_skip_api_when_degraded_with_storage_state() is False
+
+
+def test_mpb_api_degraded_mark_and_clear(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MPB_API_BLOCK_COOLDOWN_SECONDS", "120")
+    _clear_mpb_api_temporary_degraded()
+    _mark_mpb_api_temporarily_degraded("api-blocked")
+    remaining = _mpb_api_degraded_remaining_seconds()
+    assert remaining > 0
+    _clear_mpb_api_temporary_degraded()
+    assert _mpb_api_degraded_remaining_seconds() == 0
 
 
 def test_mpb_total_time_budget_seconds_bounds(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -346,6 +367,55 @@ async def test_mpb_api_block_without_storage_state_skips_ui(monkeypatch: pytest.
     )
     with pytest.raises(ValuatorRuntimeError, match="UI fallback skipped"):
         await valuator._fetch_offer(product, "Canon EOS R7 Body")
+
+
+@pytest.mark.asyncio
+async def test_mpb_degraded_api_skips_api_stage_with_storage_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    _clear_mpb_temporary_block()
+    _clear_mpb_api_temporary_degraded()
+    monkeypatch.setenv("MPB_API_PURCHASE_PRICE_ENABLED", "true")
+    monkeypatch.setenv("MPB_SKIP_API_WHEN_DEGRADED_WITH_STORAGE_STATE", "true")
+    monkeypatch.setenv("MPB_REQUIRE_STORAGE_STATE", "false")
+    monkeypatch.setattr("tech_sniper_it.valuators.mpb._load_storage_state_b64", lambda: "/tmp/mpb-storage.json")
+    monkeypatch.setattr("tech_sniper_it.valuators.mpb._remove_file_if_exists", lambda *_args, **_kwargs: None)
+    _mark_mpb_api_temporarily_degraded("api-blocked")
+
+    valuator = MPBValuator(headless=True)
+
+    async def _api_called(**_kwargs):  # noqa: ANN003
+        raise RuntimeError("api-called")
+
+    monkeypatch.setattr(valuator, "_fetch_offer_via_purchase_price_api", _api_called)
+
+    class _FakeBrowser:
+        async def new_context(self, **_kwargs):  # noqa: ANN003
+            raise RuntimeError("ui-called")
+
+        async def close(self) -> None:
+            return None
+
+    class _FakeChromium:
+        async def launch(self, **_kwargs):  # noqa: ANN003
+            return _FakeBrowser()
+
+    class _FakePlaywrightContext:
+        async def __aenter__(self):
+            return SimpleNamespace(chromium=_FakeChromium())
+
+        async def __aexit__(self, exc_type, exc, tb) -> bool:  # noqa: ANN001
+            return False
+
+    monkeypatch.setattr("tech_sniper_it.valuators.mpb.async_playwright", lambda: _FakePlaywrightContext())
+
+    product = AmazonProduct(
+        title="Canon EOS R7 Body",
+        price_eur=900.0,
+        category=ProductCategory.PHOTOGRAPHY,
+    )
+    with pytest.raises(RuntimeError, match="ui-called"):
+        await valuator._fetch_offer(product, "Canon EOS R7 Body")
+    _clear_mpb_api_temporary_degraded()
+    _clear_mpb_temporary_block()
 
 
 @pytest.mark.asyncio
