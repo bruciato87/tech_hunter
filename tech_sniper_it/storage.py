@@ -7,7 +7,7 @@ from typing import Any
 
 from supabase import Client, create_client
 
-from tech_sniper_it.models import ArbitrageDecision, to_legacy_storage_category
+from tech_sniper_it.models import ArbitrageDecision, ProductCategory, to_legacy_storage_category
 
 
 class SupabaseStorage:
@@ -79,6 +79,21 @@ class SupabaseStorage:
     async def save_opportunity(self, decision: ArbitrageDecision) -> None:
         if not decision.best_offer or decision.spread_eur is None:
             return
+        offers_payload: list[dict[str, Any]] = []
+        for result in decision.offers:
+            raw_payload = result.raw_payload if isinstance(result.raw_payload, dict) else {}
+            row = dict(raw_payload)
+            row.update(
+                {
+                    "platform": result.platform,
+                    "error": result.error,
+                    "offer_eur": result.offer_eur,
+                    "condition": result.condition,
+                    "currency": result.currency,
+                    "source_url": result.source_url,
+                }
+            )
+            offers_payload.append(row)
         payload: dict[str, Any] = {
             "product_title": decision.product.title,
             "normalized_name": decision.normalized_name,
@@ -88,7 +103,7 @@ class SupabaseStorage:
             "best_offer_eur": decision.best_offer.offer_eur,
             "spread_eur": decision.spread_eur,
             "condition_target": decision.best_offer.condition,
-            "offers_payload": [result.raw_payload | {"platform": result.platform, "error": result.error} for result in decision.offers],
+            "offers_payload": offers_payload,
             "source_url": decision.product.url,
             "ean": decision.product.ean,
         }
@@ -171,5 +186,107 @@ class SupabaseStorage:
             response = query.order("created_at", desc=True).limit(safe_limit).execute()
             data = getattr(response, "data", None)
             return data if isinstance(data, list) else []
+
+        return await asyncio.to_thread(_select)
+
+    async def get_recent_platform_quote_cache(
+        self,
+        *,
+        platform: str,
+        normalized_name: str,
+        category: str | None = None,
+        max_age_hours: int = 24,
+        limit: int = 80,
+    ) -> dict[str, Any] | None:
+        platform_name = (platform or "").strip().lower()
+        name = (normalized_name or "").strip()
+        if not platform_name or not name:
+            return None
+        safe_limit = max(5, min(limit, 200))
+        safe_max_age = max(1, min(max_age_hours, 168))
+        cutoff_iso = (datetime.now(UTC) - timedelta(hours=safe_max_age)).isoformat()
+        category_filter = ""
+        raw_category = (category or "").strip()
+        if raw_category:
+            try:
+                parsed_category = ProductCategory.from_raw(raw_category)
+                legacy = to_legacy_storage_category(parsed_category)
+            except Exception:
+                legacy = ""
+            if legacy in {"photography", "apple_phone", "general_tech"}:
+                category_filter = legacy
+
+        def _as_float(value: Any) -> float | None:
+            try:
+                parsed = float(value)
+            except (TypeError, ValueError):
+                return None
+            if parsed <= 0:
+                return None
+            return round(parsed, 2)
+
+        def _extract_from_payload(row: dict[str, Any], created_at: str) -> dict[str, Any] | None:
+            offers_payload = row.get("offers_payload")
+            if not isinstance(offers_payload, list):
+                return None
+            for item in offers_payload:
+                if not isinstance(item, dict):
+                    continue
+                if str(item.get("platform") or "").strip().lower() != platform_name:
+                    continue
+                if item.get("error"):
+                    continue
+                offer = _as_float(item.get("offer_eur"))
+                if offer is None:
+                    continue
+                source_url = str(item.get("source_url") or "").strip() or None
+                condition = str(item.get("condition") or "grade_a").strip() or "grade_a"
+                currency = str(item.get("currency") or "EUR").strip().upper() or "EUR"
+                return {
+                    "offer_eur": offer,
+                    "platform": platform_name,
+                    "source_url": source_url,
+                    "condition": condition,
+                    "currency": currency,
+                    "created_at": created_at,
+                    "origin": "offers_payload",
+                }
+            return None
+
+        def _select() -> dict[str, Any] | None:
+            query = self.client.table(self.table).select(
+                "created_at,normalized_name,category,best_platform,best_offer_eur,condition_target,offers_payload"
+            )
+            query = query.eq("normalized_name", name).gte("created_at", cutoff_iso)
+            if category_filter:
+                query = query.eq("category", category_filter)
+            response = query.order("created_at", desc=True).limit(safe_limit).execute()
+            data = getattr(response, "data", None)
+            if not isinstance(data, list):
+                return None
+            for row in data:
+                if not isinstance(row, dict):
+                    continue
+                created_at = str(row.get("created_at") or "").strip()
+                payload_hit = _extract_from_payload(row, created_at)
+                if payload_hit is not None:
+                    return payload_hit
+                row_platform = str(row.get("best_platform") or "").strip().lower()
+                if row_platform != platform_name:
+                    continue
+                offer = _as_float(row.get("best_offer_eur"))
+                if offer is None:
+                    continue
+                condition = str(row.get("condition_target") or "grade_a").strip() or "grade_a"
+                return {
+                    "offer_eur": offer,
+                    "platform": platform_name,
+                    "source_url": None,
+                    "condition": condition,
+                    "currency": "EUR",
+                    "created_at": created_at,
+                    "origin": "best_offer",
+                }
+            return None
 
         return await asyncio.to_thread(_select)

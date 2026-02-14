@@ -649,6 +649,36 @@ def _is_live_quote_payload(payload: dict[str, Any] | None) -> bool:
     )
 
 
+def _is_mpb_transient_failure(error: str | None) -> bool:
+    text = (error or "").strip().lower()
+    if not text:
+        return False
+    transient_markers = (
+        "blocked by anti-bot challenge",
+        "anti-bot challenge",
+        "turnstile",
+        "cloudflare",
+        "temporarily paused",
+        "valuation timeout",
+        "search input not found",
+        "price not found",
+        "stagnant-options",
+        "email-gate",
+        "wizard",
+        "network",
+    )
+    return any(marker in text for marker in transient_markers)
+
+
+def _mpb_cache_max_age_hours() -> int:
+    raw = _env_or_default("MPB_CACHE_MAX_AGE_HOURS", "24")
+    try:
+        value = int(raw)
+    except ValueError:
+        value = 24
+    return max(1, min(value, 168))
+
+
 def _is_generic_rebuy_offer_url(url: str | None) -> bool:
     parsed = urlparse(url or "")
     path = (parsed.path or "").strip("/").lower()
@@ -925,6 +955,11 @@ class ArbitrageManager:
         normalized_name, ai_usage = await self._normalize_product_name(product)
         self._log_ai_usage(normalized_name, ai_usage)
         offers = await self._evaluate_offers(product.category, product, normalized_name)
+        offers = await self._apply_mpb_cache_fallback(
+            offers=offers,
+            product=product,
+            normalized_name=normalized_name,
+        )
         decision = self._build_decision(product, normalized_name, offers, ai_usage)
 
         if decision.should_notify:
@@ -1004,6 +1039,11 @@ class ArbitrageManager:
                 else:
                     allowed_valuators = all_valuators
                 offers = await self._evaluate_with_valuators(allowed_valuators, sample, normalized_name)
+                offers = await self._apply_mpb_cache_fallback(
+                    offers=offers,
+                    product=sample,
+                    normalized_name=normalized_name,
+                )
 
             if backoff_enabled:
                 async with backoff_lock:
@@ -1163,6 +1203,117 @@ class ArbitrageManager:
             normalized_name=normalized_name,
         )
         return await self._evaluate_with_valuators(valuators, product, normalized_name)
+
+    async def _load_cached_quote(
+        self,
+        *,
+        platform: str,
+        normalized_name: str,
+        product: AmazonProduct,
+    ) -> dict[str, Any] | None:
+        storage = self.storage
+        if storage is None:
+            return None
+        getter = getattr(storage, "get_recent_platform_quote_cache", None)
+        if not callable(getter):
+            return None
+        try:
+            return await getter(
+                platform=platform,
+                normalized_name=normalized_name,
+                category=product.category.value,
+                max_age_hours=_mpb_cache_max_age_hours(),
+            )
+        except Exception as exc:
+            print(
+                "[scan] Quote cache lookup failed | "
+                f"platform={platform} normalized='{normalized_name}' error={type(exc).__name__}: {exc}"
+            )
+            return None
+
+    async def _apply_mpb_cache_fallback(
+        self,
+        *,
+        offers: list[ValuationResult],
+        product: AmazonProduct,
+        normalized_name: str,
+    ) -> list[ValuationResult]:
+        if not offers:
+            return offers
+        mpb_indexes = [
+            index
+            for index, item in enumerate(offers)
+            if str(getattr(item, "platform", "") or "").strip().lower() == "mpb"
+        ]
+        if not mpb_indexes:
+            return offers
+        primary_index = mpb_indexes[0]
+        primary_offer = offers[primary_index]
+        if primary_offer.is_valid and primary_offer.offer_eur is not None:
+            return offers
+        if not _is_mpb_transient_failure(primary_offer.error):
+            return offers
+        cached = await self._load_cached_quote(
+            platform="mpb",
+            normalized_name=normalized_name,
+            product=product,
+        )
+        if not cached:
+            print(
+                "[scan] MPB cache miss | "
+                f"normalized='{normalized_name}' reason={primary_offer.error or 'n/a'}"
+            )
+            return offers
+        cached_offer = cached.get("offer_eur")
+        try:
+            cached_offer_eur = round(float(cached_offer), 2)
+        except (TypeError, ValueError):
+            return offers
+        if cached_offer_eur <= 0:
+            return offers
+        cached_condition = str(cached.get("condition") or "ottimo").strip() or "ottimo"
+        cached_currency = str(cached.get("currency") or "EUR").strip().upper() or "EUR"
+        cached_source_url = str(cached.get("source_url") or "").strip() or primary_offer.source_url
+        payload = {
+            "price_source": "mpb-cache",
+            "cached_quote": {
+                "platform": "mpb",
+                "offer_eur": cached_offer_eur,
+                "condition": cached_condition,
+                "currency": cached_currency,
+                "source_url": cached_source_url,
+                "cached_at": str(cached.get("created_at") or "").strip() or None,
+                "origin": str(cached.get("origin") or "").strip() or None,
+            },
+            "quote_verification": {
+                "ok": True,
+                "checks": {
+                    "platform": "mpb",
+                    "price_source": "mpb-cache",
+                    "cache_origin": str(cached.get("origin") or "").strip() or None,
+                },
+            },
+            "original_title": product.title,
+            "original_category": product.category.value,
+            "original_price_eur": product.price_eur,
+            "fallback_reason": primary_offer.error,
+        }
+        print(
+            "[scan] MPB cache fallback applied | "
+            f"normalized='{normalized_name}' offer={cached_offer_eur:.2f} origin={cached.get('origin')}"
+        )
+        updated = list(offers)
+        updated[primary_index] = ValuationResult(
+            platform="mpb",
+            normalized_name=normalized_name,
+            offer_eur=cached_offer_eur,
+            condition=cached_condition,
+            currency=cached_currency,
+            source_url=cached_source_url,
+            raw_payload=payload,
+            error=None,
+        )
+        return updated
 
     async def _evaluate_with_valuators(
         self,

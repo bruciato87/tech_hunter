@@ -1337,6 +1337,49 @@ def _ai_model_overview(decisions: list) -> str:  # noqa: ANN001
     return " | ".join(f"{key} x{count}" for key, count in ordered)
 
 
+def _mpb_offer_mode(offer) -> str:  # noqa: ANN001
+    if offer is None:
+        return "unavailable"
+    if getattr(offer, "offer_eur", None) is None or getattr(offer, "error", None):
+        return "unavailable"
+    payload = getattr(offer, "raw_payload", {}) or {}
+    if not isinstance(payload, dict):
+        payload = {}
+    price_source = str(payload.get("price_source", "") or "").strip().lower()
+    if price_source == "mpb-cache" or isinstance(payload.get("cached_quote"), dict):
+        return "cached"
+    if price_source:
+        return "live"
+    source_url = str(getattr(offer, "source_url", "") or "").strip()
+    if source_url:
+        return "live"
+    return "unavailable"
+
+
+def _mpb_mode_stats(decisions: list) -> dict[str, int]:  # noqa: ANN001
+    stats = {"required": 0, "live": 0, "cached": 0, "unavailable": 0}
+    for decision in decisions:
+        product = getattr(decision, "product", None)
+        if not isinstance(product, AmazonProduct):
+            continue
+        normalized_name = str(getattr(decision, "normalized_name", "") or "")
+        required = _required_platforms_for_product(product, normalized_name)
+        if "mpb" not in required:
+            continue
+        stats["required"] += 1
+        mpb_offer = next(
+            (
+                offer
+                for offer in (getattr(decision, "offers", []) or [])
+                if str(getattr(offer, "platform", "") or "").strip().lower() == "mpb"
+            ),
+            None,
+        )
+        mode = _mpb_offer_mode(mpb_offer)
+        stats[mode] = stats.get(mode, 0) + 1
+    return stats
+
+
 def _spread_status_badge(spread_eur: float | None, threshold: float) -> tuple[str, str]:
     if spread_eur is None:
         return "⚪", "Valutazione incompleta"
@@ -2191,6 +2234,7 @@ def _format_scan_summary(decisions: list, threshold: float) -> str:
     ai_live_count = openrouter_count
     ai_models = _ai_model_overview(decisions)
     ui_drift_count, ui_drift_total = _ui_drift_stats(decisions)
+    mpb_stats = _mpb_mode_stats(decisions)
     lines = [
         "🚀 Tech_Sniper_IT | Scan Report",
         "━━━━━━━━━━━━━━━━━━━━",
@@ -2200,6 +2244,11 @@ def _format_scan_summary(decisions: list, threshold: float) -> str:
         f"🎯 Soglia spread netto: {threshold:.2f} EUR",
         f"🧠 AI usata: {ai_live_count}/{len(decisions)} | openrouter={openrouter_count} fallback={heuristic_count}",
         f"🧠 Modelli AI: {ai_models}",
+        (
+            "📸 MPB quote mode: "
+            f"live={mpb_stats['live']} cached={mpb_stats['cached']} "
+            f"unavailable={mpb_stats['unavailable']} (required={mpb_stats['required']})"
+        ),
         f"🧩 UI drift rilevati: {ui_drift_count}/{ui_drift_total}",
         f"🏁 Miglior spread trovato: {_format_signed_eur(best_spread)}",
     ]
@@ -2249,6 +2298,7 @@ def _format_smoke_summary(decisions: list) -> str:
     openrouter_count, heuristic_count = _ai_usage_stats(decisions)
     ai_models = _ai_model_overview(decisions)
     ui_drift_count, ui_drift_total = _ui_drift_stats(decisions)
+    mpb_stats = _mpb_mode_stats(decisions)
 
     lines = [
         "🧪 Tech_Sniper_IT | Smoke Report",
@@ -2258,6 +2308,11 @@ def _format_smoke_summary(decisions: list) -> str:
         f"📦 Prodotti: {len(decisions)}",
         f"🧠 AI: openrouter={openrouter_count} fallback={heuristic_count}",
         f"🧠 Modelli AI: {ai_models}",
+        (
+            "📸 MPB quote mode: "
+            f"live={mpb_stats['live']} cached={mpb_stats['cached']} "
+            f"unavailable={mpb_stats['unavailable']} (required={mpb_stats['required']})"
+        ),
         f"🧩 UI drift: {ui_drift_count}/{ui_drift_total}",
     ]
 

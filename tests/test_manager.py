@@ -105,6 +105,17 @@ class FakeStorage:
         self.saved.append(decision)
 
 
+class FakeCacheStorage(FakeStorage):
+    def __init__(self, cached_quote: dict | None) -> None:
+        super().__init__()
+        self.cached_quote = cached_quote
+        self.cache_calls: list[dict[str, object]] = []
+
+    async def get_recent_platform_quote_cache(self, **kwargs):  # noqa: ANN003
+        self.cache_calls.append(kwargs)
+        return self.cached_quote
+
+
 class FakeNotifier:
     def __init__(self) -> None:
         self.notified = []
@@ -892,3 +903,102 @@ async def test_manager_quote_verification_rejects_watch_generation_mismatch(
     assert decision.offers[0].error is not None
     assert "quote verification failed" in str(decision.offers[0].error)
     assert "source-watch-generation-mismatch" in str(decision.offers[0].error)
+
+
+@pytest.mark.asyncio
+async def test_manager_applies_mpb_cache_fallback_on_transient_failure() -> None:
+    storage = FakeCacheStorage(
+        {
+            "offer_eur": 640.0,
+            "platform": "mpb",
+            "source_url": "https://www.mpb.com/it-it/sell/model/123",
+            "condition": "ottimo",
+            "currency": "EUR",
+            "created_at": "2026-02-14T10:00:00+00:00",
+            "origin": "offers_payload",
+        }
+    )
+    manager = ManagerUnderTest(
+        valuators=[
+            StaticValuator(
+                "mpb",
+                None,
+                error="MPB blocked by anti-bot challenge (turnstile/cloudflare).",
+                raw_payload={"price_source": "api"},
+            ),
+            StaticValuator(
+                "rebuy",
+                590.0,
+                source_url="https://www.rebuy.it/vendere/p/dji-mini-4-pro/12345",
+                raw_payload={
+                    "price_text": "Pagamento Diretto 590,00 €",
+                    "price_source": "ry-inject",
+                    "match_quality": {"ok": True, "reason": "ok", "token_ratio": 0.95},
+                },
+            ),
+        ],
+        ai_balancer=TitleBalancer(gemini_keys=[], openrouter_keys=[]),
+        storage=storage,
+        min_spread_eur=20.0,
+    )
+    product = AmazonProduct(
+        title="DJI Mini 4 Pro",
+        price_eur=500.0,
+        category=ProductCategory.DRONE,
+    )
+
+    decision = await manager.evaluate_product(product)
+
+    assert decision.best_offer is not None
+    assert decision.best_offer.platform == "mpb"
+    assert decision.best_offer.offer_eur == 640.0
+    assert storage.cache_calls
+    mpb_offer = next(offer for offer in decision.offers if offer.platform == "mpb")
+    assert mpb_offer.error is None
+    assert mpb_offer.raw_payload.get("price_source") == "mpb-cache"
+
+
+@pytest.mark.asyncio
+async def test_manager_does_not_apply_mpb_cache_for_non_transient_error() -> None:
+    storage = FakeCacheStorage(
+        {
+            "offer_eur": 640.0,
+            "platform": "mpb",
+            "source_url": "https://www.mpb.com/it-it/sell/model/123",
+            "condition": "ottimo",
+            "currency": "EUR",
+            "created_at": "2026-02-14T10:00:00+00:00",
+            "origin": "offers_payload",
+        }
+    )
+    manager = ManagerUnderTest(
+        valuators=[
+            StaticValuator("mpb", None, error="mpb low-confidence match (token mismatch)."),
+            StaticValuator(
+                "rebuy",
+                580.0,
+                source_url="https://www.rebuy.it/vendere/p/canon-eos-r7/12345",
+                raw_payload={
+                    "price_text": "Pagamento Diretto 580,00 €",
+                    "price_source": "ry-inject",
+                    "match_quality": {"ok": True, "reason": "ok", "token_ratio": 0.95},
+                },
+            ),
+        ],
+        ai_balancer=TitleBalancer(gemini_keys=[], openrouter_keys=[]),
+        storage=storage,
+        min_spread_eur=20.0,
+    )
+    product = AmazonProduct(
+        title="Canon EOS R7",
+        price_eur=500.0,
+        category=ProductCategory.PHOTOGRAPHY,
+    )
+
+    decision = await manager.evaluate_product(product)
+
+    assert decision.best_offer is not None
+    assert decision.best_offer.platform == "rebuy"
+    assert storage.cache_calls == []
+    mpb_offer = next(offer for offer in decision.offers if offer.platform == "mpb")
+    assert mpb_offer.offer_eur is None

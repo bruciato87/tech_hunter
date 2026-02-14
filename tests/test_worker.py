@@ -461,6 +461,7 @@ def test_format_scan_summary_includes_ui_drift_counter() -> None:
 
     summary = _format_scan_summary([DummyDecision()], threshold=40.0)
     assert "🧩 UI drift rilevati: 1/1" in summary
+    assert "📸 MPB quote mode:" in summary
 
 
 def test_format_smoke_summary_includes_ai_and_platform_rows() -> None:
@@ -483,7 +484,69 @@ def test_format_smoke_summary_includes_ai_and_platform_rows() -> None:
     summary = _format_smoke_summary([DummyDecision()])
     assert "🧪 Tech_Sniper_IT | Smoke Report" in summary
     assert "♻️ rebuy: 720.00 EUR" in summary
+    assert "📸 MPB quote mode:" in summary
     assert "trenddevice: n/d" in summary.lower()
+
+
+def test_format_scan_summary_reports_mpb_cached_mode() -> None:
+    product = AmazonProduct(
+        title="Canon EOS R7",
+        price_eur=700.0,
+        category=ProductCategory.PHOTOGRAPHY,
+    )
+    decision = type(
+        "Decision",
+        (),
+        {
+            "normalized_name": "Canon EOS R7",
+            "spread_eur": 50.0,
+            "should_notify": True,
+            "ai_provider": "openrouter",
+            "ai_model": "perplexity/sonar",
+            "ai_mode": "live",
+            "product": product,
+            "best_offer": type(
+                "Offer",
+                (),
+                {
+                    "platform": "mpb",
+                    "offer_eur": 750.0,
+                    "source_url": "https://www.mpb.com/it-it/sell/model/123",
+                },
+            )(),
+            "offers": [
+                type(
+                    "Offer",
+                    (),
+                    {
+                        "platform": "mpb",
+                        "offer_eur": 750.0,
+                        "error": None,
+                        "raw_payload": {
+                            "price_source": "mpb-cache",
+                            "cached_quote": {"offer_eur": 750.0},
+                        },
+                        "source_url": "https://www.mpb.com/it-it/sell/model/123",
+                    },
+                )(),
+                type(
+                    "Offer",
+                    (),
+                    {
+                        "platform": "rebuy",
+                        "offer_eur": 740.0,
+                        "error": None,
+                        "raw_payload": {"price_source": "ry-inject"},
+                        "source_url": "https://www.rebuy.it/vendere/p/canon-eos-r7/12345",
+                    },
+                )(),
+            ],
+        },
+    )()
+
+    summary = _format_scan_summary([decision], threshold=40.0)
+    assert "cached=1" in summary
+    assert "required=1" in summary
 
 
 def test_normalize_http_url_adds_scheme() -> None:

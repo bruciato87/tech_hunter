@@ -15,6 +15,7 @@ class FakeTableQuery:
         self.selected_fields = None
         self.data = [{"normalized_name": "iPhone", "spread_eur": 120, "best_platform": "rebuy"}]
         self.gte_calls: list[tuple[str, str]] = []
+        self.eq_calls: list[tuple[str, str]] = []
 
     def insert(self, payload):  # noqa: ANN001
         self.insert_payload = payload
@@ -34,6 +35,11 @@ class FakeTableQuery:
     def gte(self, *args, **_kwargs):
         if len(args) >= 2 and isinstance(args[0], str):
             self.gte_calls.append((args[0], str(args[1])))
+        return self
+
+    def eq(self, *args, **_kwargs):
+        if len(args) >= 2 and isinstance(args[0], str):
+            self.eq_calls.append((args[0], str(args[1])))
         return self
 
     def lte(self, *_args, **_kwargs):
@@ -87,6 +93,10 @@ async def test_save_opportunity_inserts_expected_payload(monkeypatch: pytest.Mon
     assert payload["normalized_name"] == "iPhone 14 Pro 128GB"
     assert payload["condition_target"] == "come_nuovo"
     assert payload["scanner_user_id"] == "11111111-1111-1111-1111-111111111111"
+    assert isinstance(payload["offers_payload"], list)
+    assert payload["offers_payload"][0]["platform"] == "rebuy"
+    assert payload["offers_payload"][0]["offer_eur"] == 620.0
+    assert payload["offers_payload"][0]["currency"] == "EUR"
 
 
 @pytest.mark.asyncio
@@ -169,3 +179,71 @@ async def test_get_excluded_source_urls_prefers_since_iso(monkeypatch: pytest.Mo
 
     assert "https://www.amazon.it/dp/B0TEST" in rows
     assert ("created_at", "2026-02-12T00:00:00+00:00") in fake_client.table_query.gte_calls
+
+
+@pytest.mark.asyncio
+async def test_get_recent_platform_quote_cache_prefers_offers_payload(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_client = FakeSupabaseClient()
+    monkeypatch.setattr("tech_sniper_it.storage.create_client", lambda _url, _key: fake_client)
+    fake_client.table_query.data = [
+        {
+            "created_at": "2026-02-12T10:00:00+00:00",
+            "normalized_name": "DJI Mini 4 Pro",
+            "category": "general_tech",
+            "best_platform": "rebuy",
+            "best_offer_eur": 780.0,
+            "condition_target": "grade_a",
+            "offers_payload": [
+                {
+                    "platform": "mpb",
+                    "error": None,
+                    "offer_eur": 812.5,
+                    "condition": "ottimo",
+                    "currency": "EUR",
+                    "source_url": "https://www.mpb.com/it-it/sell/dji-mini-4-pro/123",
+                }
+            ],
+        }
+    ]
+
+    storage = SupabaseStorage(url="https://supabase.local", key="service-role-key", table="arbitrage_opportunities")
+    cached = await storage.get_recent_platform_quote_cache(
+        platform="mpb",
+        normalized_name="DJI Mini 4 Pro",
+        category="drone",
+        max_age_hours=24,
+    )
+
+    assert cached is not None
+    assert cached["offer_eur"] == 812.5
+    assert cached["origin"] == "offers_payload"
+    assert ("normalized_name", "DJI Mini 4 Pro") in fake_client.table_query.eq_calls
+
+
+@pytest.mark.asyncio
+async def test_get_recent_platform_quote_cache_falls_back_to_best_offer(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_client = FakeSupabaseClient()
+    monkeypatch.setattr("tech_sniper_it.storage.create_client", lambda _url, _key: fake_client)
+    fake_client.table_query.data = [
+        {
+            "created_at": "2026-02-12T10:00:00+00:00",
+            "normalized_name": "Canon EOS R7",
+            "category": "photography",
+            "best_platform": "mpb",
+            "best_offer_eur": 920.0,
+            "condition_target": "ottimo",
+            "offers_payload": [],
+        }
+    ]
+
+    storage = SupabaseStorage(url="https://supabase.local", key="service-role-key", table="arbitrage_opportunities")
+    cached = await storage.get_recent_platform_quote_cache(
+        platform="mpb",
+        normalized_name="Canon EOS R7",
+        category="photography",
+        max_age_hours=24,
+    )
+
+    assert cached is not None
+    assert cached["offer_eur"] == 920.0
+    assert cached["origin"] == "best_offer"
