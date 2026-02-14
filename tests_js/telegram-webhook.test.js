@@ -56,6 +56,8 @@ test("telegram webhook serves help command directly", async () => {
   assert.equal(res.statusCode, 200);
   assert.equal(calls.length, 1);
   assert.match(calls[0].url, /sendMessage$/);
+  const messagePayload = JSON.parse(calls[0].options.body);
+  assert.match(messagePayload.text, /\/profile/);
 });
 
 test("telegram webhook dispatches /scan to github actions", async () => {
@@ -162,4 +164,99 @@ test("telegram webhook denies unauthorized chat when allowlist is set", async ()
   assert.equal(res.body.denied, true);
   assert.equal(calls.length, 1);
   assert.match(calls[0].url, /sendMessage$/);
+});
+
+test("telegram webhook shows active strategy profile", async () => {
+  resetTelegramEnv();
+  const calls = [];
+  const previousFetch = global.fetch;
+  global.fetch = async (url, options = {}) => {
+    calls.push({ url, options });
+    if (url.includes("/actions/variables/STRATEGY_PROFILE")) {
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({ name: "STRATEGY_PROFILE", value: "aggressive" }),
+      };
+    }
+    return {
+      ok: true,
+      status: 200,
+      text: async () => "",
+    };
+  };
+
+  const req = {
+    method: "POST",
+    headers: { "x-telegram-bot-api-secret-token": "webhook_secret" },
+    body: {
+      message: {
+        chat: { id: 123 },
+        from: { id: 999 },
+        text: "/profile",
+      },
+    },
+  };
+  const res = createRes();
+  await handler(req, res);
+  global.fetch = previousFetch;
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(calls.length, 2);
+  const variableCall = calls.find((item) => item.url.includes("/actions/variables/STRATEGY_PROFILE"));
+  assert.ok(variableCall);
+  assert.equal(variableCall.options.method, "GET");
+  const messageCall = calls.find((item) => /sendMessage$/.test(item.url));
+  assert.ok(messageCall);
+  const payload = JSON.parse(messageCall.options.body);
+  assert.match(payload.text, /aggressive/);
+});
+
+test("telegram webhook updates strategy profile variable", async () => {
+  resetTelegramEnv();
+  const calls = [];
+  const previousFetch = global.fetch;
+  global.fetch = async (url, options = {}) => {
+    calls.push({ url, options });
+    if (url.includes("/actions/variables/STRATEGY_PROFILE")) {
+      return {
+        ok: true,
+        status: 204,
+        text: async () => "",
+      };
+    }
+    return {
+      ok: true,
+      status: 200,
+      text: async () => "",
+    };
+  };
+
+  const req = {
+    method: "POST",
+    headers: { "x-telegram-bot-api-secret-token": "webhook_secret" },
+    body: {
+      message: {
+        chat: { id: 123 },
+        from: { id: 999 },
+        text: "/profile balanced",
+      },
+    },
+  };
+  const res = createRes();
+  await handler(req, res);
+  global.fetch = previousFetch;
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(calls.length, 2);
+  const variableCall = calls.find((item) => item.url.includes("/actions/variables/STRATEGY_PROFILE"));
+  assert.ok(variableCall);
+  assert.equal(variableCall.options.method, "PATCH");
+  const variablePayload = JSON.parse(variableCall.options.body);
+  assert.equal(variablePayload.name, "STRATEGY_PROFILE");
+  assert.equal(variablePayload.value, "balanced");
+  const messageCall = calls.find((item) => /sendMessage$/.test(item.url));
+  assert.ok(messageCall);
+  const payload = JSON.parse(messageCall.options.body);
+  assert.match(payload.text, /balanced/);
 });

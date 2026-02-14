@@ -1,6 +1,8 @@
 const TELEGRAM_API_BASE = "https://api.telegram.org";
 const DEFAULT_DISPATCH_EVENT = "scan";
 const MAX_LAST_LIMIT = 10;
+const STRATEGY_PROFILE_VAR = "STRATEGY_PROFILE";
+const STRATEGY_PROFILES = new Set(["conservative", "balanced", "aggressive"]);
 
 function envOrDefault(name, fallback) {
   const value = process.env[name];
@@ -79,6 +81,83 @@ async function dispatchToGitHub({ githubToken, owner, repo, eventType, payload }
   }
 }
 
+async function githubApiRequest({ githubToken, method, path, body }) {
+  const response = await fetch(`https://api.github.com${path}`, {
+    method,
+    headers: {
+      Authorization: `Bearer ${githubToken}`,
+      Accept: "application/vnd.github+json",
+      "X-GitHub-Api-Version": "2022-11-28",
+      "Content-Type": "application/json",
+    },
+    ...(body ? { body: JSON.stringify(body) } : {}),
+  });
+  const text = await response.text();
+  let json = null;
+  try {
+    json = text ? JSON.parse(text) : null;
+  } catch {
+    json = null;
+  }
+  return {
+    ok: response.ok,
+    status: response.status,
+    text,
+    json,
+  };
+}
+
+async function getGitHubVariable({ githubToken, owner, repo, name }) {
+  const result = await githubApiRequest({
+    githubToken,
+    method: "GET",
+    path: `/repos/${owner}/${repo}/actions/variables/${encodeURIComponent(name)}`,
+  });
+  if (result.status === 404) {
+    return null;
+  }
+  if (!result.ok) {
+    throw new Error(`GitHub variable read failed: ${result.status} ${result.text}`);
+  }
+  return result.json || null;
+}
+
+async function upsertGitHubVariable({ githubToken, owner, repo, name, value }) {
+  const update = await githubApiRequest({
+    githubToken,
+    method: "PATCH",
+    path: `/repos/${owner}/${repo}/actions/variables/${encodeURIComponent(name)}`,
+    body: { name, value },
+  });
+  if (update.ok) {
+    return;
+  }
+  if (update.status !== 404) {
+    throw new Error(`GitHub variable update failed: ${update.status} ${update.text}`);
+  }
+  const create = await githubApiRequest({
+    githubToken,
+    method: "POST",
+    path: `/repos/${owner}/${repo}/actions/variables`,
+    body: { name, value },
+  });
+  if (!create.ok) {
+    throw new Error(`GitHub variable create failed: ${create.status} ${create.text}`);
+  }
+}
+
+function parseProfileArg(rawArg) {
+  const raw = (rawArg || "").trim().toLowerCase();
+  if (!raw || raw === "show" || raw === "get" || raw === "status") {
+    return { mode: "show" };
+  }
+  const token = raw.split(/\s+/)[0];
+  if (!STRATEGY_PROFILES.has(token)) {
+    return { mode: "invalid", value: token };
+  }
+  return { mode: "set", value: token };
+}
+
 function commandHelpText() {
   return [
     "Tech_Sniper_IT comandi:",
@@ -90,6 +169,7 @@ function commandHelpText() {
     "/smoke - Test veloce (pochi prodotti) su GitHub Actions",
     "/status - Stato runtime (via GitHub Actions)",
     "/last [n] - Ultime opportunita da Supabase (via GitHub Actions)",
+    "/profile [show|conservative|balanced|aggressive] - Mostra/imposta strategy profile",
   ].join("\n");
 }
 
@@ -163,6 +243,54 @@ module.exports = async function handler(req, res) {
     }
     if (command === "rules") {
       await sendTelegramMessage(botToken, chatId, rulesText());
+      return res.status(200).json({ ok: true });
+    }
+
+    if (command === "profile") {
+      if (!githubReady) {
+        await sendTelegramMessage(
+          botToken,
+          chatId,
+          "Config mancante su Vercel: GITHUB_TOKEN/GITHUB_OWNER/GITHUB_REPO."
+        );
+        return res.status(200).json({ ok: true });
+      }
+      const parsed = parseProfileArg(args);
+      if (parsed.mode === "invalid") {
+        await sendTelegramMessage(
+          botToken,
+          chatId,
+          "Valore non valido. Usa: /profile conservative | balanced | aggressive"
+        );
+        return res.status(200).json({ ok: true });
+      }
+      if (parsed.mode === "show") {
+        const variable = await getGitHubVariable({
+          githubToken,
+          owner: githubOwner,
+          repo: githubRepo,
+          name: STRATEGY_PROFILE_VAR,
+        });
+        const current = (variable?.value || envOrDefault(STRATEGY_PROFILE_VAR, "balanced")).toLowerCase();
+        await sendTelegramMessage(
+          botToken,
+          chatId,
+          `Profilo strategia attivo: ${current}\nUsa /profile conservative|balanced|aggressive`
+        );
+        return res.status(200).json({ ok: true });
+      }
+      await upsertGitHubVariable({
+        githubToken,
+        owner: githubOwner,
+        repo: githubRepo,
+        name: STRATEGY_PROFILE_VAR,
+        value: parsed.value,
+      });
+      await sendTelegramMessage(
+        botToken,
+        chatId,
+        `Profilo strategia aggiornato a '${parsed.value}'. Sara applicato alle prossime run.`
+      );
       return res.status(200).json({ ok: true });
     }
 

@@ -482,8 +482,10 @@ Heavy operations are delegated to GitHub Actions. Vercel only validates commands
 - `/rules`
 - `/scan [json object or json array]` (delegated to GitHub Actions; payload optional)
   Without payload, worker auto-loads products from Amazon Warehouse IT+EU sources.
+- `/smoke` (delegated to GitHub Actions; fast smoke run)
 - `/status` (delegated to GitHub Actions)
 - `/last [n]` (delegated to GitHub Actions, max 10 rows)
+- `/profile [show|conservative|balanced|aggressive]` (reads/updates `STRATEGY_PROFILE` GitHub variable)
 
 ### Vercel Environment Variables
 
@@ -519,6 +521,7 @@ curl "https://api.telegram.org/bot<TELEGRAM_BOT_TOKEN>/getWebhookInfo"
 2. In Telegram chat with the bot, run:
 - `/id` (collect chat_id and ensure allowlist is correct)
 - `/status` (must enqueue a GitHub Action)
+- `/profile` (shows current strategy profile)
 - `/scan {"title":"Apple iPhone 14 Pro 128GB","price_eur":679,"category":"apple_phone"}`
 
 3. Confirm in GitHub Actions that the workflow `Tech Sniper IT Worker` starts from repository dispatch.

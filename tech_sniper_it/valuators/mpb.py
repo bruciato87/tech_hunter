@@ -947,6 +947,7 @@ class MPBValuator(BaseValuator):
         query_candidates: list[str],
         payload: dict[str, Any],
         user_agent: str,
+        storage_state_path: str | None = None,
     ) -> tuple[float | None, str | None]:
         market = _mpb_api_market()
         model_market = _mpb_api_model_market(market)
@@ -978,11 +979,14 @@ class MPBValuator(BaseValuator):
         async with async_playwright() as playwright:
             browser = await playwright.chromium.launch(headless=self.headless)
             try:
-                context = await browser.new_context(
-                    locale=accept_language.split(",")[0].strip(),
-                    user_agent=user_agent,
-                    extra_http_headers={"Accept-Language": accept_language},
-                )
+                context_kwargs: dict[str, Any] = {
+                    "locale": accept_language.split(",")[0].strip(),
+                    "user_agent": user_agent,
+                    "extra_http_headers": {"Accept-Language": accept_language},
+                }
+                if storage_state_path:
+                    context_kwargs["storage_state"] = storage_state_path
+                context = await browser.new_context(**context_kwargs)
                 await _apply_stealth_context(context)
                 page = await context.new_page()
                 page.set_default_timeout(self.nav_timeout_ms)
@@ -1168,6 +1172,8 @@ class MPBValuator(BaseValuator):
             "off",
         }
         sticky_user_agent = _env_or_default("MPB_USER_AGENT", DEFAULT_USER_AGENTS[1]).strip() or DEFAULT_USER_AGENTS[1]
+        storage_state_path = _load_storage_state_b64()
+        payload["storage_state"] = bool(storage_state_path)
         api_enabled = _mpb_api_purchase_price_enabled()
         payload["api_purchase_price_enabled"] = api_enabled
         if api_enabled:
@@ -1177,33 +1183,40 @@ class MPBValuator(BaseValuator):
                     query_candidates=query_candidates,
                     payload=payload,
                     user_agent=sticky_user_agent,
+                    storage_state_path=storage_state_path,
                 )
             except Exception as exc:
                 payload["api_purchase_price_error"] = str(exc)
                 api_offer, api_source = None, None
             if api_offer is not None:
                 _clear_mpb_temporary_block()
+                _remove_file_if_exists(storage_state_path)
                 return api_offer, api_source, payload
             api_state = payload.get("api_purchase_price") if isinstance(payload.get("api_purchase_price"), dict) else {}
             if bool(api_state.get("blocked")) and _mpb_skip_ui_on_api_block():
                 blockers = [str(item).strip() for item in (api_state.get("blockers") or []) if str(item).strip()]
-                if blockers:
-                    _mark_mpb_temporarily_blocked("api-blocked")
-                raise ValuatorRuntimeError(
-                    "MPB API blocked by anti-bot challenge; UI fallback skipped.",
-                    payload={
-                        "api_purchase_price_enabled": api_enabled,
-                        "api_purchase_price": payload.get("api_purchase_price"),
-                        "api_purchase_price_error": payload.get("api_purchase_price_error"),
-                        "blocker_hits": blockers[:12] if blockers else [],
-                    },
-                    source_url=self.base_url,
-                )
+                if storage_state_path:
+                    payload["api_purchase_price_ui_fallback"] = True
+                    payload["api_purchase_price_ui_fallback_reason"] = "api-blocked-with-storage-state"
+                    print("[mpb] API blocked; continuing with UI fallback using storage_state session.")
+                else:
+                    if blockers:
+                        _mark_mpb_temporarily_blocked("api-blocked")
+                    _remove_file_if_exists(storage_state_path)
+                    raise ValuatorRuntimeError(
+                        "MPB API blocked by anti-bot challenge; UI fallback skipped.",
+                        payload={
+                            "api_purchase_price_enabled": api_enabled,
+                            "api_purchase_price": payload.get("api_purchase_price"),
+                            "api_purchase_price_error": payload.get("api_purchase_price_error"),
+                            "blocker_hits": blockers[:12] if blockers else [],
+                        },
+                        source_url=self.base_url,
+                    )
 
-        storage_state_path = _load_storage_state_b64()
-        payload["storage_state"] = bool(storage_state_path)
         if _mpb_require_storage_state() and storage_state_path is None:
             reason = _MPB_STORAGE_STATE_ERROR or "missing"
+            _remove_file_if_exists(storage_state_path)
             raise ValuatorRuntimeError(
                 f"MPB storage_state missing/invalid ({reason}); set MPB_STORAGE_STATE_B64 or disable MPB_REQUIRE_STORAGE_STATE.",
                 payload={

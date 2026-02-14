@@ -15,4 +15,5 @@ coverage.xml
 .tmp/
 run_logs/
 *storage_state*.json
+*storage_state*.b64
 *.log

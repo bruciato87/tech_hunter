@@ -3,11 +3,13 @@ from __future__ import annotations
 import base64
 import json
 import os
+from types import SimpleNamespace
 
 import pytest
 
 from tech_sniper_it.models import AmazonProduct, ProductCategory
 from tech_sniper_it.valuators.mpb import (
+    MPBValuator,
     _assess_mpb_match,
     _build_query_variants,
     _clear_mpb_temporary_block,
@@ -29,6 +31,7 @@ from tech_sniper_it.valuators.mpb import (
     _rank_mpb_api_models,
     _remove_file_if_exists,
 )
+from tech_sniper_it.valuators.base import ValuatorRuntimeError
 
 
 def test_env_or_default_prefers_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -269,6 +272,80 @@ def test_pick_best_mpb_network_candidate_skips_user_profile_endpoint() -> None:
     value, snippet = _pick_best_mpb_network_candidate(candidates, normalized_name="Canon EOS R7 Body")
     assert value == 500.0
     assert "canon eos r7" in snippet.lower()
+
+
+@pytest.mark.asyncio
+async def test_mpb_api_block_with_storage_state_continues_ui_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MPB_SKIP_UI_ON_API_BLOCK", "true")
+    monkeypatch.setenv("MPB_REQUIRE_STORAGE_STATE", "false")
+    monkeypatch.setattr("tech_sniper_it.valuators.mpb._load_storage_state_b64", lambda: "/tmp/mpb-storage.json")
+
+    valuator = MPBValuator(headless=True)
+
+    async def _fake_api(**kwargs) -> tuple[float | None, str | None]:
+        payload = kwargs["payload"]
+        payload["api_purchase_price"] = {
+            "blocked": True,
+            "blockers": ["cloudflare"],
+        }
+        return None, None
+
+    monkeypatch.setattr(valuator, "_fetch_offer_via_purchase_price_api", _fake_api)
+
+    class _FakeBrowser:
+        async def new_context(self, **kwargs):  # noqa: ANN003
+            raise RuntimeError("ui-called")
+
+        async def close(self) -> None:
+            return None
+
+    class _FakeChromium:
+        async def launch(self, **kwargs):  # noqa: ANN003
+            return _FakeBrowser()
+
+    class _FakePlaywrightContext:
+        async def __aenter__(self):
+            return SimpleNamespace(chromium=_FakeChromium())
+
+        async def __aexit__(self, exc_type, exc, tb) -> bool:  # noqa: ANN001
+            return False
+
+    monkeypatch.setattr("tech_sniper_it.valuators.mpb.async_playwright", lambda: _FakePlaywrightContext())
+
+    product = AmazonProduct(
+        title="Canon EOS R7 Body",
+        price_eur=900.0,
+        category=ProductCategory.PHOTOGRAPHY,
+    )
+    with pytest.raises(RuntimeError, match="ui-called"):
+        await valuator._fetch_offer(product, "Canon EOS R7 Body")
+
+
+@pytest.mark.asyncio
+async def test_mpb_api_block_without_storage_state_skips_ui(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MPB_SKIP_UI_ON_API_BLOCK", "true")
+    monkeypatch.setenv("MPB_REQUIRE_STORAGE_STATE", "false")
+    monkeypatch.setattr("tech_sniper_it.valuators.mpb._load_storage_state_b64", lambda: None)
+
+    valuator = MPBValuator(headless=True)
+
+    async def _fake_api(**kwargs) -> tuple[float | None, str | None]:
+        payload = kwargs["payload"]
+        payload["api_purchase_price"] = {
+            "blocked": True,
+            "blockers": ["cloudflare"],
+        }
+        return None, None
+
+    monkeypatch.setattr(valuator, "_fetch_offer_via_purchase_price_api", _fake_api)
+
+    product = AmazonProduct(
+        title="Canon EOS R7 Body",
+        price_eur=900.0,
+        category=ProductCategory.PHOTOGRAPHY,
+    )
+    with pytest.raises(ValuatorRuntimeError, match="UI fallback skipped"):
+        await valuator._fetch_offer(product, "Canon EOS R7 Body")
 
 
 def test_extract_mpb_api_models_parses_nested_values() -> None:
