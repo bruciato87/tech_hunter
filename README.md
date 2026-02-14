@@ -33,6 +33,18 @@ python -m tech_sniper_it.worker
 
 `bootstrap_local.sh` also installs a Git `pre-push` hook that runs the full test suite and blocks pushes on failures.
 
+## MPB Self-Hosted (Cloud Free)
+
+To improve MPB reliability vs Cloudflare/Turnstile while keeping cloud + free, run worker/smoke on a self-hosted GitHub runner with stable IP.
+
+Workflows now support a single runner switch variable:
+
+- `ACTIONS_RUNS_ON_JSON` (GitHub Repository Variable)
+  - default (current behavior): `["ubuntu-latest"]`
+  - self-hosted example: `["self-hosted","linux","x64","tech-sniper"]`
+
+After this variable is set, `worker.yml` and `smoke.yml` will run on your self-hosted runner labels.
+
 `AMAZON_PRODUCTS_JSON` example:
 
 ```json
@@ -49,6 +61,7 @@ python -m tech_sniper_it.worker
 
 ## Environment Variables
 
+- `ACTIONS_RUNS_ON_JSON` (GitHub Repository Variable used by workflows; default `["ubuntu-latest"]`)
 - `SUPABASE_URL`
 - `SUPABASE_SERVICE_ROLE_KEY`
 - `SUPABASE_TABLE` (default: `arbitrage_opportunities`)
