@@ -1695,7 +1695,10 @@ class MPBValuator(BaseValuator):
         if network_price_candidates:
             payload["network_price_candidates"] = network_price_candidates[-12:]
         if blocker_hits and not had_unblocked_attempt:
-            _mark_mpb_temporarily_blocked("turnstile/cloudflare")
+            # When an authenticated storage_state is available, turnstile can be intermittent.
+            # Avoid global cooldown poisoning the rest of the same scan batch.
+            if not storage_state_path:
+                _mark_mpb_temporarily_blocked("turnstile/cloudflare")
             payload["blocker_hits"] = blocker_hits[:40]
             raise ValuatorRuntimeError(
                 "MPB blocked by anti-bot challenge (turnstile/cloudflare).",

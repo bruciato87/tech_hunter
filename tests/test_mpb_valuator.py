@@ -348,6 +348,95 @@ async def test_mpb_api_block_without_storage_state_skips_ui(monkeypatch: pytest.
         await valuator._fetch_offer(product, "Canon EOS R7 Body")
 
 
+@pytest.mark.asyncio
+async def test_mpb_turnstile_with_storage_state_does_not_trigger_global_cooldown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear_mpb_temporary_block()
+    monkeypatch.setenv("MPB_API_PURCHASE_PRICE_ENABLED", "false")
+    monkeypatch.setenv("MPB_REQUIRE_STORAGE_STATE", "false")
+    monkeypatch.setenv("MPB_MAX_ATTEMPTS", "1")
+    monkeypatch.setattr("tech_sniper_it.valuators.mpb._load_storage_state_b64", lambda: "/tmp/mpb-storage.json")
+    monkeypatch.setattr("tech_sniper_it.valuators.mpb._remove_file_if_exists", lambda *_args, **_kwargs: None)
+
+    mark_calls: list[str] = []
+
+    def _mark(reason: str) -> None:
+        mark_calls.append(reason)
+
+    monkeypatch.setattr("tech_sniper_it.valuators.mpb._mark_mpb_temporarily_blocked", _mark)
+
+    valuator = MPBValuator(headless=True)
+
+    async def _blocked_page(_page):  # noqa: ANN001
+        return ["cloudflare"]
+
+    monkeypatch.setattr(valuator, "_detect_page_blockers", _blocked_page)
+
+    async def _no_cookie(_page):  # noqa: ANN001
+        return None
+
+    monkeypatch.setattr(valuator, "_accept_cookie_if_present", _no_cookie)
+
+    async def _fake_fallback(**kwargs):  # noqa: ANN003
+        return {"offer": None, "url": None, "blockers": ["cloudflare"], "unblocked": False}
+
+    monkeypatch.setattr(valuator, "_direct_search_fallback", _fake_fallback)
+
+    class _FakePage:
+        url = "https://www.mpb.com/it-it/sell"
+
+        def set_default_timeout(self, _timeout_ms: int) -> None:
+            return None
+
+        async def goto(self, *_args, **_kwargs) -> None:  # noqa: ANN003
+            return None
+
+        def on(self, *_args, **_kwargs) -> None:  # noqa: ANN003
+            return None
+
+        def off(self, *_args, **_kwargs) -> None:  # noqa: ANN003
+            return None
+
+    class _FakeContext:
+        async def new_page(self) -> _FakePage:
+            return _FakePage()
+
+        async def close(self) -> None:
+            return None
+
+    class _FakeBrowser:
+        async def new_context(self, **_kwargs) -> _FakeContext:  # noqa: ANN003
+            return _FakeContext()
+
+        async def close(self) -> None:
+            return None
+
+    class _FakeChromium:
+        async def launch(self, **_kwargs) -> _FakeBrowser:  # noqa: ANN003
+            return _FakeBrowser()
+
+    class _FakePlaywrightContext:
+        async def __aenter__(self):
+            return SimpleNamespace(chromium=_FakeChromium())
+
+        async def __aexit__(self, exc_type, exc, tb) -> bool:  # noqa: ANN001
+            return False
+
+    monkeypatch.setattr("tech_sniper_it.valuators.mpb.async_playwright", lambda: _FakePlaywrightContext())
+
+    product = AmazonProduct(
+        title="Canon EOS R7 Body",
+        price_eur=900.0,
+        category=ProductCategory.PHOTOGRAPHY,
+    )
+    with pytest.raises(ValuatorRuntimeError, match="turnstile/cloudflare"):
+        await valuator._fetch_offer(product, "Canon EOS R7 Body")
+
+    assert mark_calls == []
+    _clear_mpb_temporary_block()
+
+
 def test_extract_mpb_api_models_parses_nested_values() -> None:
     payload = {
         "results": [
