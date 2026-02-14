@@ -27,9 +27,12 @@ from tech_sniper_it.valuators.mpb import (
     _mpb_api_market,
     _mpb_api_degraded_remaining_seconds,
     _mpb_block_remaining_seconds,
+    _mpb_challenge_warmup_enabled,
     _mpb_skip_api_when_degraded_with_storage_state,
+    _mpb_max_attempts_with_storage_state,
     _mpb_require_storage_state,
     _mpb_skip_ui_on_api_block,
+    _mpb_storage_state_time_budget_seconds,
     _mpb_total_time_budget_seconds,
     _pick_best_mpb_network_candidate,
     _rank_mpb_api_models,
@@ -148,6 +151,13 @@ def test_mpb_skip_api_when_degraded_with_storage_state_defaults_true(monkeypatch
     assert _mpb_skip_api_when_degraded_with_storage_state() is False
 
 
+def test_mpb_challenge_warmup_enabled_defaults_true(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("MPB_CHALLENGE_WARMUP_ENABLED", raising=False)
+    assert _mpb_challenge_warmup_enabled() is True
+    monkeypatch.setenv("MPB_CHALLENGE_WARMUP_ENABLED", "false")
+    assert _mpb_challenge_warmup_enabled() is False
+
+
 def test_mpb_api_degraded_mark_and_clear(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MPB_API_BLOCK_COOLDOWN_SECONDS", "120")
     _clear_mpb_api_temporary_degraded()
@@ -165,6 +175,24 @@ def test_mpb_total_time_budget_seconds_bounds(monkeypatch: pytest.MonkeyPatch) -
     assert _mpb_total_time_budget_seconds() == 25.0
     monkeypatch.setenv("MPB_TOTAL_TIME_BUDGET_SECONDS", "999")
     assert _mpb_total_time_budget_seconds() == 90.0
+
+
+def test_mpb_storage_state_time_budget_seconds_bounds(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MPB_STORAGE_STATE_TIME_BUDGET_SECONDS", "2")
+    assert _mpb_storage_state_time_budget_seconds() == 8.0
+    monkeypatch.setenv("MPB_STORAGE_STATE_TIME_BUDGET_SECONDS", "20")
+    assert _mpb_storage_state_time_budget_seconds() == 20.0
+    monkeypatch.setenv("MPB_STORAGE_STATE_TIME_BUDGET_SECONDS", "100")
+    assert _mpb_storage_state_time_budget_seconds() == 45.0
+
+
+def test_mpb_max_attempts_with_storage_state_bounds(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MPB_MAX_ATTEMPTS_WITH_STORAGE_STATE", "0")
+    assert _mpb_max_attempts_with_storage_state() == 1
+    monkeypatch.setenv("MPB_MAX_ATTEMPTS_WITH_STORAGE_STATE", "3")
+    assert _mpb_max_attempts_with_storage_state() == 3
+    monkeypatch.setenv("MPB_MAX_ATTEMPTS_WITH_STORAGE_STATE", "9")
+    assert _mpb_max_attempts_with_storage_state() == 4
 
 
 def test_mpb_api_market_fallbacks_to_it(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -505,6 +533,48 @@ async def test_mpb_turnstile_with_storage_state_does_not_trigger_global_cooldown
 
     assert mark_calls == []
     _clear_mpb_temporary_block()
+
+
+@pytest.mark.asyncio
+async def test_mpb_warmup_challenge_clearance_can_recover(monkeypatch: pytest.MonkeyPatch) -> None:
+    valuator = MPBValuator(headless=True)
+    monkeypatch.setenv("MPB_CHALLENGE_WARMUP_ENABLED", "true")
+    monkeypatch.setenv("MPB_CHALLENGE_WARMUP_ATTEMPTS", "2")
+    monkeypatch.setenv("MPB_CHALLENGE_WARMUP_WAIT_MS", "800")
+
+    states: list[list[str]] = [["cloudflare"], []]
+
+    async def _detect(_page):  # noqa: ANN001
+        if states:
+            return states.pop(0)
+        return []
+
+    async def _click(_page):  # noqa: ANN001
+        return True
+
+    monkeypatch.setattr(valuator, "_detect_page_blockers", _detect)
+    monkeypatch.setattr(valuator, "_click_turnstile_checkbox_if_present", _click)
+
+    class _FakePage:
+        async def wait_for_timeout(self, _ms: int) -> None:
+            return None
+
+        async def reload(self, **_kwargs) -> None:  # noqa: ANN003
+            return None
+
+    payload: dict[str, object] = {"adaptive_fallbacks": {}}
+    blockers = await valuator._warmup_challenge_clearance(
+        page=_FakePage(),
+        blockers=["cloudflare"],
+        payload=payload,
+        stage="base_load",
+        storage_state_used=True,
+    )
+
+    assert blockers == []
+    warmup = payload["adaptive_fallbacks"]["challenge_warmup_base_load"]  # type: ignore[index]
+    assert isinstance(warmup, dict)
+    assert warmup.get("recovered") is True
 
 
 def test_extract_mpb_api_models_parses_nested_values() -> None:

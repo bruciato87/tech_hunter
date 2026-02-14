@@ -334,6 +334,51 @@ def _mpb_start_from_direct_search_with_storage_state() -> bool:
     }
 
 
+def _mpb_challenge_warmup_enabled() -> bool:
+    return _env_or_default("MPB_CHALLENGE_WARMUP_ENABLED", "true").lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+
+
+def _mpb_challenge_warmup_attempts() -> int:
+    raw = (os.getenv("MPB_CHALLENGE_WARMUP_ATTEMPTS") or "").strip()
+    try:
+        value = int(raw) if raw else 3
+    except ValueError:
+        value = 3
+    return max(1, min(value, 6))
+
+
+def _mpb_challenge_warmup_wait_ms() -> int:
+    raw = (os.getenv("MPB_CHALLENGE_WARMUP_WAIT_MS") or "").strip()
+    try:
+        value = int(raw) if raw else 2600
+    except ValueError:
+        value = 2600
+    return max(600, min(value, 12_000))
+
+
+def _mpb_challenge_warmup_reload_enabled() -> bool:
+    return _env_or_default("MPB_CHALLENGE_WARMUP_RELOAD", "true").lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+
+
+def _mpb_max_attempts_with_storage_state() -> int:
+    raw = (os.getenv("MPB_MAX_ATTEMPTS_WITH_STORAGE_STATE") or "").strip()
+    try:
+        value = int(raw) if raw else 2
+    except ValueError:
+        value = 2
+    return max(1, min(value, 4))
+
+
 def _load_storage_state_b64() -> str | None:
     global _MPB_STORAGE_STATE_ERROR
     _MPB_STORAGE_STATE_ERROR = ""
@@ -388,6 +433,15 @@ def _mpb_total_time_budget_seconds() -> float:
     except ValueError:
         value = 20.0
     return max(8.0, min(value, 90.0))
+
+
+def _mpb_storage_state_time_budget_seconds() -> float:
+    raw = (os.getenv("MPB_STORAGE_STATE_TIME_BUDGET_SECONDS") or "").strip()
+    try:
+        value = float(raw) if raw else 18.0
+    except ValueError:
+        value = 18.0
+    return max(8.0, min(value, 45.0))
 
 
 def _remove_file_if_exists(path: str | None) -> None:
@@ -1083,6 +1137,13 @@ class MPBValuator(BaseValuator):
                 await page.goto(bootstrap_url, wait_until="domcontentloaded")
                 await self._accept_cookie_if_present(page)
                 page_blockers = await self._detect_page_blockers(page)
+                page_blockers = await self._warmup_challenge_clearance(
+                    page=page,
+                    blockers=page_blockers,
+                    payload=payload,
+                    stage="api_bootstrap",
+                    storage_state_used=bool(storage_state_path),
+                )
                 if page_blockers:
                     api_payload["blockers"] = page_blockers
                     api_payload["blocked"] = True
@@ -1261,6 +1322,8 @@ class MPBValuator(BaseValuator):
         sticky_user_agent = _env_or_default("MPB_USER_AGENT", DEFAULT_USER_AGENTS[1]).strip() or DEFAULT_USER_AGENTS[1]
         storage_state_path = _load_storage_state_b64()
         payload["storage_state"] = bool(storage_state_path)
+        if storage_state_path:
+            max_attempts = min(max_attempts, _mpb_max_attempts_with_storage_state())
         api_enabled = _mpb_api_purchase_price_enabled()
         api_degraded_remaining = _mpb_api_degraded_remaining_seconds()
         if (
@@ -1338,6 +1401,8 @@ class MPBValuator(BaseValuator):
             "sticky_with_storage_state": bool(storage_state_path),
         }
         total_budget_seconds = _mpb_total_time_budget_seconds()
+        if storage_state_path:
+            total_budget_seconds = min(total_budget_seconds, _mpb_storage_state_time_budget_seconds())
         if payload.get("api_purchase_price_skipped"):
             # When API is degraded, keep UI probing short to avoid 25s+ stalls on blocked pages.
             total_budget_seconds = min(total_budget_seconds, 14.0)
@@ -1851,6 +1916,105 @@ class MPBValuator(BaseValuator):
             html = ""
         return _detect_blockers(title, html)
 
+    async def _click_turnstile_checkbox_if_present(self, page: Page) -> bool:
+        direct_selectors = (
+            "label.ctp-checkbox-label",
+            "button:has-text('Verifica')",
+            "button:has-text('Verify')",
+            "input[type='checkbox']",
+        )
+        for selector in direct_selectors:
+            try:
+                locator = page.locator(selector).first
+                if await locator.count() and await locator.is_visible(timeout=500):
+                    await locator.click(timeout=900, force=True)
+                    return True
+            except Exception:
+                continue
+
+        try:
+            iframe_locator = page.locator("iframe")
+            iframe_count = min(await iframe_locator.count(), 8)
+        except Exception:
+            iframe_count = 0
+        for index in range(iframe_count):
+            frame_node = iframe_locator.nth(index)
+            try:
+                src = (await frame_node.get_attribute("src") or "").lower()
+                title = (await frame_node.get_attribute("title") or "").lower()
+            except Exception:
+                continue
+            meta = f"{src} {title}".strip()
+            if not any(token in meta for token in ("turnstile", "challenge", "cloudflare")):
+                continue
+            try:
+                bbox = await frame_node.bounding_box()
+            except Exception:
+                bbox = None
+            if not bbox:
+                continue
+            try:
+                await page.mouse.click(
+                    float(bbox["x"]) + (float(bbox["width"]) / 2.0),
+                    float(bbox["y"]) + (float(bbox["height"]) / 2.0),
+                )
+                return True
+            except Exception:
+                continue
+        return False
+
+    async def _warmup_challenge_clearance(
+        self,
+        *,
+        page: Page,
+        blockers: list[str],
+        payload: dict[str, Any],
+        stage: str,
+        storage_state_used: bool,
+    ) -> list[str]:
+        if not blockers or not storage_state_used or not _mpb_challenge_warmup_enabled():
+            return blockers
+
+        attempts = _mpb_challenge_warmup_attempts()
+        wait_ms = _mpb_challenge_warmup_wait_ms()
+        allow_reload = _mpb_challenge_warmup_reload_enabled()
+        history: list[dict[str, Any]] = []
+        current = blockers
+
+        for step in range(1, attempts + 1):
+            clicked_checkbox = await self._click_turnstile_checkbox_if_present(page)
+            try:
+                await page.wait_for_timeout(wait_ms)
+            except Exception:
+                break
+            try:
+                current = await self._detect_page_blockers(page)
+            except Exception:
+                break
+            history.append({"step": step, "clicked": clicked_checkbox, "blockers": current[:8]})
+            if not current:
+                print(f"[mpb] Challenge warmup recovered | stage={stage} step={step}")
+                payload.setdefault("adaptive_fallbacks", {})[f"challenge_warmup_{stage}"] = {
+                    "enabled": True,
+                    "recovered": True,
+                    "attempts": step,
+                    "history": history,
+                }
+                return []
+            if allow_reload and step < attempts:
+                try:
+                    await page.reload(wait_until="domcontentloaded")
+                except Exception:
+                    continue
+
+        payload.setdefault("adaptive_fallbacks", {})[f"challenge_warmup_{stage}"] = {
+            "enabled": True,
+            "recovered": False,
+            "attempts": attempts,
+            "history": history,
+        }
+        return current or blockers
+
     async def _attempt_blocker_recovery(
         self,
         *,
@@ -1900,7 +2064,13 @@ class MPBValuator(BaseValuator):
             "attempts": attempts,
             "history": history,
         }
-        return current or blockers
+        return await self._warmup_challenge_clearance(
+            page=page,
+            blockers=(current or blockers),
+            payload=payload,
+            stage=stage,
+            storage_state_used=storage_state_used,
+        )
 
     async def _direct_search_fallback(
         self,
