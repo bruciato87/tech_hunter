@@ -747,15 +747,25 @@ def _verify_real_resale_quote(result: ValuationResult) -> ValuationResult:
         reasons.append("offer-out-of-range")
 
     match_quality = payload.get("match_quality")
+    price_source = str(payload.get("price_source") or "").strip().lower()
+    api_purchase_result = payload.get("api_purchase_price_result")
     if isinstance(match_quality, dict):
         checks["match_ok"] = bool(match_quality.get("ok"))
         checks["match_reason"] = match_quality.get("reason")
         if not checks["match_ok"]:
-            reasons.append("match-quality")
+            mpb_api_override = (
+                platform == "mpb"
+                and price_source == "api_purchase_price"
+                and isinstance(api_purchase_result, dict)
+                and bool(str(api_purchase_result.get("model_id") or "").strip())
+            )
+            checks["match_quality_overridden"] = mpb_api_override
+            if not mpb_api_override:
+                reasons.append("match-quality")
 
     price_text = str(payload.get("price_text") or "").strip()
     checks["price_text_present"] = bool(price_text)
-    checks["price_source"] = str(payload.get("price_source") or "").strip() or None
+    checks["price_source"] = price_source or None
 
     if platform == "rebuy":
         checks["generic_url"] = _is_generic_rebuy_offer_url(source_url)

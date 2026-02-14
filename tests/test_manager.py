@@ -638,6 +638,38 @@ async def test_manager_quote_verification_accepts_mpb_api_generic_url_with_model
 
 
 @pytest.mark.asyncio
+async def test_manager_quote_verification_accepts_mpb_api_when_match_quality_is_false() -> None:
+    manager = ManagerUnderTest(
+        valuators=[
+            StaticValuator(
+                "mpb",
+                685.0,
+                source_url="https://www.mpb.com/it-it/sell/product/canon-eos-r7/77097",
+                raw_payload={
+                    "price_text": "purchase_value=685.00 EUR condition=excellent",
+                    "price_source": "api_purchase_price",
+                    "match_quality": {"ok": False, "reason": "score-too-low", "token_ratio": 0.5},
+                    "api_purchase_price_result": {
+                        "model_id": "77097",
+                        "model_name": "Canon EOS R7 Body",
+                    },
+                },
+            )
+        ],
+        ai_balancer=FakeBalancer(gemini_keys=[], openrouter_keys=[]),
+        min_spread_eur=40.0,
+    )
+    product = AmazonProduct(title="Canon EOS R7 Body", price_eur=200.0, category=ProductCategory.PHOTOGRAPHY)
+
+    decision = await manager.evaluate_product(product)
+
+    assert decision.best_offer is not None
+    assert decision.best_offer.platform == "mpb"
+    assert decision.best_offer.offer_eur == 685.0
+    assert decision.should_notify is True
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("platform", ["rebuy", "trenddevice"])
 async def test_manager_query_variant_retry_recovers_rebuy_and_trenddevice(platform: str) -> None:
     valuator = QueryRetryValuator(platform)
