@@ -379,6 +379,15 @@ def _mpb_api_continue_on_bootstrap_blockers() -> bool:
     }
 
 
+def _mpb_api_request_timeout_ms() -> int:
+    raw = (os.getenv("MPB_API_REQUEST_TIMEOUT_MS") or "").strip()
+    try:
+        value = int(raw) if raw else 3500
+    except ValueError:
+        value = 3500
+    return max(1200, min(value, 10_000))
+
+
 def _mpb_max_attempts_with_storage_state() -> int:
     raw = (os.getenv("MPB_MAX_ATTEMPTS_WITH_STORAGE_STATE") or "").strip()
     try:
@@ -1004,7 +1013,7 @@ class MPBValuator(BaseValuator):
         url: str,
         headers: dict[str, str],
     ) -> dict[str, Any]:
-        timeout_ms = max(2_500, min(int(self.nav_timeout_ms), 15_000))
+        timeout_ms = _mpb_api_request_timeout_ms()
         result: dict[str, Any] | None = None
         try:
             response = await page.context.request.get(
@@ -1036,41 +1045,57 @@ class MPBValuator(BaseValuator):
 
         fallback_needed = int(result.get("status", 0) or 0) in {0, 401, 403, 429}
         if fallback_needed:
-            fallback = await page.evaluate(
-                """
-                async ({url, headers}) => {
-                  try {
-                    const response = await fetch(url, {
-                      method: "GET",
-                      credentials: "include",
-                      headers: headers || {},
-                    });
-                    const text = await response.text();
-                    let parsed = null;
-                    try {
-                      parsed = JSON.parse(text);
-                    } catch (_error) {
-                      parsed = null;
-                    }
-                    return {
-                      ok: response.ok,
-                      status: response.status,
-                      text: (text || "").slice(0, 1800),
-                      json: parsed,
-                      transport: "page-fetch",
-                    };
-                  } catch (error) {
-                    return {
-                      ok: false,
-                      status: 0,
-                      error: String(error),
-                      transport: "page-fetch",
-                    };
-                  }
+            try:
+                fallback = await asyncio.wait_for(
+                    page.evaluate(
+                        """
+                        async ({url, headers, timeoutMs}) => {
+                          const controller = new AbortController();
+                          const timer = setTimeout(() => controller.abort(), timeoutMs);
+                          try {
+                            const response = await fetch(url, {
+                              method: "GET",
+                              credentials: "include",
+                              headers: headers || {},
+                              signal: controller.signal,
+                            });
+                            const text = await response.text();
+                            let parsed = null;
+                            try {
+                              parsed = JSON.parse(text);
+                            } catch (_error) {
+                              parsed = null;
+                            }
+                            return {
+                              ok: response.ok,
+                              status: response.status,
+                              text: (text || "").slice(0, 1800),
+                              json: parsed,
+                              transport: "page-fetch",
+                            };
+                          } catch (error) {
+                            return {
+                              ok: false,
+                              status: 0,
+                              error: String(error),
+                              transport: "page-fetch",
+                            };
+                          } finally {
+                            clearTimeout(timer);
+                          }
+                        }
+                        """,
+                        {"url": url, "headers": headers, "timeoutMs": timeout_ms},
+                    ),
+                    timeout=(timeout_ms / 1000.0) + 0.6,
+                )
+            except Exception as exc:
+                fallback = {
+                    "ok": False,
+                    "status": 0,
+                    "error": f"page-fetch-timeout:{str(exc)[:120]}",
+                    "transport": "page-fetch",
                 }
-                """,
-                {"url": url, "headers": headers},
-            )
             if isinstance(fallback, dict):
                 fallback_status = int(fallback.get("status", 0) or 0)
                 current_status = int(result.get("status", 0) or 0)

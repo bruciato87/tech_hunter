@@ -29,6 +29,7 @@ from tech_sniper_it.valuators.mpb import (
     _mpb_api_degraded_remaining_seconds,
     _mpb_block_remaining_seconds,
     _mpb_api_continue_on_bootstrap_blockers,
+    _mpb_api_request_timeout_ms,
     _mpb_challenge_warmup_enabled,
     _mpb_skip_api_when_degraded_with_storage_state,
     _mpb_max_attempts_with_storage_state,
@@ -165,6 +166,15 @@ def test_mpb_api_continue_on_bootstrap_blockers_defaults_true(monkeypatch: pytes
     assert _mpb_api_continue_on_bootstrap_blockers() is True
     monkeypatch.setenv("MPB_API_CONTINUE_ON_BOOTSTRAP_BLOCKERS", "false")
     assert _mpb_api_continue_on_bootstrap_blockers() is False
+
+
+def test_mpb_api_request_timeout_ms_bounds(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MPB_API_REQUEST_TIMEOUT_MS", "500")
+    assert _mpb_api_request_timeout_ms() == 1200
+    monkeypatch.setenv("MPB_API_REQUEST_TIMEOUT_MS", "4200")
+    assert _mpb_api_request_timeout_ms() == 4200
+    monkeypatch.setenv("MPB_API_REQUEST_TIMEOUT_MS", "50000")
+    assert _mpb_api_request_timeout_ms() == 10000
 
 
 def test_mpb_api_degraded_mark_and_clear(monkeypatch: pytest.MonkeyPatch) -> None:
