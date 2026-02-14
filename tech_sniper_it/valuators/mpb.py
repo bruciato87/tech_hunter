@@ -346,19 +346,19 @@ def _mpb_challenge_warmup_enabled() -> bool:
 def _mpb_challenge_warmup_attempts() -> int:
     raw = (os.getenv("MPB_CHALLENGE_WARMUP_ATTEMPTS") or "").strip()
     try:
-        value = int(raw) if raw else 2
+        value = int(raw) if raw else 1
     except ValueError:
-        value = 2
+        value = 1
     return max(1, min(value, 6))
 
 
 def _mpb_challenge_warmup_wait_ms() -> int:
     raw = (os.getenv("MPB_CHALLENGE_WARMUP_WAIT_MS") or "").strip()
     try:
-        value = int(raw) if raw else 1400
+        value = int(raw) if raw else 900
     except ValueError:
-        value = 1400
-    return max(600, min(value, 12_000))
+        value = 900
+    return max(400, min(value, 12_000))
 
 
 def _mpb_challenge_warmup_reload_enabled() -> bool:
@@ -1006,6 +1006,30 @@ class MPBValuator(BaseValuator):
     condition_label = "ottimo"
     base_url = "https://www.mpb.com/it-it/sell"
 
+    def _phase_remaining_budget_ms(
+        self,
+        payload: dict[str, Any],
+        default_ms: int,
+        *,
+        min_ms: int = 0,
+    ) -> int:
+        try:
+            deadline = float(payload.get("_phase_deadline_monotonic"))
+        except (TypeError, ValueError):
+            deadline = 0.0
+        if deadline <= 0:
+            bounded = int(default_ms)
+        else:
+            remaining = int((deadline - time.monotonic()) * 1000)
+            if remaining <= 0:
+                return 0
+            bounded = min(int(default_ms), remaining)
+            if min_ms > 0:
+                return min(remaining, max(int(min_ms), bounded))
+        if min_ms > 0:
+            return max(int(min_ms), bounded)
+        return max(0, bounded)
+
     async def _api_fetch_json(
         self,
         page: Page,
@@ -1188,6 +1212,8 @@ class MPBValuator(BaseValuator):
         if storage_state_path:
             api_budget_seconds = min(api_budget_seconds, _mpb_api_time_budget_with_storage_state_seconds())
         deadline = time.monotonic() + api_budget_seconds
+        previous_phase_deadline = payload.get("_phase_deadline_monotonic")
+        payload["_phase_deadline_monotonic"] = deadline
 
         api_payload: dict[str, Any] = {
             "market": market,
@@ -1403,7 +1429,14 @@ class MPBValuator(BaseValuator):
                     if blocked_hard and _mpb_skip_ui_on_api_block():
                         break
             finally:
-                await browser.close()
+                try:
+                    await asyncio.shield(browser.close())
+                except Exception:
+                    pass
+                if previous_phase_deadline is None:
+                    payload.pop("_phase_deadline_monotonic", None)
+                else:
+                    payload["_phase_deadline_monotonic"] = previous_phase_deadline
         if api_blockers:
             api_payload["blockers"] = sorted(set(api_blockers))[:20]
         return None, None
@@ -1525,6 +1558,7 @@ class MPBValuator(BaseValuator):
             total_budget_seconds = min(total_budget_seconds, 14.0)
         deadline = time.monotonic() + total_budget_seconds
         payload["valuation_time_budget_s"] = total_budget_seconds
+        payload["_phase_deadline_monotonic"] = deadline
 
         def _remaining_budget_ms(default_ms: int, *, min_ms: int = 0) -> int:
             remaining = int((deadline - time.monotonic()) * 1000)
@@ -2115,9 +2149,12 @@ class MPBValuator(BaseValuator):
         )
 
         for step in range(1, attempts + 1):
+            wait_budget_ms = self._phase_remaining_budget_ms(payload, wait_ms)
+            if wait_budget_ms <= 0:
+                break
             clicked_checkbox = await self._click_turnstile_checkbox_if_present(page)
             try:
-                await page.wait_for_timeout(wait_ms)
+                await page.wait_for_timeout(wait_budget_ms)
             except Exception:
                 break
             try:
@@ -2135,6 +2172,8 @@ class MPBValuator(BaseValuator):
                 }
                 return []
             if allow_reload and step < attempts:
+                if self._phase_remaining_budget_ms(payload, 700) <= 0:
+                    break
                 try:
                     await page.reload(wait_until="domcontentloaded")
                 except Exception:
@@ -2168,8 +2207,11 @@ class MPBValuator(BaseValuator):
         current = blockers
 
         for index in range(1, attempts + 1):
+            wait_budget_ms = self._phase_remaining_budget_ms(payload, wait_ms)
+            if wait_budget_ms <= 0:
+                break
             try:
-                await page.wait_for_timeout(wait_ms)
+                await page.wait_for_timeout(wait_budget_ms)
             except Exception:
                 break
             try:
@@ -2187,6 +2229,8 @@ class MPBValuator(BaseValuator):
                 }
                 return []
             if allow_reload and index < attempts:
+                if self._phase_remaining_budget_ms(payload, 700) <= 0:
+                    break
                 try:
                     await page.reload(wait_until="domcontentloaded")
                 except Exception:
