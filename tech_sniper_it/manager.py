@@ -62,6 +62,11 @@ _STRATEGY_PROFILES: dict[str, dict[str, Any]] = {
 }
 
 _CAPACITY_TOKEN_PATTERN = re.compile(r"\b\d{1,4}\s*(?:gb|tb)\b", re.IGNORECASE)
+_DISPLAY_SIZE_INCH_PATTERN = re.compile(r"\b(\d{1,2}(?:[.,]\d)?)\s*(?:\"|''|inches?|inch|pollici|″)\b", re.IGNORECASE)
+_IPAD_DISPLAY_SIZE_PATTERN = re.compile(
+    r"\bipad(?:[\s\-]+(?:pro|air|mini))?(?:[\s\-]+\d{1,2})?[\s\-]+(\d{1,2}(?:[.,]\d)?)\b",
+    re.IGNORECASE,
+)
 _NORMALIZATION_COLOR_PATTERN = re.compile(
     r"\b(nero|black|bianco|white|argento|silver|grafite|space gray|grigio|blu|azzurro|rosso|verde|viola|oro|gold)\b",
     re.IGNORECASE,
@@ -292,9 +297,62 @@ def _capacity_tokens(value: str | None) -> set[str]:
     return tokens
 
 
+def _normalize_display_size_token(raw: str | None) -> str | None:
+    if not raw:
+        return None
+    value = raw.strip().replace(",", ".")
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    if parsed < 7.0 or parsed > 19.0:
+        return None
+    if abs(parsed - round(parsed)) < 0.01:
+        return str(int(round(parsed)))
+    return f"{parsed:.1f}".rstrip("0").rstrip(".")
+
+
+def _display_size_tokens(value: str | None) -> set[str]:
+    text = _compact_text(value).lower()
+    if not text:
+        return set()
+    tokens: set[str] = set()
+    for match in _DISPLAY_SIZE_INCH_PATTERN.finditer(text):
+        token = _normalize_display_size_token(match.group(1))
+        if token:
+            tokens.add(token)
+    # Rebuy product URLs often encode iPad size without inch mark, e.g. "ipad-pro-13-512gb".
+    for match in _IPAD_DISPLAY_SIZE_PATTERN.finditer(text):
+        token = _normalize_display_size_token(match.group(1))
+        if token:
+            tokens.add(token)
+    return tokens
+
+
 def _build_rebuy_candidate_context(*, payload: dict[str, Any], source_url: str) -> str:
     parts: list[str] = [source_url]
     for key in ("resolved_source_url", "price_text", "query"):
+        value = str(payload.get(key) or "").strip()
+        if value:
+            parts.append(value)
+    for key in ("result_pick", "deep_link_pick"):
+        row = payload.get(key)
+        if not isinstance(row, dict):
+            continue
+        for field in ("text", "href", "url"):
+            value = str(row.get(field) or "").strip()
+            if value:
+                parts.append(value)
+    return " ".join(parts)
+
+
+def _build_rebuy_variant_context(*, payload: dict[str, Any], source_url: str) -> str:
+    """Build a candidate-only context for strict variant checks.
+
+    Excludes query text to avoid contaminating candidate tokens with source model info.
+    """
+    parts: list[str] = [source_url]
+    for key in ("resolved_source_url", "source_url", "result_title", "selected_title"):
         value = str(payload.get(key) or "").strip()
         if value:
             parts.append(value)
@@ -729,13 +787,24 @@ def _verify_real_resale_quote(result: ValuationResult) -> ValuationResult:
         query_storage_tokens = _capacity_tokens(result.normalized_name)
         if not query_storage_tokens:
             query_storage_tokens = _capacity_tokens(str(payload.get("query") or ""))
+        query_display_tokens = _display_size_tokens(result.normalized_name)
+        if not query_display_tokens and original_title:
+            query_display_tokens = _display_size_tokens(original_title)
+        if not query_display_tokens:
+            query_display_tokens = _display_size_tokens(str(payload.get("query") or ""))
         candidate_context = _build_rebuy_candidate_context(payload=payload, source_url=source_url)
-        candidate_storage_tokens = _capacity_tokens(candidate_context)
+        candidate_variant_context = _build_rebuy_variant_context(payload=payload, source_url=source_url)
+        candidate_storage_tokens = _capacity_tokens(candidate_variant_context)
+        candidate_display_tokens = _display_size_tokens(candidate_variant_context)
         checks["query_storage_tokens"] = sorted(query_storage_tokens)
         checks["candidate_storage_tokens"] = sorted(candidate_storage_tokens)
+        checks["query_display_tokens"] = sorted(query_display_tokens)
+        checks["candidate_display_tokens"] = sorted(candidate_display_tokens)
         if query_storage_tokens and candidate_storage_tokens and not query_storage_tokens.intersection(candidate_storage_tokens):
             reasons.append("variant-storage-mismatch")
-        if original_title and _watch_generation_mismatch(original_title, candidate_context):
+        if query_display_tokens and candidate_display_tokens and not query_display_tokens.intersection(candidate_display_tokens):
+            reasons.append("variant-display-size-mismatch")
+        if original_title and _watch_generation_mismatch(original_title, candidate_variant_context):
             reasons.append("source-watch-generation-mismatch")
         if not price_text:
             reasons.append("missing-price-context")
@@ -759,6 +828,14 @@ def _verify_real_resale_quote(result: ValuationResult) -> ValuationResult:
             elif token_ratio < 0.55:
                 reasons.append("generic-url-low-coverage")
         candidate_context = _build_trenddevice_candidate_context(payload=payload, source_url=source_url)
+        query_display_tokens = _display_size_tokens(result.normalized_name)
+        if not query_display_tokens and original_title:
+            query_display_tokens = _display_size_tokens(original_title)
+        candidate_display_tokens = _display_size_tokens(candidate_context)
+        checks["query_display_tokens"] = sorted(query_display_tokens)
+        checks["candidate_display_tokens"] = sorted(candidate_display_tokens)
+        if query_display_tokens and candidate_display_tokens and not query_display_tokens.intersection(candidate_display_tokens):
+            reasons.append("variant-display-size-mismatch")
         if original_title and _watch_generation_mismatch(original_title, candidate_context):
             reasons.append("source-watch-generation-mismatch")
         if not price_text:
@@ -768,6 +845,14 @@ def _verify_real_resale_quote(result: ValuationResult) -> ValuationResult:
         if checks["generic_url"]:
             reasons.append("generic-source-url")
         candidate_context = _build_mpb_candidate_context(payload=payload, source_url=source_url)
+        query_display_tokens = _display_size_tokens(result.normalized_name)
+        if not query_display_tokens and original_title:
+            query_display_tokens = _display_size_tokens(original_title)
+        candidate_display_tokens = _display_size_tokens(candidate_context)
+        checks["query_display_tokens"] = sorted(query_display_tokens)
+        checks["candidate_display_tokens"] = sorted(candidate_display_tokens)
+        if query_display_tokens and candidate_display_tokens and not query_display_tokens.intersection(candidate_display_tokens):
+            reasons.append("variant-display-size-mismatch")
         if original_title and _watch_generation_mismatch(original_title, candidate_context):
             reasons.append("source-watch-generation-mismatch")
         if not checks["price_source"] and not price_text:
