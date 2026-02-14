@@ -1044,6 +1044,12 @@ async def test_run_status_command_includes_emojis(monkeypatch: pytest.MonkeyPatc
     async def fake_send(text: str, chat_id: str | None) -> None:
         sent_messages.append((chat_id, text))
 
+    async def fake_cart_pricing(*args, **kwargs):  # noqa: ANN001, ANN201
+        return {"checked": 0, "updated": 0, "skipped": 0}
+
+    async def fake_cart_pricing(*args, **kwargs):  # noqa: ANN001, ANN201
+        return {"checked": 0, "updated": 0, "skipped": 0}
+
     monkeypatch.setattr("tech_sniper_it.worker.build_default_manager", lambda: DummyManager())
     monkeypatch.setattr("tech_sniper_it.worker._send_telegram_message", fake_send)
     monkeypatch.delenv("OPENROUTER_API_KEYS", raising=False)
@@ -1335,6 +1341,161 @@ async def test_run_scan_command_uses_warehouse_fallback_when_no_input(monkeypatc
     assert len(sent_messages) == 1
     assert "📦 Analizzati: 1" in sent_messages[0][1]
     assert "✅ Over soglia: 0" in sent_messages[0][1]
+
+
+@pytest.mark.asyncio
+async def test_run_scan_command_does_not_fallback_when_explicit_payload_is_invalid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sent_messages: list[tuple[str | None, str]] = []
+    called_fetch = {"value": False}
+
+    class DummyManager:
+        min_spread_eur = 40.0
+        storage = None
+        notifier = None
+
+        async def evaluate_many(self, products, max_parallel_products=3):  # noqa: ANN001, ANN201
+            raise AssertionError("evaluate_many should not run for invalid explicit payload")
+
+    async def fake_send(text: str, chat_id: str | None) -> None:
+        sent_messages.append((chat_id, text))
+
+    async def fake_fetch_warehouse_products(**kwargs):  # noqa: ANN001, ANN201
+        called_fetch["value"] = True
+        return []
+
+    monkeypatch.setattr("tech_sniper_it.worker.build_default_manager", lambda: DummyManager())
+    monkeypatch.setattr(
+        "tech_sniper_it.worker._load_github_event_data",
+        lambda: {"client_payload": {"products": [{"title": "Apple iPhone 14 Pro"}]}},
+    )
+    monkeypatch.setattr("tech_sniper_it.worker.fetch_amazon_warehouse_products", fake_fetch_warehouse_products)
+    monkeypatch.setattr("tech_sniper_it.worker._send_telegram_message", fake_send)
+
+    exit_code = await _run_scan_command({"source": "telegram", "chat_id": "123"})
+
+    assert exit_code == 0
+    assert called_fetch["value"] is False
+    assert len(sent_messages) == 1
+    assert "Payload prodotti ricevuto ma non valido" in sent_messages[0][1]
+
+
+@pytest.mark.asyncio
+async def test_run_scan_command_reports_only_complete_reseller_quotes_when_enforced(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sent_messages: list[tuple[str | None, str]] = []
+
+    class DummyManager:
+        min_spread_eur = 40.0
+        storage = None
+        notifier = None
+
+        async def evaluate_many(self, products, max_parallel_products=3):  # noqa: ANN001, ANN201
+            def _offer(platform: str, amount: float | None, *, valid: bool):  # noqa: ANN001
+                return type(
+                    "Offer",
+                    (),
+                    {
+                        "platform": platform,
+                        "offer_eur": amount,
+                        "error": None if valid else f"{platform} missing",
+                        "source_url": f"https://{platform}.example/offer/123" if valid else None,
+                        "raw_payload": {"price_source": "dom", "quote_verification": {"ok": valid}},
+                    },
+                )()
+
+            complete = type(
+                "Decision",
+                (),
+                {
+                    "product": AmazonProduct(
+                        title="Apple iPhone 14 Pro 128GB",
+                        price_eur=200.0,
+                        category=ProductCategory.APPLE_PHONE,
+                    ),
+                    "normalized_name": "Apple iPhone 14 Pro 128GB",
+                    "best_offer": type("B", (), {"offer_eur": 320.0, "platform": "rebuy", "source_url": "https://rebuy.example/offer/123"})(),
+                    "spread_gross_eur": 120.0,
+                    "risk_buffer_eur": 0.0,
+                    "operating_cost_eur": 0.0,
+                    "spread_eur": 120.0,
+                    "should_notify": True,
+                    "ai_provider": "openrouter",
+                    "ai_model": "perplexity/sonar",
+                    "ai_mode": "live",
+                    "ai_used": True,
+                    "offers": [
+                        _offer("trenddevice", 300.0, valid=True),
+                        _offer("rebuy", 320.0, valid=True),
+                    ],
+                },
+            )()
+            incomplete = type(
+                "Decision",
+                (),
+                {
+                    "product": AmazonProduct(
+                        title="Apple iPhone 13 Pro 128GB",
+                        price_eur=180.0,
+                        category=ProductCategory.APPLE_PHONE,
+                    ),
+                    "normalized_name": "Apple iPhone 13 Pro 128GB",
+                    "best_offer": type("B", (), {"offer_eur": 300.0, "platform": "rebuy", "source_url": "https://rebuy.example/offer/999"})(),
+                    "spread_gross_eur": 120.0,
+                    "risk_buffer_eur": 0.0,
+                    "operating_cost_eur": 0.0,
+                    "spread_eur": 120.0,
+                    "should_notify": True,
+                    "ai_provider": "openrouter",
+                    "ai_model": "perplexity/sonar",
+                    "ai_mode": "live",
+                    "ai_used": True,
+                    "offers": [
+                        _offer("trenddevice", None, valid=False),
+                        _offer("rebuy", 300.0, valid=True),
+                    ],
+                },
+            )()
+            return [complete, incomplete]
+
+    async def fake_send(text: str, chat_id: str | None) -> None:
+        sent_messages.append((chat_id, text))
+
+    async def fake_cart_pricing(*args, **kwargs):  # noqa: ANN001, ANN201
+        return {"checked": 0, "updated": 0, "skipped": 0}
+
+    monkeypatch.setenv("SCAN_REQUIRE_COMPLETE_RESELLER_QUOTES", "true")
+    monkeypatch.setenv("SCAN_RESELLER_REFILL_MAX_ROUNDS", "0")
+    monkeypatch.setattr("tech_sniper_it.worker.build_default_manager", lambda: DummyManager())
+    monkeypatch.setattr("tech_sniper_it.worker._load_github_event_data", lambda: {})
+    monkeypatch.setattr(
+        "tech_sniper_it.worker.load_products",
+        lambda event_data=None: [
+            AmazonProduct(
+                title="Apple iPhone 14 Pro 128GB",
+                price_eur=200.0,
+                category=ProductCategory.APPLE_PHONE,
+            ),
+            AmazonProduct(
+                title="Apple iPhone 13 Pro 128GB",
+                price_eur=180.0,
+                category=ProductCategory.APPLE_PHONE,
+            ),
+        ],
+    )
+    monkeypatch.setattr("tech_sniper_it.worker.apply_cart_net_pricing", fake_cart_pricing)
+    monkeypatch.setattr("tech_sniper_it.worker._send_telegram_message", fake_send)
+
+    exit_code = await _run_scan_command({"source": "telegram", "chat_id": "123"})
+
+    assert exit_code == 0
+    assert len(sent_messages) == 1
+    summary = sent_messages[0][1]
+    assert "📦 Analizzati: 1" in summary
+    assert "Apple iPhone 14 Pro 128GB" in summary
+    assert "Apple iPhone 13 Pro 128GB" not in summary
 
 
 @pytest.mark.asyncio

@@ -843,7 +843,32 @@ def _verify_real_resale_quote(result: ValuationResult) -> ValuationResult:
     elif platform == "mpb":
         checks["generic_url"] = _is_generic_mpb_offer_url(source_url)
         if checks["generic_url"]:
-            reasons.append("generic-source-url")
+            generic_override = False
+            if checks["price_source"] == "api_purchase_price":
+                api_result = payload.get("api_purchase_price_result")
+                model_id = ""
+                model_name = ""
+                if isinstance(api_result, dict):
+                    model_id = str(api_result.get("model_id") or "").strip()
+                    model_name = _compact_text(str(api_result.get("model_name") or ""))
+                token_ratio = 0.0
+                if isinstance(match_quality, dict):
+                    try:
+                        token_ratio = float(match_quality.get("token_ratio") or 0.0)
+                    except (TypeError, ValueError):
+                        token_ratio = 0.0
+                model_id_ok = bool(re.fullmatch(r"\d{3,}", model_id))
+                generic_override = model_id_ok and bool(model_name) and (
+                    not isinstance(match_quality, dict)
+                    or bool(match_quality.get("ok"))
+                    or token_ratio >= 0.62
+                )
+                checks["api_model_id"] = model_id or None
+                checks["api_model_name"] = model_name or None
+                checks["token_ratio"] = round(token_ratio, 3)
+            checks["generic_override"] = generic_override
+            if not generic_override:
+                reasons.append("generic-source-url")
         candidate_context = _build_mpb_candidate_context(payload=payload, source_url=source_url)
         query_display_tokens = _display_size_tokens(result.normalized_name)
         if not query_display_tokens and original_title:
@@ -898,11 +923,16 @@ class ArbitrageManager:
 
     async def evaluate_many(self, products: Iterable[AmazonProduct], max_parallel_products: int = 3) -> list[ArbitrageDecision]:
         items = list(products)
-        print(f"[scan] Parallel evaluation start | products={len(items)} | max_parallel={max_parallel_products}")
+        try:
+            safe_parallel = int(max_parallel_products)
+        except (TypeError, ValueError):
+            safe_parallel = 3
+        safe_parallel = max(1, min(safe_parallel, 12))
+        print(f"[scan] Parallel evaluation start | products={len(items)} | max_parallel={safe_parallel}")
         if not items:
             return []
 
-        semaphore = asyncio.Semaphore(max_parallel_products)
+        semaphore = asyncio.Semaphore(safe_parallel)
         backoff_enabled = _env_or_default("VALUATOR_CIRCUIT_BREAKER_ENABLED", "true").lower() != "false"
         disabled_platforms: set[str] = set()
         platform_failures: dict[str, int] = defaultdict(int)

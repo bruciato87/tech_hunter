@@ -26,6 +26,20 @@ test("telegram webhook rejects invalid secret header", async () => {
   assert.equal(res.statusCode, 401);
 });
 
+test("telegram webhook fails closed when webhook secret is missing", async () => {
+  resetTelegramEnv();
+  delete process.env.TELEGRAM_WEBHOOK_SECRET_TOKEN;
+  const req = {
+    method: "POST",
+    headers: { "x-telegram-bot-api-secret-token": "webhook_secret" },
+    body: {},
+  };
+  const res = createRes();
+  await handler(req, res);
+  assert.equal(res.statusCode, 500);
+  assert.equal(res.body.ok, false);
+});
+
 test("telegram webhook serves help command directly", async () => {
   resetTelegramEnv();
   const calls = [];

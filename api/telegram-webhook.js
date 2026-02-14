@@ -190,8 +190,11 @@ module.exports = async function handler(req, res) {
   }
 
   const webhookSecret = process.env.TELEGRAM_WEBHOOK_SECRET_TOKEN;
+  if (!webhookSecret || !webhookSecret.trim()) {
+    return res.status(500).json({ ok: false, error: "Missing env configuration: TELEGRAM_WEBHOOK_SECRET_TOKEN" });
+  }
   const secretHeader = req.headers["x-telegram-bot-api-secret-token"];
-  if (webhookSecret && secretHeader !== webhookSecret) {
+  if (secretHeader !== webhookSecret.trim()) {
     return res.status(401).json({ ok: false, error: "Invalid webhook secret" });
   }
 

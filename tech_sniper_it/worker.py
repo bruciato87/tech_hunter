@@ -1433,6 +1433,18 @@ def _load_from_github_event(event_data: dict[str, Any] | None = None) -> list[di
     return []
 
 
+def _has_explicit_product_payload(event_data: dict[str, Any] | None = None) -> bool:
+    data = event_data or _load_github_event_data()
+    payload = _get_client_payload(data)
+    if not isinstance(payload, dict):
+        return False
+    if isinstance(payload.get("products"), list):
+        return True
+    if isinstance(payload.get("product"), dict):
+        return True
+    return False
+
+
 def _load_from_file() -> list[dict[str, Any]]:
     file_path = os.getenv("AMAZON_PRODUCTS_FILE")
     if not file_path:
@@ -2288,7 +2300,9 @@ async def _run_scan_command(payload: dict[str, Any]) -> int:
         except Exception as exc:
             print(f"[scan] AI strategy unavailable: {_safe_error_details(exc)}")
     scoring_context = await _build_prioritization_context(manager)
-    products = load_products(_load_github_event_data())
+    event_data = _load_github_event_data()
+    products = load_products(event_data)
+    has_explicit_payload_products = _has_explicit_product_payload(event_data)
     command_chat = _telegram_target_chat(payload)
     scan_mode = str(payload.get("mode") or _env_or_default("SCAN_MODE", "full")).strip().lower()
     if scan_mode == "smoke":
@@ -2308,6 +2322,15 @@ async def _run_scan_command(payload: dict[str, Any]) -> int:
     candidate_multiplier = max(1, int(_env_or_default("SCAN_CANDIDATE_MULTIPLIER", "4")))
     candidate_budget = scan_target_products * candidate_multiplier
     if not products:
+        if has_explicit_payload_products:
+            message = (
+                "Payload prodotti ricevuto ma non valido: verifica title/price_eur/category. "
+                "Scan automatica Warehouse non avviata."
+            )
+            print(message)
+            if payload.get("source") in {"telegram", "vercel_scan_api", "manual_debug"}:
+                await _send_telegram_message(message, command_chat)
+            return 0
         print("[scan] No explicit products provided. Trying Amazon Warehouse automatic source (IT+EU).")
         try:
             query_target_default = str(max(12, scan_target_products))
@@ -2522,7 +2545,11 @@ async def _run_scan_command(payload: dict[str, Any]) -> int:
             await _send_telegram_message(message, command_chat)
         return 0
 
-    max_parallel_products = int(_env_or_default("MAX_PARALLEL_PRODUCTS", "3"))
+    try:
+        max_parallel_products = int(_env_or_default("MAX_PARALLEL_PRODUCTS", "3"))
+    except ValueError:
+        max_parallel_products = 3
+    max_parallel_products = max(1, min(max_parallel_products, 12))
     print(f"[scan] Loaded products: {len(evaluation_products)} | max_parallel_products={max_parallel_products}")
     enforce_complete_quotes = _is_truthy_env("SCAN_REQUIRE_COMPLETE_RESELLER_QUOTES", "true") and str(
         payload.get("source", "")
@@ -2560,7 +2587,7 @@ async def _run_scan_command(payload: dict[str, Any]) -> int:
 
     try:
         primary_decisions = await _evaluate_batch(evaluation_products, stage_label="primary")
-        decisions = primary_decisions
+        all_decisions = list(primary_decisions)
 
         optional_platforms: set[str] = set()
         complete_decisions = primary_decisions
@@ -2614,7 +2641,7 @@ async def _run_scan_command(payload: dict[str, Any]) -> int:
                     f"missing_slots={missing_slots} remaining_overflow={len(overflow_products)}"
                 )
                 refill_decisions = await _evaluate_batch(refill_batch, stage_label=f"refill-{refill_round}")
-                decisions.extend(refill_decisions)
+                all_decisions.extend(refill_decisions)
                 accepted_refill, rejected_refill = _split_complete_quote_decisions(
                     refill_decisions,
                     optional_platforms=optional_platforms,
@@ -2631,12 +2658,18 @@ async def _run_scan_command(payload: dict[str, Any]) -> int:
                     f"collected={len(complete_decisions)} target={target_complete}"
                 )
 
+        if enforce_complete_quotes:
+            target_complete = len(evaluation_products)
+            decisions = complete_decisions[:target_complete]
+        else:
+            decisions = all_decisions
+
         # Only write to exclusion cache when quotes are complete without masking outages.
         if enforce_complete_quotes:
             required_with_optional: set[str] = set(optional_platforms or set())
             decisions_for_cache = [
                 item
-                for item in complete_decisions
+                for item in decisions
                 if not (
                     set(
                         _required_platforms_for_product(

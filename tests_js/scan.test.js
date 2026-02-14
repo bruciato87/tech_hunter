@@ -37,6 +37,32 @@ test("scan endpoint rejects payload without products", async () => {
   assert.equal(res.statusCode, 400);
 });
 
+test("scan endpoint fails closed when SCAN_SECRET is missing", async () => {
+  resetScanEnv();
+  delete process.env.SCAN_SECRET;
+  const req = {
+    method: "POST",
+    headers: { authorization: "Bearer scan_secret" },
+    body: { products: [{ title: "iPhone 14", price_eur: 500 }] },
+  };
+  const res = createRes();
+  await handler(req, res);
+  assert.equal(res.statusCode, 500);
+  assert.equal(res.body.ok, false);
+});
+
+test("scan endpoint rejects invalid product shape", async () => {
+  resetScanEnv();
+  const req = {
+    method: "POST",
+    headers: { authorization: "Bearer scan_secret" },
+    body: { products: [{ title: "Only title" }] },
+  };
+  const res = createRes();
+  await handler(req, res);
+  assert.equal(res.statusCode, 400);
+});
+
 test("scan endpoint dispatches valid payload to github", async () => {
   resetScanEnv();
   const calls = [];

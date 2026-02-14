@@ -10,14 +10,34 @@ function envOrDefault(name, fallback) {
 
 function parseProducts(payload) {
   const value = payload?.products;
+  const normalize = (candidate) => {
+    if (!candidate || typeof candidate !== "object") {
+      return null;
+    }
+    const title = typeof candidate.title === "string" ? candidate.title.trim() : "";
+    const priceRaw = candidate.price_eur ?? candidate.price;
+    const price = Number(priceRaw);
+    if (!title || !Number.isFinite(price) || price <= 0) {
+      return null;
+    }
+    return {
+      ...candidate,
+      title,
+      price_eur: price,
+    };
+  };
   if (Array.isArray(value)) {
-    return value.filter((item) => item && typeof item === "object");
+    return value
+      .map((item) => normalize(item))
+      .filter(Boolean);
   }
   if (value && typeof value === "object") {
-    return [value];
+    const normalized = normalize(value);
+    return normalized ? [normalized] : [];
   }
   if (payload && typeof payload === "object" && payload.title) {
-    return [payload];
+    const normalized = normalize(payload);
+    return normalized ? [normalized] : [];
   }
   return [];
 }
@@ -48,8 +68,11 @@ module.exports = async function handler(req, res) {
   }
 
   const scanSecret = process.env.SCAN_SECRET;
+  if (!scanSecret || !scanSecret.trim()) {
+    return res.status(500).json({ ok: false, error: "Missing env configuration: SCAN_SECRET" });
+  }
   const authHeader = req.headers.authorization || "";
-  if (scanSecret && authHeader !== `Bearer ${scanSecret}`) {
+  if (authHeader !== `Bearer ${scanSecret.trim()}`) {
     return res.status(401).json({ ok: false, error: "Unauthorized" });
   }
 

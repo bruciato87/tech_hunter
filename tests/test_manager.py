@@ -606,6 +606,38 @@ async def test_manager_quote_verification_accepts_mpb_specific_sell_url() -> Non
 
 
 @pytest.mark.asyncio
+async def test_manager_quote_verification_accepts_mpb_api_generic_url_with_model_evidence() -> None:
+    manager = ManagerUnderTest(
+        valuators=[
+            StaticValuator(
+                "mpb",
+                510.0,
+                source_url="https://www.mpb.com/it-it/cerca?q=canon+eos+r7",
+                raw_payload={
+                    "price_text": "purchase_value=510.00 EUR condition=excellent",
+                    "price_source": "api_purchase_price",
+                    "match_quality": {"ok": True, "reason": "ok", "token_ratio": 0.83},
+                    "api_purchase_price_result": {
+                        "model_id": "69474",
+                        "model_name": "Canon EOS R7 Body",
+                    },
+                },
+            )
+        ],
+        ai_balancer=FakeBalancer(gemini_keys=[], openrouter_keys=[]),
+        min_spread_eur=40.0,
+    )
+    product = AmazonProduct(title="Canon EOS R7 Body", price_eur=200.0, category=ProductCategory.PHOTOGRAPHY)
+
+    decision = await manager.evaluate_product(product)
+
+    assert decision.best_offer is not None
+    assert decision.best_offer.platform == "mpb"
+    assert decision.best_offer.offer_eur == 510.0
+    assert decision.should_notify is True
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("platform", ["rebuy", "trenddevice"])
 async def test_manager_query_variant_retry_recovers_rebuy_and_trenddevice(platform: str) -> None:
     valuator = QueryRetryValuator(platform)
@@ -628,6 +660,32 @@ async def test_manager_query_variant_retry_recovers_rebuy_and_trenddevice(platfo
     assert decision.should_notify is True
     assert len(valuator.queries) >= 2
     assert any("Valve" in query for query in valuator.queries)
+
+
+@pytest.mark.asyncio
+async def test_manager_evaluate_many_clamps_invalid_parallel(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("VALUATOR_TIMEOUT_REBUY_SECONDS", "5")
+    manager = ManagerUnderTest(
+        valuators=[
+            StaticValuator(
+                "rebuy",
+                120.0,
+                source_url="https://www.rebuy.it/vendere/smartphone/apple-iphone-14_123",
+                raw_payload={
+                    "price_text": "Pagamento Diretto 120,00 €",
+                    "price_source": "dom-cash",
+                    "wizard_states": [{"state": "offer"}],
+                    "match_quality": {"ok": True, "reason": "ok", "token_ratio": 0.91},
+                },
+            )
+        ],
+        ai_balancer=FakeBalancer(gemini_keys=[], openrouter_keys=[]),
+        min_spread_eur=10.0,
+    )
+    product = AmazonProduct(title="Apple iPhone 14 128GB", price_eur=100.0, category=ProductCategory.APPLE_PHONE)
+
+    decisions = await asyncio.wait_for(manager.evaluate_many([product], max_parallel_products=0), timeout=2.0)
+    assert len(decisions) == 1
 
 
 @pytest.mark.asyncio

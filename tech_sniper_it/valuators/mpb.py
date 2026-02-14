@@ -1273,7 +1273,15 @@ class MPBValuator(BaseValuator):
                         model_name = str(model.get("model_name") or "").strip()
                         if not model_name:
                             model_name = normalized_name
-                        source_url = f"https://www.mpb.com/{locale_segment}/{search_path}?q={quote_plus(model_name)}"
+                        model_url_segment = str(model.get("model_url_segment") or "").strip().strip("/")
+                        model_id_slug = re.sub(r"[^0-9]", "", model_id)
+                        if model_url_segment and model_id_slug:
+                            source_url = (
+                                f"https://www.mpb.com/{locale_segment}/sell/product/"
+                                f"{model_url_segment}/{model_id_slug}"
+                            )
+                        else:
+                            source_url = f"https://www.mpb.com/{locale_segment}/{search_path}?q={quote_plus(model_name)}"
                         query_item["status"] = "ok"
                         payload["price_text"] = (
                             f"purchase_value={purchase_value:.2f} {currency} "
