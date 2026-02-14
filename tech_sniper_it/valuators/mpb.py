@@ -325,6 +325,15 @@ def _mpb_blocker_recovery_reload_enabled() -> bool:
     }
 
 
+def _mpb_start_from_direct_search_with_storage_state() -> bool:
+    return _env_or_default("MPB_START_FROM_DIRECT_SEARCH_WITH_STORAGE_STATE", "true").lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+
+
 def _load_storage_state_b64() -> str | None:
     global _MPB_STORAGE_STATE_ERROR
     _MPB_STORAGE_STATE_ERROR = ""
@@ -1329,6 +1338,9 @@ class MPBValuator(BaseValuator):
             "sticky_with_storage_state": bool(storage_state_path),
         }
         total_budget_seconds = _mpb_total_time_budget_seconds()
+        if payload.get("api_purchase_price_skipped"):
+            # When API is degraded, keep UI probing short to avoid 25s+ stalls on blocked pages.
+            total_budget_seconds = min(total_budget_seconds, 14.0)
         deadline = time.monotonic() + total_budget_seconds
         payload["valuation_time_budget_s"] = total_budget_seconds
 
@@ -1505,7 +1517,11 @@ class MPBValuator(BaseValuator):
                                     payload=payload,
                                     source_url=self.base_url,
                                 )
-                            await page.goto(self.base_url, wait_until="domcontentloaded")
+                            entry_url = self.base_url
+                            if storage_state_path and _mpb_start_from_direct_search_with_storage_state():
+                                entry_url = f"https://www.mpb.com/it-it/cerca?q={quote_plus(query)}"
+                            payload["entry_url"] = entry_url
+                            await page.goto(entry_url, wait_until="domcontentloaded")
                             await self._accept_cookie_if_present(page)
                             blockers = await self._detect_page_blockers(page)
                             blockers = await self._attempt_blocker_recovery(
