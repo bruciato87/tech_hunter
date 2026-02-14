@@ -373,9 +373,9 @@ def _mpb_challenge_warmup_reload_enabled() -> bool:
 def _mpb_max_attempts_with_storage_state() -> int:
     raw = (os.getenv("MPB_MAX_ATTEMPTS_WITH_STORAGE_STATE") or "").strip()
     try:
-        value = int(raw) if raw else 2
+        value = int(raw) if raw else 1
     except ValueError:
-        value = 2
+        value = 1
     return max(1, min(value, 4))
 
 
@@ -438,10 +438,19 @@ def _mpb_total_time_budget_seconds() -> float:
 def _mpb_storage_state_time_budget_seconds() -> float:
     raw = (os.getenv("MPB_STORAGE_STATE_TIME_BUDGET_SECONDS") or "").strip()
     try:
-        value = float(raw) if raw else 18.0
+        value = float(raw) if raw else 12.0
     except ValueError:
-        value = 18.0
-    return max(8.0, min(value, 45.0))
+        value = 12.0
+    return max(6.0, min(value, 30.0))
+
+
+def _mpb_api_time_budget_with_storage_state_seconds() -> float:
+    raw = (os.getenv("MPB_API_TIME_BUDGET_WITH_STORAGE_STATE_SECONDS") or "").strip()
+    try:
+        value = float(raw) if raw else 7.0
+    except ValueError:
+        value = 7.0
+    return max(4.0, min(value, 20.0))
 
 
 def _remove_file_if_exists(path: str | None) -> None:
@@ -1101,6 +1110,8 @@ class MPBValuator(BaseValuator):
         model_limit = max(1, int(_env_or_default("MPB_API_MODEL_LIMIT", "2")))
         rows = max(6, min(20, int(_env_or_default("MPB_API_SEARCH_ROWS", "8"))))
         api_budget_seconds = max(6.0, min(40.0, float(_env_or_default("MPB_API_TIME_BUDGET_SECONDS", "12"))))
+        if storage_state_path:
+            api_budget_seconds = min(api_budget_seconds, _mpb_api_time_budget_with_storage_state_seconds())
         deadline = time.monotonic() + api_budget_seconds
 
         api_payload: dict[str, Any] = {
@@ -1980,6 +1991,10 @@ class MPBValuator(BaseValuator):
         allow_reload = _mpb_challenge_warmup_reload_enabled()
         history: list[dict[str, Any]] = []
         current = blockers
+        print(
+            "[mpb] Challenge warmup start | "
+            f"stage={stage} attempts={attempts} wait_ms={wait_ms} blockers={blockers[:4]}"
+        )
 
         for step in range(1, attempts + 1):
             clicked_checkbox = await self._click_turnstile_checkbox_if_present(page)
@@ -2013,6 +2028,7 @@ class MPBValuator(BaseValuator):
             "attempts": attempts,
             "history": history,
         }
+        print(f"[mpb] Challenge warmup unresolved | stage={stage} blockers={(current or blockers)[:4]}")
         return current or blockers
 
     async def _attempt_blocker_recovery(
