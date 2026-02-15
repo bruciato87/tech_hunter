@@ -30,6 +30,14 @@ from tech_sniper_it.valuators.mpb import (
     _mpb_block_remaining_seconds,
     _mpb_api_continue_on_bootstrap_blockers,
     _mpb_api_request_timeout_ms,
+    _mpb_priority_api_model_limit,
+    _mpb_priority_api_query_limit,
+    _mpb_priority_api_time_budget_seconds,
+    _mpb_priority_api_time_budget_with_storage_state_seconds,
+    _mpb_priority_max_attempts_with_storage_state,
+    _mpb_priority_page_timeout_with_storage_state_ms,
+    _mpb_priority_storage_state_time_budget_seconds,
+    _mpb_priority_total_time_budget_seconds,
     _mpb_challenge_warmup_enabled,
     _mpb_skip_api_when_degraded_with_storage_state,
     _mpb_max_attempts_with_storage_state,
@@ -37,6 +45,7 @@ from tech_sniper_it.valuators.mpb import (
     _mpb_skip_ui_on_api_block,
     _mpb_storage_state_time_budget_seconds,
     _mpb_total_time_budget_seconds,
+    _is_mpb_priority_category,
     _pick_best_mpb_network_candidate,
     _rank_mpb_api_models,
     _remove_file_if_exists,
@@ -221,6 +230,54 @@ def test_mpb_max_attempts_with_storage_state_bounds(monkeypatch: pytest.MonkeyPa
     assert _mpb_max_attempts_with_storage_state() == 3
     monkeypatch.setenv("MPB_MAX_ATTEMPTS_WITH_STORAGE_STATE", "9")
     assert _mpb_max_attempts_with_storage_state() == 4
+
+
+def test_mpb_priority_helpers_bounds(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MPB_PRIORITY_API_QUERY_LIMIT", "0")
+    assert _mpb_priority_api_query_limit() == 1
+    monkeypatch.setenv("MPB_PRIORITY_API_QUERY_LIMIT", "3")
+    assert _mpb_priority_api_query_limit() == 3
+
+    monkeypatch.setenv("MPB_PRIORITY_API_MODEL_LIMIT", "0")
+    assert _mpb_priority_api_model_limit() == 1
+    monkeypatch.setenv("MPB_PRIORITY_API_MODEL_LIMIT", "9")
+    assert _mpb_priority_api_model_limit() == 5
+
+    monkeypatch.setenv("MPB_PRIORITY_API_TIME_BUDGET_SECONDS", "3")
+    assert _mpb_priority_api_time_budget_seconds() == 6.0
+    monkeypatch.setenv("MPB_PRIORITY_API_TIME_BUDGET_SECONDS", "21")
+    assert _mpb_priority_api_time_budget_seconds() == 21.0
+
+    monkeypatch.setenv("MPB_PRIORITY_API_TIME_BUDGET_WITH_STORAGE_STATE_SECONDS", "2")
+    assert _mpb_priority_api_time_budget_with_storage_state_seconds() == 4.0
+    monkeypatch.setenv("MPB_PRIORITY_API_TIME_BUDGET_WITH_STORAGE_STATE_SECONDS", "13")
+    assert _mpb_priority_api_time_budget_with_storage_state_seconds() == 13.0
+
+    monkeypatch.setenv("MPB_PRIORITY_TOTAL_TIME_BUDGET_SECONDS", "6")
+    assert _mpb_priority_total_time_budget_seconds() == 8.0
+    monkeypatch.setenv("MPB_PRIORITY_TOTAL_TIME_BUDGET_SECONDS", "24")
+    assert _mpb_priority_total_time_budget_seconds() == 24.0
+
+    monkeypatch.setenv("MPB_PRIORITY_STORAGE_STATE_TIME_BUDGET_SECONDS", "3")
+    assert _mpb_priority_storage_state_time_budget_seconds() == 6.0
+    monkeypatch.setenv("MPB_PRIORITY_STORAGE_STATE_TIME_BUDGET_SECONDS", "17")
+    assert _mpb_priority_storage_state_time_budget_seconds() == 17.0
+
+    monkeypatch.setenv("MPB_PRIORITY_MAX_ATTEMPTS_WITH_STORAGE_STATE", "0")
+    assert _mpb_priority_max_attempts_with_storage_state() == 1
+    monkeypatch.setenv("MPB_PRIORITY_MAX_ATTEMPTS_WITH_STORAGE_STATE", "3")
+    assert _mpb_priority_max_attempts_with_storage_state() == 3
+
+    monkeypatch.setenv("MPB_PRIORITY_PAGE_TIMEOUT_WITH_STORAGE_STATE_MS", "1000")
+    assert _mpb_priority_page_timeout_with_storage_state_ms() == 2200
+    monkeypatch.setenv("MPB_PRIORITY_PAGE_TIMEOUT_WITH_STORAGE_STATE_MS", "6400")
+    assert _mpb_priority_page_timeout_with_storage_state_ms() == 6400
+
+
+def test_mpb_priority_category_detection() -> None:
+    assert _is_mpb_priority_category(ProductCategory.PHOTOGRAPHY) is True
+    assert _is_mpb_priority_category(ProductCategory.DRONE) is True
+    assert _is_mpb_priority_category(ProductCategory.GENERAL_TECH) is False
 
 
 def test_mpb_api_market_fallbacks_to_it(monkeypatch: pytest.MonkeyPatch) -> None:

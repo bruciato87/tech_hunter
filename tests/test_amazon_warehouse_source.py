@@ -69,10 +69,10 @@ def test_extract_products_from_html_supports_h2_span_title_markup() -> None:
       <body>
         <div data-component-type="s-search-result" data-asin="B0ABCDE123">
           <a class="a-link-normal s-no-outline" href="/Apple-iPhone-14-Pro-128GB/dp/B0ABCDE123/ref=sr_1_1">
-            <img class="s-image" alt="Apple iPhone 14 Pro 128GB - Space Black (Ricondizionato)" />
+            <img class="s-image" alt="Apple iPhone 14 Pro 128GB - Space Black Usato - Ottime condizioni" />
           </a>
           <h2 class="a-size-base-plus a-spacing-none a-color-base a-text-normal">
-            <span>Apple iPhone 14 Pro 128GB - Space Black (Ricondizionato)</span>
+            <span>Apple iPhone 14 Pro 128GB - Space Black Usato - Ottime condizioni</span>
           </h2>
           <span class="a-price"><span class="a-offscreen">629,90 €</span></span>
         </div>
@@ -82,11 +82,30 @@ def test_extract_products_from_html_supports_h2_span_title_markup() -> None:
     items = _extract_products_from_html(html, "www.amazon.it")
     assert len(items) == 1
     item = items[0]
-    assert item["title"] == "Apple iPhone 14 Pro 128GB - Space Black (Ricondizionato)"
+    assert item["title"] == "Apple iPhone 14 Pro 128GB - Space Black Usato - Ottime condizioni"
     assert item["price_eur"] == 629.9
     assert item["displayed_price_eur"] == 629.9
     assert item["category"] == "apple_phone"
     assert item["url"] == "https://www.amazon.it/dp/B0ABCDE123"
+
+
+def test_extract_products_from_html_rejects_renewed_or_refurbished_rows() -> None:
+    html = """
+    <html>
+      <body>
+        <div data-component-type="s-search-result">
+          <h2>
+            <a href="/Apple-iPhone-14-Pro-128GB/dp/B0ABCDE123/ref=sr_1_1">
+              <span>Apple iPhone 14 Pro 128GB - Amazon Renewed</span>
+            </a>
+          </h2>
+          <span class="a-price"><span class="a-offscreen">629,90 €</span></span>
+        </div>
+      </body>
+    </html>
+    """
+    items = _extract_products_from_html(html, "www.amazon.it")
+    assert items == []
 
 
 def test_candidate_product_urls_for_cart_prioritizes_canonical_dp() -> None:
@@ -341,7 +360,7 @@ def test_extract_products_from_html_applies_coupon_eur_discount_to_net_price() -
         <div data-component-type="s-search-result">
           <h2>
             <a href="/Apple-iPhone-14-Pro-128GB/dp/B0ABCDE123/ref=sr_1_1">
-              <span>Apple iPhone 14 Pro 128GB Ricondizionato</span>
+              <span>Apple iPhone 14 Pro 128GB Usato - Ottime condizioni</span>
             </a>
           </h2>
           <span class="a-price"><span class="a-offscreen">679,00 €</span></span>
@@ -365,7 +384,7 @@ def test_extract_products_from_html_applies_coupon_percent_discount_to_net_price
         <div data-component-type="s-search-result">
           <h2>
             <a href="/Apple-iPhone-14-Pro-128GB/dp/B0ABCDE123/ref=sr_1_1">
-              <span>Apple iPhone 14 Pro 128GB Ricondizionato</span>
+              <span>Apple iPhone 14 Pro 128GB Usato - Ottime condizioni</span>
             </a>
           </h2>
           <span class="a-price"><span class="a-offscreen">679,00 €</span></span>
@@ -389,7 +408,7 @@ def test_extract_products_from_html_does_not_double_count_implied_list_discount(
         <div data-component-type="s-search-result">
           <h2>
             <a href="/Apple-iPhone-14-Pro-128GB/dp/B0ABCDE123/ref=sr_1_1">
-              <span>Apple iPhone 14 Pro 128GB Ricondizionato</span>
+              <span>Apple iPhone 14 Pro 128GB Usato - Ottime condizioni</span>
             </a>
           </h2>
           <span class="a-price"><span class="a-offscreen">679,00 €</span></span>

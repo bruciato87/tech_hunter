@@ -683,6 +683,21 @@ def _assess_rebuy_match(
     query_norm = _normalize_match_text(normalized_name)
     parsed_url = urlparse(source_url or "")
     path = (parsed_url.path or "").strip("/").lower()
+    path_segments = [segment for segment in path.split("/") if segment]
+    is_specific_sell_url = bool(
+        path.startswith("vendere/p/")
+        or (
+            len(path_segments) >= 2
+            and path_segments[0] == "vendere"
+            and REBUY_SELL_ID_SUFFIX_PATTERN.search(path_segments[-1] or "")
+        )
+    )
+    is_specific_buy_url = bool(
+        len(path_segments) >= 3
+        and path_segments[0] == "comprare"
+        and REBUY_PRODUCT_ID_PATTERN.fullmatch(path_segments[-1] or "")
+    )
+    is_specific_product_url = is_specific_sell_url or is_specific_buy_url
     url_parts = " ".join(
         part
         for part in (
@@ -906,20 +921,38 @@ def _assess_rebuy_match(
             "required_tokens": required_tokens,
         }
     if token_ratio < 0.55 and ratio < 0.60:
-        return {
-            "ok": False,
-            "reason": "low-token-similarity",
-            "score": score,
-            "ratio": round(ratio, 3),
-            "token_ratio": round(token_ratio, 3),
-            "generic_url": generic_url,
-            "generic_override": strong_generic_match,
-            "hit_tokens": hit_tokens,
-            "required_tokens": required_tokens,
-        }
+        allow_specific_low_token_match = (
+            is_specific_product_url
+            and (not query_anchors or bool(anchor_hits))
+            and (
+                not capacities
+                or len(capacity_hits) >= len(capacities)
+                or not candidate_capacities
+            )
+            and not explicit_capacity_conflict
+            and (ratio >= 0.47 or token_ratio >= 0.42)
+        )
+        if allow_specific_low_token_match:
+            token_ratio = max(token_ratio, 0.55)
+        else:
+            return {
+                "ok": False,
+                "reason": "low-token-similarity",
+                "score": score,
+                "ratio": round(ratio, 3),
+                "token_ratio": round(token_ratio, 3),
+                "generic_url": generic_url,
+                "generic_override": strong_generic_match,
+                "hit_tokens": hit_tokens,
+                "required_tokens": required_tokens,
+            }
     score_floor = 72
+    if is_specific_product_url and not generic_url:
+        score_floor = min(score_floor, 56)
+        if token_ratio >= 0.50 and ratio >= 0.45:
+            score_floor = min(score_floor, 52)
     if not generic_url and (query_anchors or capacities):
-        score_floor = 62
+        score_floor = min(score_floor, 62)
     if not generic_url and token_ratio >= 0.6:
         score_floor = min(score_floor, 54)
     if path.startswith("vendere/p/"):

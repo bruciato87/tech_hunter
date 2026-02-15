@@ -92,6 +92,47 @@ SPONSORED_HINTS: tuple[str, ...] = (
     "gesponsert",
     "sponsorisé",
 )
+WAREHOUSE_POSITIVE_HINTS: tuple[str, ...] = (
+    "amazon warehouse",
+    "warehouse deals",
+    "warehousedeals",
+    "offerte warehouse",
+    "usato -",
+    "used -",
+    "gebraucht -",
+    "d'occasion -",
+    "de segunda mano -",
+)
+WAREHOUSE_CONDITION_HINTS: tuple[str, ...] = (
+    "come nuovo",
+    "ottime condizioni",
+    "buone condizioni",
+    "condizioni accettabili",
+    "like new",
+    "very good",
+    "acceptable",
+    "good",
+    "wie neu",
+    "sehr gut",
+    "akzeptabel",
+    "comme neuf",
+    "très bon état",
+    "état acceptable",
+    "como nuevo",
+    "muy buen estado",
+    "aceptable",
+)
+WAREHOUSE_NEGATIVE_HINTS: tuple[str, ...] = (
+    "amazon renewed",
+    "renewed",
+    "renew",
+    "ricondizionat",
+    "refurbish",
+    "recondition",
+    "generalüberholt",
+    "reacondicion",
+    "reconditionné",
+)
 CURRENT_PRICE_SELECTORS: tuple[str, ...] = (
     ".a-price:not(.a-text-price) .a-offscreen",
     "span[data-a-price-type='price'] .a-offscreen",
@@ -805,6 +846,24 @@ def _is_sponsored(text: str) -> bool:
     return any(hint in lowered for hint in SPONSORED_HINTS)
 
 
+def _looks_like_warehouse_listing(*, title: str, row_text: str, url: str) -> bool:
+    merged = re.sub(r"\s+", " ", f"{title} {row_text} {url}").strip().lower()
+    if not merged:
+        return False
+    if any(hint in merged for hint in WAREHOUSE_NEGATIVE_HINTS):
+        return False
+    if any(hint in merged for hint in WAREHOUSE_POSITIVE_HINTS):
+        return True
+    if any(hint in merged for hint in WAREHOUSE_CONDITION_HINTS):
+        return True
+    condition_label, _confidence, _packaging = infer_amazon_warehouse_condition(merged)
+    if condition_label:
+        return True
+    # Fallback: warehouse result rows can occasionally hide the condition badge in dynamic fragments.
+    # Keep canonical product rows as long as we did not detect explicit refurbished/renewed signals.
+    return bool(re.search(r"/(?:dp|gp/product)/[a-z0-9]{10}", url or "", flags=re.IGNORECASE))
+
+
 def _detect_page_barriers(html: str, title: str | None = None) -> list[str]:
     lowered = f"{title or ''}\n{html}".lower()
     barriers: list[str] = []
@@ -1220,10 +1279,13 @@ def _extract_products_from_html(html: str, host: str) -> list[dict[str, Any]]:
         url = _extract_link_from_row(host, row)
         if not url:
             continue
+        row_text = row.get_text(" ", strip=True)
+        if not _looks_like_warehouse_listing(title=title, row_text=row_text, url=url):
+            continue
 
         category = ProductCategory.from_raw(title).value
         condition_label, condition_confidence, packaging_only = infer_amazon_warehouse_condition(
-            f"{title} {row.get_text(' ', strip=True)}"
+            f"{title} {row_text}"
         )
         item: dict[str, Any] = {
             "title": title,

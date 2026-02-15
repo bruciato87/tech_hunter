@@ -15,7 +15,7 @@ from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import Page
 from playwright.async_api import async_playwright
 
-from tech_sniper_it.models import AmazonProduct
+from tech_sniper_it.models import AmazonProduct, ProductCategory
 from tech_sniper_it.utils import decode_json_dict_maybe_base64, parse_eur_price
 from tech_sniper_it.valuators.base import BaseValuator, ValuatorRuntimeError
 
@@ -204,6 +204,10 @@ MPB_API_SEARCH_PATH_MAP: dict[str, str] = {
     "gb": "search",
     "eu": "cerca",
 }
+MPB_PRIORITY_CATEGORIES: tuple[ProductCategory, ...] = (
+    ProductCategory.PHOTOGRAPHY,
+    ProductCategory.DRONE,
+)
 _MPB_BLOCKED_UNTIL_TS = 0.0
 _MPB_BLOCK_REASON = ""
 _MPB_STORAGE_STATE_ERROR = ""
@@ -395,6 +399,82 @@ def _mpb_max_attempts_with_storage_state() -> int:
     except ValueError:
         value = 1
     return max(1, min(value, 4))
+
+
+def _is_mpb_priority_category(category: ProductCategory | None) -> bool:
+    return category in MPB_PRIORITY_CATEGORIES
+
+
+def _mpb_priority_max_attempts_with_storage_state() -> int:
+    raw = (os.getenv("MPB_PRIORITY_MAX_ATTEMPTS_WITH_STORAGE_STATE") or "").strip()
+    try:
+        value = int(raw) if raw else 2
+    except ValueError:
+        value = 2
+    return max(1, min(value, 4))
+
+
+def _mpb_priority_api_query_limit() -> int:
+    raw = (os.getenv("MPB_PRIORITY_API_QUERY_LIMIT") or "").strip()
+    try:
+        value = int(raw) if raw else 2
+    except ValueError:
+        value = 2
+    return max(1, min(value, 3))
+
+
+def _mpb_priority_api_model_limit() -> int:
+    raw = (os.getenv("MPB_PRIORITY_API_MODEL_LIMIT") or "").strip()
+    try:
+        value = int(raw) if raw else 3
+    except ValueError:
+        value = 3
+    return max(1, min(value, 5))
+
+
+def _mpb_priority_api_time_budget_seconds() -> float:
+    raw = (os.getenv("MPB_PRIORITY_API_TIME_BUDGET_SECONDS") or "").strip()
+    try:
+        value = float(raw) if raw else 16.0
+    except ValueError:
+        value = 16.0
+    return max(6.0, min(value, 40.0))
+
+
+def _mpb_priority_api_time_budget_with_storage_state_seconds() -> float:
+    raw = (os.getenv("MPB_PRIORITY_API_TIME_BUDGET_WITH_STORAGE_STATE_SECONDS") or "").strip()
+    try:
+        value = float(raw) if raw else 12.0
+    except ValueError:
+        value = 12.0
+    return max(4.0, min(value, 25.0))
+
+
+def _mpb_priority_total_time_budget_seconds() -> float:
+    raw = (os.getenv("MPB_PRIORITY_TOTAL_TIME_BUDGET_SECONDS") or "").strip()
+    try:
+        value = float(raw) if raw else 18.0
+    except ValueError:
+        value = 18.0
+    return max(8.0, min(value, 60.0))
+
+
+def _mpb_priority_storage_state_time_budget_seconds() -> float:
+    raw = (os.getenv("MPB_PRIORITY_STORAGE_STATE_TIME_BUDGET_SECONDS") or "").strip()
+    try:
+        value = float(raw) if raw else 14.0
+    except ValueError:
+        value = 14.0
+    return max(6.0, min(value, 25.0))
+
+
+def _mpb_priority_page_timeout_with_storage_state_ms() -> int:
+    raw = (os.getenv("MPB_PRIORITY_PAGE_TIMEOUT_WITH_STORAGE_STATE_MS") or "").strip()
+    try:
+        value = int(raw) if raw else 5200
+    except ValueError:
+        value = 5200
+    return max(2200, min(value, 9000))
 
 
 def _load_storage_state_b64() -> str | None:
@@ -1196,6 +1276,9 @@ class MPBValuator(BaseValuator):
         payload: dict[str, Any],
         user_agent: str,
         storage_state_path: str | None = None,
+        query_limit_override: int | None = None,
+        model_limit_override: int | None = None,
+        api_budget_seconds_override: float | None = None,
     ) -> tuple[float | None, str | None]:
         market = _mpb_api_market()
         model_market = _mpb_api_model_market(market)
@@ -1205,11 +1288,17 @@ class MPBValuator(BaseValuator):
         search_path = _mpb_api_search_path(market)
         condition = _mpb_api_condition()
         query_limit = max(1, int(_env_or_default("MPB_API_QUERY_LIMIT", "1")))
+        if query_limit_override is not None:
+            query_limit = max(1, min(int(query_limit_override), 4))
         model_limit = max(1, int(_env_or_default("MPB_API_MODEL_LIMIT", "2")))
+        if model_limit_override is not None:
+            model_limit = max(1, min(int(model_limit_override), 6))
         rows = max(6, min(20, int(_env_or_default("MPB_API_SEARCH_ROWS", "8"))))
         api_budget_seconds = max(6.0, min(40.0, float(_env_or_default("MPB_API_TIME_BUDGET_SECONDS", "12"))))
         continue_on_bootstrap_blockers = _mpb_api_continue_on_bootstrap_blockers()
-        if storage_state_path:
+        if api_budget_seconds_override is not None:
+            api_budget_seconds = max(6.0, min(40.0, float(api_budget_seconds_override)))
+        elif storage_state_path:
             api_budget_seconds = min(api_budget_seconds, _mpb_api_time_budget_with_storage_state_seconds())
         deadline = time.monotonic() + api_budget_seconds
         previous_phase_deadline = payload.get("_phase_deadline_monotonic")
@@ -1453,6 +1542,7 @@ class MPBValuator(BaseValuator):
                 f"MPB temporarily paused after anti-bot challenge ({reason}); retry in ~{blocked_remaining}s.",
                 payload={"block_reason": reason},
             )
+        priority_category = _is_mpb_priority_category(product.category)
         max_attempts = max(1, int(_env_or_default("MPB_MAX_ATTEMPTS", "3")))
         query_candidates = _build_query_variants(product, normalized_name)
         payload: dict[str, Any] = {
@@ -1462,6 +1552,8 @@ class MPBValuator(BaseValuator):
             "attempts": [],
             "adaptive_fallbacks": {},
             "storage_state": False,
+            "priority_category": priority_category,
+            "category": product.category.value,
         }
         rotate_user_agent = _env_or_default("MPB_ROTATE_USER_AGENT", "true").strip().lower() not in {
             "0",
@@ -1473,7 +1565,37 @@ class MPBValuator(BaseValuator):
         storage_state_path = _load_storage_state_b64()
         payload["storage_state"] = bool(storage_state_path)
         if storage_state_path:
-            max_attempts = min(max_attempts, _mpb_max_attempts_with_storage_state())
+            storage_attempt_cap = _mpb_max_attempts_with_storage_state()
+            if priority_category:
+                storage_attempt_cap = max(storage_attempt_cap, _mpb_priority_max_attempts_with_storage_state())
+            max_attempts = min(max_attempts, storage_attempt_cap)
+        api_query_limit_override: int | None = None
+        api_model_limit_override: int | None = None
+        api_budget_seconds_override: float | None = None
+        if priority_category:
+            api_query_limit_override = _mpb_priority_api_query_limit()
+            api_model_limit_override = _mpb_priority_api_model_limit()
+            api_budget_seconds_override = _mpb_priority_api_time_budget_seconds()
+            if storage_state_path:
+                api_budget_seconds_override = max(
+                    api_budget_seconds_override,
+                    _mpb_priority_api_time_budget_with_storage_state_seconds(),
+                )
+        payload["runtime_profile"] = {
+            "priority_category": priority_category,
+            "max_attempts": max_attempts,
+            "api_query_limit": api_query_limit_override,
+            "api_model_limit": api_model_limit_override,
+            "api_budget_s": api_budget_seconds_override,
+        }
+        print(
+            "[mpb] Runtime profile | "
+            f"category={product.category.value} priority={priority_category} "
+            f"storage_state={bool(storage_state_path)} max_attempts={max_attempts} "
+            f"api_query_limit={api_query_limit_override or 'env'} "
+            f"api_model_limit={api_model_limit_override or 'env'} "
+            f"api_budget_s={api_budget_seconds_override or 'env'}"
+        )
         api_enabled = _mpb_api_purchase_price_enabled()
         api_degraded_remaining = _mpb_api_degraded_remaining_seconds()
         if (
@@ -1501,6 +1623,9 @@ class MPBValuator(BaseValuator):
                     payload=payload,
                     user_agent=sticky_user_agent,
                     storage_state_path=storage_state_path,
+                    query_limit_override=api_query_limit_override,
+                    model_limit_override=api_model_limit_override,
+                    api_budget_seconds_override=api_budget_seconds_override,
                 )
             except Exception as exc:
                 payload["api_purchase_price_error"] = str(exc)
@@ -1553,9 +1678,14 @@ class MPBValuator(BaseValuator):
         total_budget_seconds = _mpb_total_time_budget_seconds()
         if storage_state_path:
             total_budget_seconds = min(total_budget_seconds, _mpb_storage_state_time_budget_seconds())
+        if priority_category:
+            total_budget_seconds = max(total_budget_seconds, _mpb_priority_total_time_budget_seconds())
+            if storage_state_path:
+                total_budget_seconds = max(total_budget_seconds, _mpb_priority_storage_state_time_budget_seconds())
         if payload.get("api_purchase_price_skipped"):
             # When API is degraded, keep UI probing short to avoid 25s+ stalls on blocked pages.
-            total_budget_seconds = min(total_budget_seconds, 14.0)
+            degraded_cap = 18.0 if priority_category else 14.0
+            total_budget_seconds = min(total_budget_seconds, degraded_cap)
         deadline = time.monotonic() + total_budget_seconds
         payload["valuation_time_budget_s"] = total_budget_seconds
         payload["_phase_deadline_monotonic"] = deadline
@@ -1642,7 +1772,10 @@ class MPBValuator(BaseValuator):
                         page_default_timeout = _remaining_budget_ms(int(self.nav_timeout_ms), min_ms=1200)
                         if storage_state_path:
                             # Keep storage_state retries fast; long waits here cascade into manager-level timeouts.
-                            page_default_timeout = min(page_default_timeout, 3200)
+                            timeout_cap = 3200
+                            if priority_category:
+                                timeout_cap = _mpb_priority_page_timeout_with_storage_state_ms()
+                            page_default_timeout = min(page_default_timeout, timeout_cap)
                         if page_default_timeout <= 0:
                             await context.close()
                             raise ValuatorRuntimeError(

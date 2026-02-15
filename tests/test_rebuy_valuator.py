@@ -66,6 +66,15 @@ def test_rebuy_assess_match_accepts_specific_sell_flow_url_without_capacity_toke
     assert match["ok"] is True
 
 
+def test_rebuy_assess_match_accepts_specific_product_url_with_sparse_candidate_text() -> None:
+    match = _assess_rebuy_match(
+        normalized_name="Apple iPhone 14 Pro Max 256GB",
+        candidate_text="Apple iPhone 14 Pro Max",
+        source_url="https://www.rebuy.it/vendere/p/apple-iphone-14-pro-max/12684558",
+    )
+    assert match["ok"] is True
+
+
 def test_rebuy_assess_match_rejects_watch_ultra_unversioned_vs_ultra_3() -> None:
     match = _assess_rebuy_match(
         normalized_name="Apple Watch Ultra GPS + Cellular 49mm",
