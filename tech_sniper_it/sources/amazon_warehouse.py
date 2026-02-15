@@ -1339,6 +1339,8 @@ def _cart_direct_add_urls(host: str, asin: str) -> list[str]:
         return []
     return [
         f"https://{host}/gp/aws/cart/add.html?ASIN.1={normalized_asin}&Quantity.1=1",
+        f"https://{host}/gp/product/handle-buy-box/ref=dp_start-bbf_1_glance?ASIN={normalized_asin}&submit.addToCart=1",
+        f"https://{host}/gp/offer-listing/{normalized_asin}/ref=olp_aod_redir_impl1?_encoding=UTF8&buying-option-index=used&quantity=1",
     ]
 
 
@@ -2295,6 +2297,7 @@ async def apply_cart_net_pricing(
                                 f"total={_format_money(pricing.get('total_price'))} "
                                 f"source={pricing.get('net_price_source') or 'n/d'} "
                                 f"cart_addition={pricing.get('cart_addition') or {}} "
+                                f"direct_add={pricing.get('direct_add') or {}} "
                                 f"removed={pricing.get('removed')} "
                                 f"cleanup_asins={pricing.get('cleanup_asins') or []} "
                                 f"failed_remove_asins={pricing.get('failed_remove_asins') or []} "
@@ -2310,6 +2313,7 @@ async def apply_cart_net_pricing(
                                 f"total={_format_money(pricing.get('total_price'))} "
                                 f"source={pricing.get('net_price_source') or 'n/d'} "
                                 f"cart_addition={pricing.get('cart_addition') or {}} "
+                                f"direct_add={pricing.get('direct_add') or {}} "
                                 f"removed={pricing.get('removed')} "
                                 f"cleanup_asins={pricing.get('cleanup_asins') or []} "
                                 f"failed_remove_asins={pricing.get('failed_remove_asins') or []} "

@@ -102,7 +102,9 @@ def test_candidate_product_urls_for_cart_prioritizes_canonical_dp() -> None:
 
 def test_cart_direct_add_urls_builds_asin_endpoint() -> None:
     urls = _cart_direct_add_urls("www.amazon.it", "b0abcde123")
-    assert urls == ["https://www.amazon.it/gp/aws/cart/add.html?ASIN.1=B0ABCDE123&Quantity.1=1"]
+    assert urls[0] == "https://www.amazon.it/gp/aws/cart/add.html?ASIN.1=B0ABCDE123&Quantity.1=1"
+    assert "ASIN=B0ABCDE123&submit.addToCart=1" in urls[1]
+    assert "/gp/offer-listing/B0ABCDE123/" in urls[2]
 
 
 def test_cart_direct_add_fallback_enabled_flag(monkeypatch) -> None:  # noqa: ANN001
