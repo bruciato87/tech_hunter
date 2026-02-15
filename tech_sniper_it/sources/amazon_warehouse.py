@@ -97,6 +97,12 @@ CURRENT_PRICE_SELECTORS: tuple[str, ...] = (
     "span[data-a-price-type='price'] .a-offscreen",
     "span.a-price .a-offscreen",
 )
+WHOLE_FRACTION_PRICE_WRAPPERS: tuple[str, ...] = (
+    "span.a-price",
+    "span[data-a-price-type='price']",
+    "div.a-price",
+    "div[data-a-price-type='price']",
+)
 LIST_PRICE_SELECTORS: tuple[str, ...] = (
     ".a-price.a-text-price .a-offscreen",
     ".a-text-price .a-offscreen",
@@ -162,6 +168,18 @@ INSTALLMENT_HINTS: tuple[str, ...] = (
     "monat",
     "mois",
     "al mes",
+)
+UNIT_PRICE_HINTS: tuple[str, ...] = (
+    "/100",
+    "100 g",
+    "100g",
+    "/kg",
+    "al kg",
+    "au kg",
+    "au kilo",
+    "per kg",
+    "prix au",
+    "precio por",
 )
 EUR_AMOUNT_PATTERN = re.compile(
     r"(?:€\s*\d{1,3}(?:[.\s]\d{3})*(?:,\d{2})?|\d{1,3}(?:[.\s]\d{3})*(?:,\d{2})?\s*€)"
@@ -501,6 +519,8 @@ def _extract_prices_by_selectors(
                 continue
             if price <= 0:
                 continue
+            if any(hint in context_text for hint in UNIT_PRICE_HINTS):
+                continue
             parsed = float(price)
             all_values.append(parsed)
             if any(hint in context_text for hint in INSTALLMENT_HINTS):
@@ -532,6 +552,81 @@ def _extract_all_eur_amounts(text: str) -> list[float]:
             continue
         values.append(float(amount))
     return values
+
+
+def _dedupe_prices(values: list[float]) -> list[float]:
+    deduped: list[float] = []
+    seen: set[float] = set()
+    for value in values:
+        marker = round(float(value), 2)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        deduped.append(marker)
+    return deduped
+
+
+def _parse_whole_fraction_amount(whole_text: str, fraction_text: str) -> float | None:
+    whole_digits = re.sub(r"[^0-9]", "", whole_text or "")
+    if not whole_digits:
+        return None
+    fraction_digits = re.sub(r"[^0-9]", "", fraction_text or "")
+    if fraction_digits:
+        fraction_digits = (fraction_digits + "00")[:2]
+    else:
+        fraction_digits = "00"
+    try:
+        whole_value = int(whole_digits)
+        fraction_value = int(fraction_digits)
+    except ValueError:
+        return None
+    amount = whole_value + (fraction_value / 100.0)
+    if amount <= 0:
+        return None
+    return round(amount, 2)
+
+
+def _extract_prices_from_whole_fraction(
+    row: Any,
+    *,
+    skip_discount_context: bool = False,
+) -> list[float]:
+    values: list[float] = []
+    seen_wrappers: set[int] = set()
+    for wrapper_selector in WHOLE_FRACTION_PRICE_WRAPPERS:
+        for wrapper in row.select(wrapper_selector):
+            marker = id(wrapper)
+            if marker in seen_wrappers:
+                continue
+            seen_wrappers.add(marker)
+            context_chunks = [wrapper.get_text(" ", strip=True)]
+            parent = getattr(wrapper, "parent", None)
+            if parent is not None:
+                context_chunks.append(parent.get_text(" ", strip=True))
+                grandparent = getattr(parent, "parent", None)
+                if grandparent is not None:
+                    context_chunks.append(grandparent.get_text(" ", strip=True))
+            context_text = " ".join(chunk for chunk in context_chunks if chunk).lower()
+            if any(hint in context_text for hint in UNIT_PRICE_HINTS):
+                continue
+            if skip_discount_context and any(hint in context_text for hint in DISCOUNT_HINTS):
+                continue
+
+            whole_nodes = wrapper.select(".a-price-whole")
+            fraction_nodes = wrapper.select(".a-price-fraction")
+            if not whole_nodes:
+                continue
+            for index, whole_node in enumerate(whole_nodes):
+                whole_text = whole_node.get_text(" ", strip=True)
+                fraction_text = ""
+                if index < len(fraction_nodes):
+                    fraction_text = fraction_nodes[index].get_text(" ", strip=True)
+                elif fraction_nodes:
+                    fraction_text = fraction_nodes[0].get_text(" ", strip=True)
+                parsed = _parse_whole_fraction_amount(whole_text, fraction_text)
+                if parsed is not None:
+                    values.append(parsed)
+    return _dedupe_prices(values)
 
 
 def _extract_discount_amounts_from_text(text: str) -> tuple[list[float], list[float]]:
@@ -578,6 +673,13 @@ def _extract_price_details_from_row(row: Any) -> dict[str, float]:
         (".a-price .a-offscreen",),
         skip_discount_context=True,
     )
+    whole_fraction_prices = _extract_prices_from_whole_fraction(
+        row,
+        skip_discount_context=True,
+    )
+    if whole_fraction_prices:
+        current_prices = _dedupe_prices([*current_prices, *whole_fraction_prices])
+        all_prices = _dedupe_prices([*all_prices, *whole_fraction_prices])
     row_text_raw = row.get_text(" ", strip=True)
     row_text = row_text_raw.lower()
     has_installment_hints = any(hint in row_text for hint in INSTALLMENT_HINTS)
@@ -601,6 +703,24 @@ def _extract_price_details_from_row(row: Any) -> dict[str, float]:
             displayed_price = fallback_amounts[0]
     if displayed_price is None:
         return {}
+
+    # Guardrail: reject suspiciously tiny prices when the same row exposes a much larger product amount.
+    if displayed_price < 20:
+        reference_amounts = _dedupe_prices(
+            [
+                *current_prices,
+                *all_prices,
+                *list_prices,
+                *_extract_all_eur_amounts(row_text_raw),
+            ]
+        )
+        higher_candidates = sorted(
+            value
+            for value in reference_amounts
+            if value >= max(80.0, displayed_price * 5.0)
+        )
+        if higher_candidates:
+            displayed_price = float(higher_candidates[0])
 
     list_anchor: float | None = None
     if list_prices:

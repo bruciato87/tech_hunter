@@ -223,6 +223,57 @@ def test_extract_products_from_html_discards_low_outlier_even_without_installmen
     assert item["price_eur"] == 589.0
 
 
+def test_extract_products_from_html_uses_whole_fraction_price_when_offscreen_is_monthly_outlier() -> None:
+    html = """
+    <html>
+      <body>
+        <div data-component-type="s-search-result">
+          <h2>
+            <a href="/Panasonic-Lumix-S5M2X/dp/B0C59742LX/ref=sr_1_1">
+              <span>Panasonic Lumix DC-S5M2X + Lumix S 50mm F1.8</span>
+            </a>
+          </h2>
+          <span class="a-price">
+            <span class="a-offscreen">7,84 €</span>
+            <span class="a-price-whole">784</span>
+            <span class="a-price-fraction">00</span>
+          </span>
+          <span>par mois</span>
+        </div>
+      </body>
+    </html>
+    """
+    items = _extract_products_from_html(html, "www.amazon.fr")
+    assert len(items) == 1
+    item = items[0]
+    assert item["displayed_price_eur"] == 784.0
+    assert item["price_eur"] == 784.0
+    assert item["url"] == "https://www.amazon.fr/dp/B0C59742LX"
+
+
+def test_extract_products_from_html_corrects_tiny_outlier_with_large_row_reference_price() -> None:
+    html = """
+    <html>
+      <body>
+        <div data-component-type="s-search-result">
+          <h2>
+            <a href="/Panasonic-Lumix-S5M2X/dp/B0C59742LX/ref=sr_1_1">
+              <span>Panasonic Lumix DC-S5M2X + Lumix S 50mm F1.8</span>
+            </a>
+          </h2>
+          <span class="a-price"><span class="a-offscreen">7,84 €</span></span>
+          <span>Prix de référence 784,00 €</span>
+        </div>
+      </body>
+    </html>
+    """
+    items = _extract_products_from_html(html, "www.amazon.fr")
+    assert len(items) == 1
+    item = items[0]
+    assert item["displayed_price_eur"] == 784.0
+    assert item["price_eur"] == 784.0
+
+
 def test_extract_products_from_html_rejects_low_current_price_when_list_anchor_indicates_outlier() -> None:
     html = """
     <html>

@@ -2606,7 +2606,7 @@ async def _run_scan_command(payload: dict[str, Any]) -> int:
         max_parallel_products = 3
     max_parallel_products = max(1, min(max_parallel_products, 12))
     print(f"[scan] Loaded products: {len(evaluation_products)} | max_parallel_products={max_parallel_products}")
-    enforce_complete_quotes = _is_truthy_env("SCAN_REQUIRE_COMPLETE_RESELLER_QUOTES", "true") and str(
+    enforce_complete_quotes = _is_truthy_env("SCAN_REQUIRE_COMPLETE_RESELLER_QUOTES", "false") and str(
         payload.get("source", "")
     ).lower() != "manual_debug"
     if scan_mode == "smoke":

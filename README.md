@@ -93,7 +93,7 @@ After this variable is set, `worker.yml` and `smoke.yml` will run on your self-h
 - `SCAN_TARGET_PRODUCTS_BOOST_STEP` (default: `4`, extra products evaluated when boost triggers)
 - `SCAN_DYNAMIC_EXPLORATION_RATIO` (default: `0.35`, share of rotating exploration queries vs historical trend queries)
 - `SCAN_DYNAMIC_TREND_MIN_SCORE` (default: `-35`, minimum trend score required for history-driven query inclusion)
-- `SCAN_REQUIRE_COMPLETE_RESELLER_QUOTES` (default: `true`, keeps only decisions with real quotes from all required reseller strategies for that category)
+- `SCAN_REQUIRE_COMPLETE_RESELLER_QUOTES` (default: `false`, when `true` keeps only decisions with real quotes from all required reseller strategies for that category)
 - `SCAN_RESELLER_REFILL_BATCH_MULTIPLIER` (default: `2`, evaluates extra candidates when quote-complete decisions are missing)
 - `EXCLUDE_MIN_KEEP` (default: `4`, re-includes a small slice of excluded URLs to avoid 0/1-product scans)
 - `EXCLUDE_LOOKBACK_DAYS` (default: `1`)
