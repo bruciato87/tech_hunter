@@ -81,6 +81,7 @@ After this variable is set, `worker.yml` and `smoke.yml` will run on your self-h
 - `OPENROUTER_MODEL_TRANSIENT_COOLDOWN_SECONDS` (default: `120`)
 - `MIN_SPREAD_EUR` (default: `40`)
 - `STRATEGY_PROFILE` (default: `balanced`, one of `conservative|balanced|aggressive`; sets operating cost + risk buffers internally)
+- `SCAN_SCHEDULE_PROFILE` (default: `hourly`, one of `off|hourly|every2h|every3h|every4h|every6h|every8h|every12h|daily`; applied to scheduled GitHub Actions runs)
 - `MAX_PARALLEL_PRODUCTS` (default: `3`)
 - `SCAN_TELEGRAM_INDIVIDUAL_ALERTS` (default: `false`, send one message per opportunity in addition to consolidated scan report)
 - `SCAN_TARGET_PRODUCTS` (default: `16`)
@@ -500,6 +501,7 @@ Heavy operations are delegated to GitHub Actions. Vercel only validates commands
 - `/status` (delegated to GitHub Actions)
 - `/last [n]` (delegated to GitHub Actions, max 10 rows)
 - `/profile [show|conservative|balanced|aggressive]` (reads/updates `STRATEGY_PROFILE` GitHub variable)
+- `/schedule [show|off|hourly|every2h|every3h|every4h|every6h|every8h|every12h|daily]` (reads/updates `SCAN_SCHEDULE_PROFILE` GitHub variable used by scheduled worker runs)
 
 ### Vercel Environment Variables
 
@@ -536,6 +538,7 @@ curl "https://api.telegram.org/bot<TELEGRAM_BOT_TOKEN>/getWebhookInfo"
 - `/id` (collect chat_id and ensure allowlist is correct)
 - `/status` (must enqueue a GitHub Action)
 - `/profile` (shows current strategy profile)
+- `/schedule` (shows current scheduled scan profile)
 - `/scan {"title":"Apple iPhone 14 Pro 128GB","price_eur":679,"category":"apple_phone"}`
 
 3. Confirm in GitHub Actions that the workflow `Tech Sniper IT Worker` starts from repository dispatch.

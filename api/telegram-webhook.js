@@ -2,7 +2,19 @@ const TELEGRAM_API_BASE = "https://api.telegram.org";
 const DEFAULT_DISPATCH_EVENT = "scan";
 const MAX_LAST_LIMIT = 10;
 const STRATEGY_PROFILE_VAR = "STRATEGY_PROFILE";
+const SCAN_SCHEDULE_PROFILE_VAR = "SCAN_SCHEDULE_PROFILE";
 const STRATEGY_PROFILES = new Set(["conservative", "balanced", "aggressive"]);
+const SCHEDULE_PROFILES = new Set([
+  "off",
+  "hourly",
+  "every2h",
+  "every3h",
+  "every4h",
+  "every6h",
+  "every8h",
+  "every12h",
+  "daily",
+]);
 
 function envOrDefault(name, fallback) {
   const value = process.env[name];
@@ -158,6 +170,32 @@ function parseProfileArg(rawArg) {
   return { mode: "set", value: token };
 }
 
+function parseScheduleArg(rawArg) {
+  const raw = (rawArg || "").trim().toLowerCase();
+  if (!raw || raw === "show" || raw === "get" || raw === "status") {
+    return { mode: "show" };
+  }
+  const token = raw.split(/\s+/)[0].replace(/\s+/g, "");
+  const normalized = token
+    .replace(/^disabled$/, "off")
+    .replace(/^none$/, "off")
+    .replace(/^false$/, "off")
+    .replace(/^1h$/, "hourly")
+    .replace(/^every1h$/, "hourly")
+    .replace(/^2h$/, "every2h")
+    .replace(/^3h$/, "every3h")
+    .replace(/^4h$/, "every4h")
+    .replace(/^6h$/, "every6h")
+    .replace(/^8h$/, "every8h")
+    .replace(/^12h$/, "every12h")
+    .replace(/^every24h$/, "daily")
+    .replace(/^24h$/, "daily");
+  if (!SCHEDULE_PROFILES.has(normalized)) {
+    return { mode: "invalid", value: token };
+  }
+  return { mode: "set", value: normalized };
+}
+
 function commandHelpText() {
   return [
     "Tech_Sniper_IT comandi:",
@@ -170,6 +208,7 @@ function commandHelpText() {
     "/status - Stato runtime (via GitHub Actions)",
     "/last [n] - Ultime opportunita da Supabase (via GitHub Actions)",
     "/profile [show|conservative|balanced|aggressive] - Mostra/imposta strategy profile",
+    "/schedule [show|off|hourly|every2h|every3h|every4h|every6h|every8h|every12h|daily] - Mostra/imposta schedulazione scan",
   ].join("\n");
 }
 
@@ -293,6 +332,54 @@ module.exports = async function handler(req, res) {
         botToken,
         chatId,
         `Profilo strategia aggiornato a '${parsed.value}'. Sara applicato alle prossime run.`
+      );
+      return res.status(200).json({ ok: true });
+    }
+
+    if (command === "schedule") {
+      if (!githubReady) {
+        await sendTelegramMessage(
+          botToken,
+          chatId,
+          "Config mancante su Vercel: GITHUB_TOKEN/GITHUB_OWNER/GITHUB_REPO."
+        );
+        return res.status(200).json({ ok: true });
+      }
+      const parsed = parseScheduleArg(args);
+      if (parsed.mode === "invalid") {
+        await sendTelegramMessage(
+          botToken,
+          chatId,
+          "Valore non valido. Usa: /schedule off | hourly | every2h | every3h | every4h | every6h | every8h | every12h | daily"
+        );
+        return res.status(200).json({ ok: true });
+      }
+      if (parsed.mode === "show") {
+        const variable = await getGitHubVariable({
+          githubToken,
+          owner: githubOwner,
+          repo: githubRepo,
+          name: SCAN_SCHEDULE_PROFILE_VAR,
+        });
+        const current = (variable?.value || envOrDefault(SCAN_SCHEDULE_PROFILE_VAR, "hourly")).toLowerCase();
+        await sendTelegramMessage(
+          botToken,
+          chatId,
+          `Schedulazione scan attiva: ${current}\nUsa /schedule off|hourly|every2h|every3h|every4h|every6h|every8h|every12h|daily`
+        );
+        return res.status(200).json({ ok: true });
+      }
+      await upsertGitHubVariable({
+        githubToken,
+        owner: githubOwner,
+        repo: githubRepo,
+        name: SCAN_SCHEDULE_PROFILE_VAR,
+        value: parsed.value,
+      });
+      await sendTelegramMessage(
+        botToken,
+        chatId,
+        `Schedulazione scan aggiornata a '${parsed.value}'. Sara applicata alle prossime run schedulate.`
       );
       return res.status(200).json({ ok: true });
     }

@@ -24,6 +24,7 @@ MAX_LAST_LIMIT = 10
 TELEGRAM_TEXT_LIMIT = 4000
 SCORING_DEFAULT_LOOKBACK_DAYS = 30
 SCORING_DEFAULT_HISTORY_LIMIT = 2000
+DEFAULT_SCAN_SCHEDULE_PROFILE = "hourly"
 
 CATEGORY_REQUIRED_PLATFORMS: dict[ProductCategory, tuple[str, ...]] = {
     ProductCategory.APPLE_PHONE: ("trenddevice", "rebuy"),
@@ -439,6 +440,74 @@ def _resolve_command(event_data: dict[str, Any], payload: dict[str, Any]) -> str
     if action in {"scan", "status", "last"}:
         return action
     return "scan"
+
+
+def _normalized_scan_schedule_profile(raw: str | None) -> str:
+    token = str(raw or "").strip().lower().replace(" ", "")
+    if not token:
+        return DEFAULT_SCAN_SCHEDULE_PROFILE
+    aliases = {
+        "disabled": "off",
+        "none": "off",
+        "false": "off",
+        "1h": "hourly",
+        "every1h": "hourly",
+        "2h": "every2h",
+        "3h": "every3h",
+        "4h": "every4h",
+        "6h": "every6h",
+        "8h": "every8h",
+        "12h": "every12h",
+        "24h": "daily",
+        "every24h": "daily",
+    }
+    normalized = aliases.get(token, token)
+    allowed = {
+        "off",
+        "hourly",
+        "every2h",
+        "every3h",
+        "every4h",
+        "every6h",
+        "every8h",
+        "every12h",
+        "daily",
+    }
+    if normalized in allowed:
+        return normalized
+    return DEFAULT_SCAN_SCHEDULE_PROFILE
+
+
+def _scan_schedule_profile() -> str:
+    return _normalized_scan_schedule_profile(os.getenv("SCAN_SCHEDULE_PROFILE"))
+
+
+def _should_run_scheduled_scan(event_data: dict[str, Any]) -> tuple[bool, str]:
+    event_name = str(os.getenv("GITHUB_EVENT_NAME") or event_data.get("event_name") or "").strip().lower()
+    if event_name != "schedule":
+        return True, "non-schedule-event"
+    profile = _scan_schedule_profile()
+    now_utc = datetime.now(UTC)
+    if profile == "off":
+        return False, "profile=off"
+    if profile == "hourly":
+        return True, "profile=hourly"
+    interval_map: dict[str, int] = {
+        "every2h": 2,
+        "every3h": 3,
+        "every4h": 4,
+        "every6h": 6,
+        "every8h": 8,
+        "every12h": 12,
+    }
+    if profile in interval_map:
+        interval = interval_map[profile]
+        due = (now_utc.hour % interval) == 0
+        return due, f"profile={profile}, hour_utc={now_utc.hour:02d}, interval={interval}h"
+    if profile == "daily":
+        due = now_utc.hour == 0
+        return due, f"profile=daily, hour_utc={now_utc.hour:02d}, target=00"
+    return True, f"profile={profile}"
 
 
 def _telegram_target_chat(payload: dict[str, Any]) -> str | None:
@@ -2804,6 +2873,7 @@ async def _run_status_command(payload: dict[str, Any]) -> int:
         "⚙️ worker: online",
         f"🎯 threshold spread netto: {manager.min_spread_eur:.2f} EUR",
         f"🧭 strategy profile: {strategy.get('profile', 'balanced')}",
+        f"⏱️ schedule profile: {_scan_schedule_profile()}",
         f"🧠 ai: openrouter={'on' if openrouter_present else 'off'}",
         f"🗄️ supabase: {'on' if manager.storage else 'off'}",
         f"💬 telegram alerts default chat: {'on' if manager.notifier else 'off'}",
@@ -2882,6 +2952,10 @@ async def run_worker() -> int:
         return await _run_status_command(payload)
     if command == "last":
         return await _run_last_command(payload)
+    should_run, reason = _should_run_scheduled_scan(event_data)
+    if not should_run:
+        print(f"[scan] Scheduled run skipped | {reason}")
+        return 0
     return await _run_scan_command(payload)
 
 

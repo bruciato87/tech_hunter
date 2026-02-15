@@ -26,6 +26,7 @@ from tech_sniper_it.worker import (
     _format_smoke_summary,
     _is_truthy_env,
     _normalize_http_url,
+    _normalized_scan_schedule_profile,
     _offer_log_payload,
     _parse_last_limit,
     _prioritize_products,
@@ -37,6 +38,7 @@ from tech_sniper_it.worker import (
     _safe_error_details,
     _send_telegram_message,
     _split_complete_quote_decisions,
+    _should_run_scheduled_scan,
     load_products,
     run_worker,
 )
@@ -63,6 +65,34 @@ def test_compute_effective_scan_target_does_not_boost_in_smoke(monkeypatch: pyte
     target, meta = _compute_effective_scan_target(12, candidate_count=99, scan_mode="smoke")
     assert target == 12
     assert meta["reason"] == "smoke-mode"
+
+
+def test_normalized_scan_schedule_profile_defaults_to_hourly() -> None:
+    assert _normalized_scan_schedule_profile("") == "hourly"
+    assert _normalized_scan_schedule_profile("unknown") == "hourly"
+
+
+def test_normalized_scan_schedule_profile_accepts_aliases() -> None:
+    assert _normalized_scan_schedule_profile("2h") == "every2h"
+    assert _normalized_scan_schedule_profile("every12h") == "every12h"
+    assert _normalized_scan_schedule_profile("disabled") == "off"
+    assert _normalized_scan_schedule_profile("24h") == "daily"
+
+
+def test_should_run_scheduled_scan_off_profile(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("GITHUB_EVENT_NAME", "schedule")
+    monkeypatch.setenv("SCAN_SCHEDULE_PROFILE", "off")
+    should_run, reason = _should_run_scheduled_scan({})
+    assert should_run is False
+    assert "profile=off" in reason
+
+
+def test_should_run_scheduled_scan_non_schedule_event(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("GITHUB_EVENT_NAME", "repository_dispatch")
+    monkeypatch.setenv("SCAN_SCHEDULE_PROFILE", "off")
+    should_run, reason = _should_run_scheduled_scan({})
+    assert should_run is True
+    assert reason == "non-schedule-event"
 
 
 def test_coerce_product_detects_smartwatch_and_condition() -> None:
