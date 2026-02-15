@@ -6,6 +6,8 @@ import os
 
 from tech_sniper_it.sources.amazon_warehouse import (
     _candidate_product_urls_for_cart,
+    _cart_direct_add_urls,
+    _cart_pricing_direct_add_fallback_enabled,
     _build_cart_cleanup_asins,
     _canonical_amazon_url,
     _decode_storage_state_b64,
@@ -96,6 +98,18 @@ def test_candidate_product_urls_for_cart_prioritizes_canonical_dp() -> None:
     assert urls[0] == "https://www.amazon.it/dp/B0ABCDE123"
     assert "https://www.amazon.it/dp/B0ABCDE123?psc=1&th=1" in urls
     assert "https://www.amazon.it/gp/aw/d/B0ABCDE123" in urls
+
+
+def test_cart_direct_add_urls_builds_asin_endpoint() -> None:
+    urls = _cart_direct_add_urls("www.amazon.it", "b0abcde123")
+    assert urls == ["https://www.amazon.it/gp/aws/cart/add.html?ASIN.1=B0ABCDE123&Quantity.1=1"]
+
+
+def test_cart_direct_add_fallback_enabled_flag(monkeypatch) -> None:  # noqa: ANN001
+    monkeypatch.setenv("AMAZON_WAREHOUSE_CART_PRICING_DIRECT_ADD_FALLBACK", "false")
+    assert _cart_pricing_direct_add_fallback_enabled() is False
+    monkeypatch.setenv("AMAZON_WAREHOUSE_CART_PRICING_DIRECT_ADD_FALLBACK", "true")
+    assert _cart_pricing_direct_add_fallback_enabled() is True
 
 
 def test_expand_marketplaces_handles_eu_alias() -> None:

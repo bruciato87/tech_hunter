@@ -1019,6 +1019,10 @@ def _cart_pricing_retry_wait_ms() -> int:
     return max(250, min(value, 6000))
 
 
+def _cart_pricing_direct_add_fallback_enabled() -> bool:
+    return _is_truthy_env("AMAZON_WAREHOUSE_CART_PRICING_DIRECT_ADD_FALLBACK", "true")
+
+
 def _retry_delay_for_attempt(base_ms: int, attempt: int) -> int:
     multiplier = max(1, 2 ** max(0, attempt - 1))
     jitter = random.randint(0, 250)
@@ -1329,6 +1333,15 @@ def _cart_url_for_host(host: str) -> str:
     return f"https://{host}/gp/cart/view.html?ref_=nav_cart"
 
 
+def _cart_direct_add_urls(host: str, asin: str) -> list[str]:
+    normalized_asin = (asin or "").strip().upper()
+    if not normalized_asin:
+        return []
+    return [
+        f"https://{host}/gp/aws/cart/add.html?ASIN.1={normalized_asin}&Quantity.1=1",
+    ]
+
+
 def _collect_cart_rows(soup: BeautifulSoup) -> list[Any]:
     rows: list[Any] = []
     seen: set[int] = set()
@@ -1484,6 +1497,24 @@ async def _read_cart_summary(page, *, host: str, asin: str | None) -> dict[str, 
     return summary
 
 
+async def _read_cart_summary_with_recovery(page, *, host: str, asin: str | None) -> dict[str, Any]:  # noqa: ANN001
+    summary = await _read_cart_summary(page, host=host, asin=asin)
+    barriers = set(summary.get("barriers", []))
+    if not ({"signin", "captcha", "sorry-page"} & barriers):
+        summary["recovered"] = False
+        return summary
+    try:
+        await page.goto(f"https://{host}/", wait_until="domcontentloaded")
+        await _accept_cookie_if_present(page)
+        await page.wait_for_timeout(700)
+    except Exception:
+        summary["recovered"] = False
+        return summary
+    retry = await _read_cart_summary(page, host=host, asin=asin)
+    retry["recovered"] = True
+    return retry
+
+
 async def _navigate_product_page_for_cart(  # noqa: ANN001
     page,
     *,
@@ -1508,6 +1539,25 @@ async def _navigate_product_page_for_cart(  # noqa: ANN001
         except Exception:
             continue
     return None, seen_blockers
+
+
+async def _direct_add_to_cart_by_asin(page, *, host: str, asin: str) -> tuple[bool, set[str]]:  # noqa: ANN001
+    blockers_seen: set[str] = set()
+    for index, candidate_url in enumerate(_cart_direct_add_urls(host, asin)):
+        try:
+            await page.goto(candidate_url, wait_until="domcontentloaded")
+            await _accept_cookie_if_present(page)
+            await page.wait_for_timeout(700 + (index * 200))
+            html = await page.content()
+            title = await page.title()
+            blockers = set(_detect_page_barriers(html, title))
+            if {"signin", "captcha", "sorry-page"} & blockers:
+                blockers_seen.update(blockers)
+                continue
+            return True, blockers_seen
+        except Exception:
+            continue
+    return False, blockers_seen
 
 
 def _positive_delta(after_value: Any, before_value: Any) -> float | None:
@@ -1911,7 +1961,7 @@ async def _resolve_cart_net_price(
         result["reason"] = "missing-asin"
         return result
 
-    before = await _read_cart_summary(page, host=host, asin=asin)
+    before = await _read_cart_summary_with_recovery(page, host=host, asin=asin)
     barriers = set(before.get("barriers", []))
     if {"signin", "captcha", "sorry-page"} & barriers:
         result["reason"] = "cart-unavailable"
@@ -1935,21 +1985,50 @@ async def _resolve_cart_net_price(
             product_url=product_url,
             asin=asin,
         )
+        add_ok = False
+        direct_add_used = False
         if not loaded_url:
-            if seen_blockers:
-                result["reason_hint"] = f"blocked={'/'.join(sorted(seen_blockers))}"
-            result["reason"] = "product-page-blocked"
-            return result
-        result["resolved_product_url"] = loaded_url
-
-        add_ok = await _click_add_to_cart(page)
+            if _cart_pricing_direct_add_fallback_enabled():
+                direct_ok, direct_blockers = await _direct_add_to_cart_by_asin(page, host=host, asin=asin)
+                result["direct_add"] = {
+                    "attempted": True,
+                    "ok": bool(direct_ok),
+                    "blockers": sorted(direct_blockers),
+                }
+                if direct_ok:
+                    add_ok = True
+                    direct_add_used = True
+                else:
+                    if seen_blockers or direct_blockers:
+                        all_blockers = sorted(set(seen_blockers) | set(direct_blockers))
+                        result["reason_hint"] = f"blocked={'/'.join(all_blockers)}"
+                    result["reason"] = "product-page-blocked"
+                    return result
+            else:
+                if seen_blockers:
+                    result["reason_hint"] = f"blocked={'/'.join(sorted(seen_blockers))}"
+                result["reason"] = "product-page-blocked"
+                return result
+        else:
+            result["resolved_product_url"] = loaded_url
+            add_ok = await _click_add_to_cart(page)
+            if not add_ok and _cart_pricing_direct_add_fallback_enabled():
+                direct_ok, direct_blockers = await _direct_add_to_cart_by_asin(page, host=host, asin=asin)
+                result["direct_add"] = {
+                    "attempted": True,
+                    "ok": bool(direct_ok),
+                    "blockers": sorted(direct_blockers),
+                }
+                if direct_ok:
+                    add_ok = True
+                    direct_add_used = True
         if not add_ok:
             result["reason"] = "add-to-cart-unavailable"
             return result
         added = True
         result["added"] = True
         retry_wait_ms = _cart_pricing_retry_wait_ms()
-        await page.wait_for_timeout(retry_wait_ms)
+        await page.wait_for_timeout(retry_wait_ms + (300 if direct_add_used else 0))
 
         attempts = 0
         max_add_attempts = 1 + _cart_pricing_add_retries()
@@ -1957,7 +2036,7 @@ async def _resolve_cart_net_price(
         after: dict[str, Any] | None = None
         while attempts < max_add_attempts:
             attempts += 1
-            after = await _read_cart_summary(page, host=host, asin=asin)
+            after = await _read_cart_summary_with_recovery(page, host=host, asin=asin)
             after_summary = after
             addition = _infer_cart_addition(before, after, asin)
             if addition.get("added"):

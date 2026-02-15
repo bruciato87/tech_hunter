@@ -161,6 +161,7 @@ After this variable is set, `worker.yml` and `smoke.yml` will run on your self-h
 - `AMAZON_WAREHOUSE_CART_PRICING_MAX_ITEMS` (default: `4`, max candidates per scan validated via cart)
 - `AMAZON_WAREHOUSE_CART_PRICING_REQUIRE_EMPTY_CART` (default: `true`, skip cart validation unless cart is empty to avoid side effects)
 - `AMAZON_WAREHOUSE_CART_PRICING_ALLOW_DELTA` (default: `true`, when cart is not empty computes candidate net price from before/after cart delta)
+- `AMAZON_WAREHOUSE_CART_PRICING_DIRECT_ADD_FALLBACK` (default: `true`, if product page/cart button is blocked, tries direct ASIN cart-add endpoint to recover net-price coverage)
 - `AMAZON_WAREHOUSE_CART_PRICING_FORCE_EMPTY_AFTER_HOST` (default: `true`, hard-cleanup cart at end of each host session)
 - `AMAZON_WAREHOUSE_DEBUG_ON_EMPTY` (default: `true`, saves diagnostic dump on zero parsed results)
 - `AMAZON_WAREHOUSE_DEBUG_DIR` (default: `/tmp/tech_sniper_it_debug`)
