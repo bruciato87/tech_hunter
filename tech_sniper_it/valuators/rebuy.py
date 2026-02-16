@@ -86,6 +86,60 @@ ANCHOR_TOKENS: tuple[str, ...] = (
     "playstation",
     "xbox",
 )
+BRAND_HINTS: dict[str, tuple[str, ...]] = {
+    "apple": ("apple", "iphone", "ipad", "macbook", "applewatch"),
+    "xiaomi": ("xiaomi", "redmi", "poco"),
+    "microsoft": ("microsoft", "surface"),
+    "samsung": ("samsung", "galaxy"),
+    "google": ("google", "pixel"),
+    "huawei": ("huawei",),
+    "oneplus": ("oneplus",),
+    "oppo": ("oppo",),
+    "vivo": ("vivo",),
+    "realme": ("realme",),
+    "nokia": ("nokia",),
+    "motorola": ("motorola", " moto "),
+    "honor": ("honor",),
+    "sony": ("sony", "xperia"),
+    "asus": ("asus", "rog"),
+    "lenovo": ("lenovo", "legion"),
+    "dji": ("dji",),
+    "garmin": ("garmin",),
+    "valve": ("valve", "steam deck"),
+    "nintendo": ("nintendo", "switch"),
+}
+PHONE_FAMILY_HINTS: tuple[str, ...] = (
+    "smartphone",
+    "cellular",
+    "telefono",
+    "iphone",
+    "xiaomi",
+    "redmi",
+    "samsung",
+    "galaxy",
+    "pixel",
+    "oneplus",
+    "huawei",
+    "oppo",
+    "vivo",
+    "realme",
+    "motorola",
+    "nokia",
+    "honor",
+)
+TABLET_PC_FAMILY_HINTS: tuple[str, ...] = (
+    "tablet",
+    "ebook-reader",
+    "ebook reader",
+    "ipad",
+    "surface",
+    "macbook",
+    "notebook",
+    "laptop",
+    "chromebook",
+    "mac mini",
+    "imac",
+)
 GENERIC_REBUY_CATEGORIES: set[str] = {
     "apple",
     "samsung",
@@ -572,6 +626,18 @@ def _query_tokens(value: str) -> list[str]:
     return ranked
 
 
+def _token_in_text(token: str, text: str) -> bool:
+    token_norm = _normalize_match_text(token)
+    if not token_norm:
+        return False
+    boundary_pattern = rf"(?<![a-z0-9]){re.escape(token_norm)}(?![a-z0-9])"
+    if re.search(boundary_pattern, text):
+        return True
+    if len(token_norm) >= 5 and re.search(r"[a-z]", token_norm):
+        return token_norm in text
+    return False
+
+
 def _capacity_tokens(value: str) -> list[str]:
     normalized = _normalize_match_text(value)
     return sorted(set(match.group(0).replace(" ", "").lower() for match in CAPACITY_TOKEN_PATTERN.finditer(normalized)))
@@ -596,6 +662,30 @@ def _extract_model_number_map(text: str) -> dict[str, set[str]]:
         "watch_series": _extract_anchor_numbers(normalized, r"\bwatch[\s\-]*series[\s\-]*(\d{1,2})\b"),
         "watch_ultra": _extract_anchor_numbers(normalized, r"\bwatch[\s\-]*ultra[\s\-]*(\d{1,2})\b"),
     }
+
+
+def _brand_signature(text: str) -> set[str]:
+    normalized = _normalize_match_text(text)
+    brands: set[str] = set()
+    if not normalized:
+        return brands
+    for canonical, hints in BRAND_HINTS.items():
+        if any(hint in normalized for hint in hints):
+            brands.add(canonical)
+    return brands
+
+
+def _device_family(text: str) -> str | None:
+    normalized = _normalize_match_text(text)
+    if not normalized:
+        return None
+    phone_hit = any(hint in normalized for hint in PHONE_FAMILY_HINTS)
+    tablet_pc_hit = any(hint in normalized for hint in TABLET_PC_FAMILY_HINTS)
+    if phone_hit and not tablet_pc_hit:
+        return "phone"
+    if tablet_pc_hit and not phone_hit:
+        return "tablet_pc"
+    return None
 
 
 def _is_watch_ultra_unversioned(text: str) -> bool:
@@ -711,6 +801,10 @@ def _assess_rebuy_match(
     )
     url_only_norm = _normalize_match_text(url_parts)
     candidate_norm = _normalize_match_text(f"{candidate_text} {url_parts}")
+    query_brands = _brand_signature(query_norm)
+    candidate_brands = _brand_signature(candidate_norm)
+    query_family = _device_family(query_norm)
+    candidate_family = _device_family(candidate_norm)
 
     ratio = SequenceMatcher(None, query_norm, candidate_norm).ratio() if query_norm and candidate_norm else 0.0
     tokens = _query_tokens(normalized_name)
@@ -735,8 +829,8 @@ def _assess_rebuy_match(
         if len(required_tokens) >= 6:
             break
 
-    hit_tokens = [token for token in required_tokens if token and token in candidate_norm]
-    anchor_hits = [token for token in query_anchors if token in candidate_norm]
+    hit_tokens = [token for token in required_tokens if token and _token_in_text(token, candidate_norm)]
+    anchor_hits = [token for token in query_anchors if _token_in_text(token, candidate_norm)]
     capacity_hits = [token for token in capacities if token in candidate_norm.replace(" ", "")]
     query_numbers = _extract_model_number_map(query_norm)
     candidate_numbers = _extract_model_number_map(candidate_norm)
@@ -744,6 +838,38 @@ def _assess_rebuy_match(
     url_capacities = _capacity_tokens(url_only_norm)
     token_ratio = (len(hit_tokens) / len(required_tokens)) if required_tokens else 0.0
     generic_url = _is_generic_rebuy_url(source_url)
+    if query_brands and candidate_brands and query_brands.isdisjoint(candidate_brands):
+        return {
+            "ok": False,
+            "reason": "brand-mismatch",
+            "score": int((ratio * 100) + (len(hit_tokens) * 14) + (len(anchor_hits) * 8)),
+            "ratio": round(ratio, 3),
+            "token_ratio": round(token_ratio, 3),
+            "generic_url": generic_url,
+            "generic_override": False,
+            "query_brands": sorted(query_brands),
+            "candidate_brands": sorted(candidate_brands),
+            "hit_tokens": hit_tokens,
+            "required_tokens": required_tokens,
+        }
+    if (
+        query_family is not None
+        and candidate_family is not None
+        and {query_family, candidate_family} == {"phone", "tablet_pc"}
+    ):
+        return {
+            "ok": False,
+            "reason": "device-class-mismatch",
+            "score": int((ratio * 100) + (len(hit_tokens) * 14) + (len(anchor_hits) * 8)),
+            "ratio": round(ratio, 3),
+            "token_ratio": round(token_ratio, 3),
+            "generic_url": generic_url,
+            "generic_override": False,
+            "query_family": query_family,
+            "candidate_family": candidate_family,
+            "hit_tokens": hit_tokens,
+            "required_tokens": required_tokens,
+        }
     for anchor_key, query_values in query_numbers.items():
         url_values = url_numbers.get(anchor_key, set())
         if query_values and url_values and query_values.isdisjoint(url_values):

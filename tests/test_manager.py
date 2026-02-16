@@ -528,6 +528,46 @@ async def test_manager_quote_verification_rejects_rebuy_variant_display_size_mis
 
 
 @pytest.mark.asyncio
+async def test_manager_quote_verification_rejects_rebuy_phone_vs_tablet_brand_mismatch() -> None:
+    manager = ManagerUnderTest(
+        valuators=[
+            StaticValuator(
+                "rebuy",
+                361.44,
+                source_url=(
+                    "https://www.rebuy.it/vendere/tablet-e-ebook-reader/"
+                    "microsoft-surface-pro-8-13-intel-evo-i5-256gb-ssd-8gb-ram-wifi-platino_12283088"
+                ),
+                raw_payload={
+                    "price_text": "Pagamento Diretto 361,44 €",
+                    "price_source": "ry-inject",
+                    "query": "Xiaomi Redmi Note 12 Pro+ 5G 8GB RAM 256GB Midnight",
+                    "match_quality": {"ok": True, "reason": "ok", "token_ratio": 0.72},
+                },
+            )
+        ],
+        ai_balancer=TitleBalancer(gemini_keys=[], openrouter_keys=[]),
+        min_spread_eur=40.0,
+    )
+    product = AmazonProduct(
+        title="Xiaomi Redmi Note 12 Pro+ 5G 8GB RAM 256GB Midnight Black",
+        price_eur=279.9,
+        category=ProductCategory.GENERAL_TECH,
+    )
+
+    decision = await manager.evaluate_product(product)
+
+    assert decision.best_offer is None
+    assert decision.should_notify is False
+    assert decision.offers[0].error is not None
+    assert "quote verification failed" in str(decision.offers[0].error)
+    assert (
+        "source-brand-mismatch" in str(decision.offers[0].error)
+        or "source-device-class-mismatch" in str(decision.offers[0].error)
+    )
+
+
+@pytest.mark.asyncio
 async def test_manager_quote_verification_accepts_rebuy_generic_url_with_strong_override() -> None:
     manager = ManagerUnderTest(
         valuators=[

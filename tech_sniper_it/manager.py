@@ -83,6 +83,60 @@ _PHONE_ANCHORS = ("iphone",)
 _DRONE_ANCHORS = ("drone", "dji", "mavic", "avata", "quadcopter")
 _HANDHELD_ANCHORS = ("steam deck", "rog ally", "legion go", "nintendo switch", "playstation portal")
 _APPLE_WATCH_ANCHORS = ("apple watch", "applewatch")
+_PHONE_FAMILY_HINTS = (
+    "smartphone",
+    "cellular",
+    "telefono",
+    "iphone",
+    "xiaomi",
+    "redmi",
+    "samsung",
+    "galaxy",
+    "pixel",
+    "oneplus",
+    "huawei",
+    "oppo",
+    "vivo",
+    "realme",
+    "motorola",
+    "nokia",
+    "honor",
+)
+_TABLET_PC_FAMILY_HINTS = (
+    "tablet",
+    "ebook-reader",
+    "ebook reader",
+    "ipad",
+    "surface",
+    "macbook",
+    "notebook",
+    "laptop",
+    "chromebook",
+    "mac mini",
+    "imac",
+)
+_BRAND_HINTS: dict[str, tuple[str, ...]] = {
+    "apple": ("apple", "iphone", "ipad", "macbook", "applewatch"),
+    "xiaomi": ("xiaomi", "redmi", "poco"),
+    "microsoft": ("microsoft", "surface"),
+    "samsung": ("samsung", "galaxy"),
+    "google": ("google", "pixel"),
+    "huawei": ("huawei",),
+    "oneplus": ("oneplus",),
+    "oppo": ("oppo",),
+    "vivo": ("vivo",),
+    "realme": ("realme",),
+    "nokia": ("nokia",),
+    "motorola": ("motorola", " moto "),
+    "honor": ("honor",),
+    "sony": ("sony", "xperia"),
+    "asus": ("asus", "rog"),
+    "lenovo": ("lenovo", "legion"),
+    "dji": ("dji",),
+    "garmin": ("garmin",),
+    "valve": ("valve", "steam deck"),
+    "nintendo": ("nintendo", "switch"),
+}
 
 
 def _compact_text(value: str | None) -> str:
@@ -92,6 +146,46 @@ def _compact_text(value: str | None) -> str:
 def _contains_any(value: str, anchors: tuple[str, ...]) -> bool:
     lowered = value.casefold()
     return any(anchor in lowered for anchor in anchors)
+
+
+def _brand_signature(value: str | None) -> set[str]:
+    normalized = _compact_text(value).casefold()
+    if not normalized:
+        return set()
+    brands: set[str] = set()
+    for canonical, hints in _BRAND_HINTS.items():
+        if any(hint in normalized for hint in hints):
+            brands.add(canonical)
+    return brands
+
+
+def _device_family(value: str | None) -> str | None:
+    normalized = _compact_text(value).casefold()
+    if not normalized:
+        return None
+    phone_hit = any(hint in normalized for hint in _PHONE_FAMILY_HINTS)
+    tablet_pc_hit = any(hint in normalized for hint in _TABLET_PC_FAMILY_HINTS)
+    if phone_hit and not tablet_pc_hit:
+        return "phone"
+    if tablet_pc_hit and not phone_hit:
+        return "tablet_pc"
+    return None
+
+
+def _source_brand_mismatch(reference: str | None, candidate: str | None) -> bool:
+    reference_brands = _brand_signature(reference)
+    candidate_brands = _brand_signature(candidate)
+    return bool(reference_brands and candidate_brands and reference_brands.isdisjoint(candidate_brands))
+
+
+def _source_device_class_mismatch(reference: str | None, candidate: str | None) -> bool:
+    reference_family = _device_family(reference)
+    candidate_family = _device_family(candidate)
+    return bool(
+        reference_family is not None
+        and candidate_family is not None
+        and {reference_family, candidate_family} == {"phone", "tablet_pc"}
+    )
 
 
 def _is_apple_watch_context(product: AmazonProduct, normalized_name: str) -> bool:
@@ -840,10 +934,16 @@ def _verify_real_resale_quote(result: ValuationResult) -> ValuationResult:
         checks["candidate_storage_tokens"] = sorted(candidate_storage_tokens)
         checks["query_display_tokens"] = sorted(query_display_tokens)
         checks["candidate_display_tokens"] = sorted(candidate_display_tokens)
+        checks["source_brands"] = sorted(_brand_signature(original_title))
+        checks["candidate_brands"] = sorted(_brand_signature(candidate_variant_context))
         if query_storage_tokens and candidate_storage_tokens and not query_storage_tokens.intersection(candidate_storage_tokens):
             reasons.append("variant-storage-mismatch")
         if query_display_tokens and candidate_display_tokens and not query_display_tokens.intersection(candidate_display_tokens):
             reasons.append("variant-display-size-mismatch")
+        if _source_brand_mismatch(original_title, candidate_variant_context):
+            reasons.append("source-brand-mismatch")
+        if _source_device_class_mismatch(original_title, candidate_variant_context):
+            reasons.append("source-device-class-mismatch")
         if original_title and _watch_generation_mismatch(original_title, candidate_variant_context):
             reasons.append("source-watch-generation-mismatch")
         if not price_text:
@@ -874,8 +974,14 @@ def _verify_real_resale_quote(result: ValuationResult) -> ValuationResult:
         candidate_display_tokens = _display_size_tokens(candidate_context)
         checks["query_display_tokens"] = sorted(query_display_tokens)
         checks["candidate_display_tokens"] = sorted(candidate_display_tokens)
+        checks["source_brands"] = sorted(_brand_signature(original_title))
+        checks["candidate_brands"] = sorted(_brand_signature(candidate_context))
         if query_display_tokens and candidate_display_tokens and not query_display_tokens.intersection(candidate_display_tokens):
             reasons.append("variant-display-size-mismatch")
+        if _source_brand_mismatch(original_title, candidate_context):
+            reasons.append("source-brand-mismatch")
+        if _source_device_class_mismatch(original_title, candidate_context):
+            reasons.append("source-device-class-mismatch")
         if original_title and _watch_generation_mismatch(original_title, candidate_context):
             reasons.append("source-watch-generation-mismatch")
         if not price_text:
@@ -916,8 +1022,14 @@ def _verify_real_resale_quote(result: ValuationResult) -> ValuationResult:
         candidate_display_tokens = _display_size_tokens(candidate_context)
         checks["query_display_tokens"] = sorted(query_display_tokens)
         checks["candidate_display_tokens"] = sorted(candidate_display_tokens)
+        checks["source_brands"] = sorted(_brand_signature(original_title))
+        checks["candidate_brands"] = sorted(_brand_signature(candidate_context))
         if query_display_tokens and candidate_display_tokens and not query_display_tokens.intersection(candidate_display_tokens):
             reasons.append("variant-display-size-mismatch")
+        if _source_brand_mismatch(original_title, candidate_context):
+            reasons.append("source-brand-mismatch")
+        if _source_device_class_mismatch(original_title, candidate_context):
+            reasons.append("source-device-class-mismatch")
         if original_title and _watch_generation_mismatch(original_title, candidate_context):
             reasons.append("source-watch-generation-mismatch")
         if not checks["price_source"] and not price_text:

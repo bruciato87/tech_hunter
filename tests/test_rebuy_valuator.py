@@ -118,6 +118,19 @@ def test_rebuy_assess_match_rejects_garmin_fenix_e_vs_fenix_8_pro() -> None:
     assert match["reason"] == "model-generation-mismatch"
 
 
+def test_rebuy_assess_match_rejects_phone_vs_surface_tablet_mismatch() -> None:
+    match = _assess_rebuy_match(
+        normalized_name="Xiaomi Redmi Note 12 Pro+ 5G 8GB RAM 256GB Midnight",
+        candidate_text="Microsoft Surface Pro 8 13 Intel Evo i5 256GB SSD 8GB RAM Wi-Fi",
+        source_url=(
+            "https://www.rebuy.it/vendere/tablet-e-ebook-reader/"
+            "microsoft-surface-pro-8-13-intel-evo-i5-256gb-ssd-8gb-ram-wifi-platino_12283088"
+        ),
+    )
+    assert match["ok"] is False
+    assert match["reason"] in {"brand-mismatch", "device-class-mismatch"}
+
+
 def test_rebuy_assess_match_accepts_garmin_fenix_e_when_variant_matches() -> None:
     match = _assess_rebuy_match(
         normalized_name="Garmin fēnix E 47mm 16GB",
