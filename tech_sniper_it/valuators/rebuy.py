@@ -5,6 +5,7 @@ import json
 import os
 import re
 import tempfile
+import unicodedata
 from difflib import SequenceMatcher
 from typing import Any
 from urllib.parse import quote_plus, unquote, urljoin, urlparse
@@ -548,7 +549,9 @@ def _extract_rebuy_product_link_candidates(
 
 
 def _normalize_match_text(value: str | None) -> str:
-    raw = (value or "").lower()
+    raw = unicodedata.normalize("NFKD", value or "")
+    raw = "".join(ch for ch in raw if not unicodedata.combining(ch))
+    raw = raw.lower()
     raw = re.sub(r"[%/]", " ", raw)
     raw = re.sub(r"[^a-z0-9+\- ]+", " ", raw)
     raw = re.sub(r"\s+", " ", raw).strip()
@@ -588,7 +591,7 @@ def _extract_model_number_map(text: str) -> dict[str, set[str]]:
     return {
         "iphone": _extract_anchor_numbers(normalized, r"\biphone[\s\-]*(\d{1,2})\b"),
         "forerunner": _extract_anchor_numbers(normalized, r"\bforerunner[\s\-]*(\d{3,4})\b"),
-        "fenix": _extract_anchor_numbers(normalized, r"\bfenix[\s\-]*(\d{1,2})\b"),
+        "fenix": _extract_anchor_numbers(normalized, r"\bfenix[\s\-]*(e|\d{1,2})\b"),
         "dji_mini": _extract_anchor_numbers(normalized, r"\bdji[\s\-]*mini[\s\-]*(\d{1,2})\b"),
         "watch_series": _extract_anchor_numbers(normalized, r"\bwatch[\s\-]*series[\s\-]*(\d{1,2})\b"),
         "watch_ultra": _extract_anchor_numbers(normalized, r"\bwatch[\s\-]*ultra[\s\-]*(\d{1,2})\b"),

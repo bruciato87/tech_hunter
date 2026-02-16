@@ -105,6 +105,28 @@ def test_rebuy_assess_match_rejects_generation_mismatch_even_with_query_like_tex
     assert match["reason"] == "model-generation-mismatch"
 
 
+def test_rebuy_assess_match_rejects_garmin_fenix_e_vs_fenix_8_pro() -> None:
+    match = _assess_rebuy_match(
+        normalized_name="Garmin fēnix E 47mm 16GB",
+        candidate_text="Garmin fenix 8 pro 51 mm",
+        source_url=(
+            "https://www.rebuy.it/vendere/orologi-sportivi/"
+            "garmin-fenix-8-pro-51-mm-grigio-carbonio-con-cinturino-in-silicone-colore-nero-wi-fi-amoled-edition_21509944"
+        ),
+    )
+    assert match["ok"] is False
+    assert match["reason"] == "model-generation-mismatch"
+
+
+def test_rebuy_assess_match_accepts_garmin_fenix_e_when_variant_matches() -> None:
+    match = _assess_rebuy_match(
+        normalized_name="Garmin fēnix E 47mm 16GB",
+        candidate_text="Garmin fenix E 47mm 16GB",
+        source_url="https://www.rebuy.it/vendere/p/garmin-fenix-e/21599999",
+    )
+    assert match["ok"] is True
+
+
 def test_rebuy_assess_match_rejects_capacity_mismatch_from_url() -> None:
     match = _assess_rebuy_match(
         normalized_name='Apple iPad Air 13" M3 256GB',
